@@ -1,0 +1,28 @@
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Downloaded binaries (user gets these via doctor --fix)
+qdrant.zip
+qdrant-bin/
+qdrant-data/
+ort.zip
+ort124.zip
+ort-tmp/
+ort124-tmp/
+.qdrant-initialized
+
+# Vault data (never commit secrets)
+vault.*
+
+# MCP server
+mcp-server/node_modules/
+mcp-server/package-lock.json

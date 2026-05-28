@@ -1,0 +1,63 @@
+[package]
+name = "mgi-mind"
+version = "0.1.0"
+edition = "2024"
+authors = ["Mad God Inc"]
+description = "AI-native second brain. Self-hosted, token-optimized memory for AI assistants."
+license = "Apache-2.0"
+repository = "https://github.com/madgodinc/mgi-mind"
+
+[[bin]]
+name = "mgimind"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Qdrant vector database
+qdrant-client = "1"
+
+# ONNX Runtime for local embeddings
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+
+# Tokenizer for embedding models
+tokenizers = "0.21"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File system
+dirs = "6"
+
+# Hashing for deduplication
+blake3 = "1"
+
+# Thread-safe lazy initialization
+once_cell = "1"
+
+# Encoding for vault
+base64 = "0.22"
+
+# Encryption for vault
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
