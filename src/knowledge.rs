@@ -51,7 +51,7 @@ pub async fn add_fact(
     storage::ensure_facts_collection(&client, config.vector_size).await?;
 
     let text = format!("{subject} {predicate} {object}");
-    let embedding = embedder::embed(config, &text).await?;
+    let embedding = embedder::embed_passage(config, &text).await?;
     // Same model-swap guard the memory path has (audit #11): the facts
     // collection was previously left unprotected.
     storage::check_dim(&embedding, config)?;

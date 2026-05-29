@@ -6,6 +6,15 @@ fn default_vector_size() -> u64 {
     384
 }
 
+fn default_pooling() -> String {
+    // MiniLM uses mean pooling; XLM-R models (e.g. bge-m3) use CLS pooling.
+    "mean".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MindConfig {
     pub version: String,
@@ -19,17 +28,41 @@ pub struct MindConfig {
     /// and the client authenticates (audit #7). `None` = local-only, no auth.
     #[serde(default)]
     pub qdrant_api_key: Option<String>,
+    /// Pooling strategy for the embedding model: "mean" (MiniLM / sentence-
+    /// transformers) or "cls" (XLM-R models like bge-m3). Audit #21.
+    #[serde(default = "default_pooling")]
+    pub pooling: String,
+    /// Whether the ONNX model expects a `token_type_ids` input. True for BERT-
+    /// family (MiniLM); false for XLM-R (e5 / bge-m3). Audit #21.
+    #[serde(default = "default_true")]
+    pub uses_token_type_ids: bool,
+    /// Prefix prepended to search queries before embedding. e5 models require
+    /// "query: "; MiniLM uses "" (no prefix). Audit #21.
+    #[serde(default)]
+    pub query_prefix: String,
+    /// Prefix prepended to stored documents before embedding. e5 models require
+    /// "passage: "; MiniLM uses "". Audit #21.
+    #[serde(default)]
+    pub passage_prefix: String,
 }
 
 impl Default for MindConfig {
     fn default() -> Self {
+        // Default to multilingual-e5-base (audit #21): far better RU/EN retrieval
+        // than the English-only MiniLM, practical on CPU (768-dim, ~278M, runs
+        // quantized). e5 needs mean pooling, no token_type_ids, and query/passage
+        // prefixes. Existing MiniLM configs keep their own values via serde.
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             data_dir: mind_home(),
-            model_name: "all-MiniLM-L6-v2".to_string(),
+            model_name: "multilingual-e5-base".to_string(),
             qdrant_port: 6334,
-            vector_size: default_vector_size(),
+            vector_size: 768,
             qdrant_api_key: None,
+            pooling: "mean".to_string(),
+            uses_token_type_ids: false,
+            query_prefix: "query: ".to_string(),
+            passage_prefix: "passage: ".to_string(),
         }
     }
 }
