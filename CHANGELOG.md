@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 — Single-collection storage (audit #18)
+
+Memories moved from one Qdrant collection per library (`mem_<library>`) to a single
+`memories` collection with a `library` payload field. This is a storage-layout change
+— run `mgimind migrate` once to import existing data.
+
+### Changed
+- **One `memories` collection** with payload indexes on `library` (keyword) and
+  `created_at` (datetime). Search runs a **single query** — true global top-k, or a
+  `library`-filtered query — instead of scanning N collections and merging.
+- **`history` is no longer O(total)**: it uses Qdrant `order_by` over the
+  `created_at` datetime index to return the newest N directly (fixes the post-0.2
+  review finding). 
+- Libraries are tracked in a small `libraries.json` registry; counts always come
+  from live data (`count` + filter), never the file.
+
+### Added
+- **`mgimind migrate [--purge]`**: imports legacy `mem_*` collections into
+  `memories`. Re-embeds from stored content (no raw-vector extraction), preserves
+  each entry's original `created_at`, idempotent (deterministic IDs), and with
+  `--purge` deletes the old collections after a successful copy.
+
+### Validated
+- Isolated-instance runtime test: global + library-filtered search, ordered
+  `history`, per-library `stats`, `drop` (delete-by-filter), and `migrate` (with
+  `created_at` preserved and content re-embedded) all verified end-to-end.
+
+### Still open
+- **Operational:** daemon autostart + cutover of the live instance (now also: run
+  `migrate` on the live data during cutover).
+- Deferred audit items: code embedder (#21), cross-encoder reranker (#22),
+  hybrid/BM25 search (#23) — each needs a new model + full re-embed.
+
 ## 0.3.0 — Daemon (audit #16)
 
 The MCP server spawned a fresh `mgimind` process per call, reloading the ONNX

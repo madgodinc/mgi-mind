@@ -38,7 +38,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 |---|-------|--------|--------------|
 | 16 | MCP spawns a process per call → model reloads | ✅ (0.3.0) | `mgimind daemon` (`src/daemon.rs`) loads the ONNX session + tokenizer once and serves newline-JSON requests over a Unix socket (`~/mgimind/daemon.sock`); the MCP client (`mcp-server/index.js`) routes embed-heavy calls (search/add/fact_add/context/history/stats) to it and **falls back to spawning the CLI** if the socket is absent — so the daemon is a pure optimization, never required. Runtime-validated against live data: warm add 31ms vs cold CLI 175ms (~5.6×; the audit's "2–5s" applies to a cold-disk/first load — the model is normally page-cached). **Operational steps remaining:** autostart entry + cutover of the live instance. |
 | 17 | Tokenizer re-read from disk every embed | ✅ | Tokenizer cached in a `OnceCell`, loaded once (like the ONNX session). |
-| 18 | Cross-library search is sequential | 🔜 v0.3 | Tied to a single-collection redesign (one collection + `library` payload filter). Deferred with #16; current per-collection layout is unchanged and correct. |
+| 18 | Cross-library search is sequential | ✅ (0.4.0) | Single `memories` collection with a `library` payload field + keyword index; search runs one query (global top-k, or a `library` filter) instead of scanning N collections and merging. A `created_at` datetime index powers `history` via `order_by` (this also fixes the post-0.2 review's O(total) `history` finding — newest-N without scrolling everything). `mgimind migrate [--purge]` imports legacy `mem_*` collections (re-embeds from stored content, preserves `created_at`, idempotent). Runtime-validated on an isolated instance: global+filtered search, ordered history, per-library counts, drop-by-filter, and migrate all verified. |
 | 19 | Heavy shellouts (curl/tar/unzip) | ✅ | Native `reqwest` downloads; native `flate2`+`tar` and `zip` extraction; native gzip+tar backup/restore. No external `curl`/`tar`/`unzip` needed. (`crw` web reader stays optional/external.) |
 | 20 | Naive `chunk_text` | 🟡 | Overlap between chunks + hard-split of overlong single lines (no more giant chunks). Token-aware / tree-sitter (AST) chunking deferred to v0.3. |
 
@@ -75,13 +75,14 @@ core; planned as a sibling project.
 
 ---
 
-**Summary (counted per issue):** of the 27 audited issues, **18 are fully fixed**
-(#1–5, 7–10, 12–17, 19, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 —
-mechanism shipped, hardening continues), and **4 are deferred** (#18
-single-collection, #21–23 ML/search — all requiring a data migration or new models,
-done at deploy time with the owner's sign-off). 0.3.0 closed the daemon (#16); the
-remaining deferred items are the single-collection redesign and the search-quality
-ML work.
+**Summary (counted per issue):** of the 27 audited issues, **19 are fully fixed**
+(#1–5, 7–10, 12–19, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 — mechanism
+shipped, hardening continues), and **3 are deferred** (#21–23: code embedder,
+cross-encoder reranker, hybrid/BM25 search — all requiring a new model + a full
+re-embed of existing memories, an owner-signed-off deploy-time step). 0.3.0 closed
+the daemon (#16); 0.4.0 closed the single-collection redesign (#18). What remains is
+purely the search-quality ML work (#21–23) — the architecture (single collection,
+warm daemon) is now in place to host it.
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves — a `sanitize`

@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance,
-    GetPointsBuilder, PointStruct, PointsIdsList, ScrollPointsBuilder, SearchPointsBuilder,
-    UpsertPointsBuilder, VectorParamsBuilder,
+    Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+    DeleteCollectionBuilder, DeletePointsBuilder, Direction, Distance, FieldType, Filter,
+    GetPointsBuilder, OrderBy, PointStruct, PointsIdsList, ScrollPointsBuilder,
+    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,15 +13,23 @@ use uuid::Uuid;
 use crate::config::MindConfig;
 use crate::embedder;
 
-const MEMORIES_PREFIX: &str = "mem_";
+/// Single unified collection for all memories (audit #18). Libraries are a
+/// `library` payload field + filter, not separate collections — so a search can
+/// rank globally in one query and `history` can `order_by` an indexed
+/// `created_at` instead of scrolling everything.
+pub const MEMORIES_COLLECTION: &str = "memories";
 pub const FACTS_COLLECTION: &str = "_kg_facts";
+
+/// Legacy per-library collection prefix (`mem_<library>`), kept only so
+/// `migrate` can find and import old-layout data.
+const LEGACY_PREFIX: &str = "mem_";
 
 /// Fixed namespace for deterministic content IDs (audit #15).
 /// UUIDv5(namespace, library + content) → identical content yields the same
 /// point ID, so re-adding is an idempotent upsert (no duplicates, no TOCTOU race).
 const MGI_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6d69_6e64_0000_000000000001);
 
-/// How many points to pull per scroll page (export/history pagination, audit #10).
+/// How many points to pull per scroll page (export/migrate pagination, audit #10).
 const SCROLL_PAGE: u32 = 256;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,13 +53,14 @@ pub async fn get_client(config: &MindConfig) -> Result<Qdrant> {
     Ok(client)
 }
 
-fn collection_name(library: &str) -> String {
-    format!("{MEMORIES_PREFIX}{library}")
-}
-
 fn deterministic_id(library: &str, content: &str) -> String {
     let key = format!("{library}\u{0}{content}");
     Uuid::new_v5(&MGI_NAMESPACE, key.as_bytes()).to_string()
+}
+
+/// Filter that restricts a query to one library (audit #18).
+fn library_filter(library: &str) -> Filter {
+    Filter::must([Condition::matches("library", library.to_string())])
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
@@ -95,6 +105,48 @@ fn extract_string(
     })
 }
 
+// --- Library registry -------------------------------------------------------
+// With a single collection, libraries no longer map to Qdrant collections, so we
+// track the known set in a small JSON file. All mutations go through our API, so
+// it stays in sync; counts always come from live data (never from this file).
+
+fn libraries_path() -> std::path::PathBuf {
+    crate::config::mind_home().join("libraries.json")
+}
+
+fn registered_libraries() -> Vec<String> {
+    std::fs::read_to_string(libraries_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn is_registered(name: &str) -> bool {
+    registered_libraries().iter().any(|l| l == name)
+}
+
+fn register_library(name: &str) -> Result<()> {
+    let mut libs = registered_libraries();
+    if !libs.iter().any(|l| l == name) {
+        libs.push(name.to_string());
+        libs.sort();
+        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&libs)?)?;
+    }
+    Ok(())
+}
+
+fn unregister_library(name: &str) -> Result<()> {
+    let mut libs = registered_libraries();
+    let before = libs.len();
+    libs.retain(|l| l != name);
+    if libs.len() != before {
+        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&libs)?)?;
+    }
+    Ok(())
+}
+
+// --- Collection setup -------------------------------------------------------
+
 async fn create_vector_collection(client: &Qdrant, name: &str, dim: u64) -> Result<()> {
     client
         .create_collection(
@@ -106,50 +158,36 @@ async fn create_vector_collection(client: &Qdrant, name: &str, dim: u64) -> Resu
     Ok(())
 }
 
-pub async fn init(config: &MindConfig) -> Result<()> {
-    let client = get_client(config).await?;
-    ensure_facts_collection(&client, config.vector_size).await?;
-    Ok(())
+/// Create the payload indexes the single-collection layout relies on (audit #18):
+/// `library` (keyword) for fast per-library filtering, `created_at` (datetime)
+/// for `order_by` in `history`. Idempotent — "already exists" errors are ignored.
+async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
+    let _ = client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            collection,
+            "library",
+            FieldType::Keyword,
+        ))
+        .await;
+    let _ = client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            collection,
+            "created_at",
+            FieldType::Datetime,
+        ))
+        .await;
 }
 
-pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
-    let client = get_client(config).await?;
-    let col = collection_name(name);
-
-    if client.collection_exists(&col).await.unwrap_or(false) {
-        anyhow::bail!(
-            "{}",
-            crate::error::MindError::LibraryExists(name.to_string())
-        );
-    }
-
-    create_vector_collection(&client, &col, config.vector_size).await?;
-    Ok(())
-}
-
-pub async fn drop_library(config: &MindConfig, name: &str) -> Result<()> {
-    let client = get_client(config).await?;
-    let col = collection_name(name);
-
-    client
-        .delete_collection(DeleteCollectionBuilder::new(&col))
+pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
         .await
-        .context("Failed to delete library")?;
-
+        .unwrap_or(false)
+    {
+        create_vector_collection(client, MEMORIES_COLLECTION, dim).await?;
+    }
+    ensure_payload_indexes(client, MEMORIES_COLLECTION).await;
     Ok(())
-}
-
-pub async fn list_libraries(config: &MindConfig) -> Result<Vec<String>> {
-    let client = get_client(config).await?;
-    let collections = client.list_collections().await?;
-
-    let libraries: Vec<String> = collections
-        .collections
-        .iter()
-        .filter_map(|c| c.name.strip_prefix(MEMORIES_PREFIX).map(|s| s.to_string()))
-        .collect();
-
-    Ok(libraries)
 }
 
 pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
@@ -162,6 +200,56 @@ pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
     }
     Ok(())
 }
+
+pub async fn init(config: &MindConfig) -> Result<()> {
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+    ensure_facts_collection(&client, config.vector_size).await?;
+    Ok(())
+}
+
+// --- Library management -----------------------------------------------------
+
+pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
+    if is_registered(name) {
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryExists(name.to_string())
+        );
+    }
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+    register_library(name)?;
+    Ok(())
+}
+
+pub async fn drop_library(config: &MindConfig, name: &str) -> Result<()> {
+    let client = get_client(config).await?;
+    if client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        // Delete every point belonging to this library (audit #18: a library is
+        // a payload filter, not a whole collection).
+        client
+            .delete_points(
+                DeletePointsBuilder::new(MEMORIES_COLLECTION)
+                    .points(library_filter(name))
+                    .wait(true),
+            )
+            .await
+            .context("Failed to delete library points")?;
+    }
+    unregister_library(name)?;
+    Ok(())
+}
+
+pub async fn list_libraries(_config: &MindConfig) -> Result<Vec<String>> {
+    Ok(registered_libraries())
+}
+
+// --- Dimension guards (audit #11) ------------------------------------------
 
 /// Validate that an embedding matches the configured dimension (audit #11).
 pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
@@ -195,26 +283,22 @@ fn collection_dim(info: &qdrant_client::qdrant::CollectionInfo) -> Option<u64> {
     }
 }
 
-/// Best-effort check that every memory/fact collection's on-disk vector
+/// Best-effort check that the memories/facts collections' on-disk vector
 /// dimension matches `config.vector_size` (audit #11). A mismatch means the
 /// embedding model changed without a reindex — upserts would fail with a raw
 /// Qdrant error. Returns `(collection, actual_dim)` for each disagreement;
 /// collections whose dimension can't be parsed are skipped, never falsely flagged.
 pub async fn dimension_mismatches(config: &MindConfig) -> Result<Vec<(String, u64)>> {
     let client = get_client(config).await?;
-    let collections = client.list_collections().await?;
     let mut out = Vec::new();
 
-    for col in &collections.collections {
-        if !col.name.starts_with(MEMORIES_PREFIX) && col.name != FACTS_COLLECTION {
-            continue;
-        }
-        if let Ok(info) = client.collection_info(&col.name).await
+    for name in [MEMORIES_COLLECTION, FACTS_COLLECTION] {
+        if let Ok(info) = client.collection_info(name).await
             && let Some(ci) = info.result.as_ref()
             && let Some(dim) = collection_dim(ci)
             && dim != config.vector_size
         {
-            out.push((col.name.clone(), dim));
+            out.push((name.to_string(), dim));
         }
     }
 
@@ -238,21 +322,23 @@ pub(crate) async fn existing_payload_string(
     extract_string(&point.payload, key)
 }
 
+// --- Core memory operations -------------------------------------------------
+
 pub async fn add_memory(
     config: &MindConfig,
     library: &str,
     content: &str,
     source: Option<&str>,
 ) -> Result<String> {
-    let client = get_client(config).await?;
-    let col = collection_name(library);
-
-    if !client.collection_exists(&col).await.unwrap_or(false) {
+    if !is_registered(library) {
         anyhow::bail!(
             "{}",
             crate::error::MindError::LibraryNotFound(library.to_string())
         );
     }
+
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
 
     let embedding = embedder::embed(config, content).await?;
     check_dim(&embedding, config)?;
@@ -265,28 +351,42 @@ pub async fn add_memory(
     // Preserve the original first-seen timestamp on re-add; only `updated_at`
     // moves. Otherwise re-adding identical content would reset created_at=now
     // and the entry would jump to the top of chronological history.
-    let created_at = existing_payload_string(&client, &col, &id, "created_at")
+    let created_at = existing_payload_string(&client, MEMORIES_COLLECTION, &id, "created_at")
         .await
         .unwrap_or_else(|| now.clone());
 
-    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
-    payload.insert("content".into(), content.into());
-    payload.insert("hash".into(), hash.into());
-    payload.insert("created_at".into(), created_at.into());
-    payload.insert("updated_at".into(), now.into());
-    payload.insert("library".into(), library.into());
-    if let Some(src) = source {
-        payload.insert("source".into(), src.into());
-    }
-
-    let point = PointStruct::new(id.clone(), embedding, payload);
+    let point = PointStruct::new(
+        id.clone(),
+        embedding,
+        build_payload(content, &hash, &created_at, &now, library, source),
+    );
 
     client
-        .upsert_points(UpsertPointsBuilder::new(&col, vec![point]).wait(true))
+        .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to add memory")?;
 
     Ok(id)
+}
+
+fn build_payload(
+    content: &str,
+    hash: &str,
+    created_at: &str,
+    updated_at: &str,
+    library: &str,
+    source: Option<&str>,
+) -> HashMap<String, qdrant_client::qdrant::Value> {
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("content".into(), content.into());
+    payload.insert("hash".into(), hash.into());
+    payload.insert("created_at".into(), created_at.into());
+    payload.insert("updated_at".into(), updated_at.into());
+    payload.insert("library".into(), library.into());
+    if let Some(src) = source {
+        payload.insert("source".into(), src.into());
+    }
+    payload
 }
 
 pub async fn search(
@@ -297,88 +397,64 @@ pub async fn search(
     tier: u8,
 ) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
     let embedding = embedder::embed(config, query).await?;
     check_dim(&embedding, config)?;
 
-    let collections: Vec<String> = if let Some(lib) = library {
-        vec![collection_name(lib)]
-    } else {
-        let all = client.list_collections().await?;
-        all.collections
-            .iter()
-            .filter(|c| c.name.starts_with(MEMORIES_PREFIX))
-            .map(|c| c.name.clone())
-            .collect()
-    };
-
-    let mut results = Vec::new();
-
-    for col in &collections {
-        let lib_name = col.strip_prefix(MEMORIES_PREFIX).unwrap_or(col);
-
-        let search_result = client
-            .search_points(
-                SearchPointsBuilder::new(col, embedding.clone(), limit as u64).with_payload(true),
-            )
-            .await;
-
-        if let Ok(response) = search_result {
-            for point in response.result {
-                let payload = &point.payload;
-
-                let content = extract_string(payload, "content").unwrap_or_default();
-                let source = extract_string(payload, "source");
-                let created_at = extract_string(payload, "created_at");
-
-                let display_content = match tier {
-                    1 => truncate_str(&content, 100),
-                    2 => truncate_str(&content, 500),
-                    _ => content.clone(),
-                };
-
-                let id = match &point.id {
-                    Some(pid) => format_point_id(pid),
-                    None => "unknown".to_string(),
-                };
-
-                results.push(SearchResult {
-                    id,
-                    library: lib_name.to_string(),
-                    content: display_content,
-                    source,
-                    created_at,
-                    score: point.score,
-                });
-            }
-        }
+    // One query over the single collection → true global top-k. An optional
+    // library filter narrows it without a separate per-collection scan (audit #18).
+    let mut builder =
+        SearchPointsBuilder::new(MEMORIES_COLLECTION, embedding, limit as u64).with_payload(true);
+    if let Some(lib) = library {
+        builder = builder.filter(library_filter(lib));
     }
 
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    results.truncate(limit);
+    let response = client
+        .search_points(builder)
+        .await
+        .context("Search failed")?;
+
+    let results = response
+        .result
+        .into_iter()
+        .map(|point| {
+            let payload = &point.payload;
+            let content = extract_string(payload, "content").unwrap_or_default();
+            let display_content = match tier {
+                1 => truncate_str(&content, 100),
+                2 => truncate_str(&content, 500),
+                _ => content,
+            };
+            SearchResult {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                library: extract_string(payload, "library").unwrap_or_default(),
+                content: display_content,
+                source: extract_string(payload, "source"),
+                created_at: extract_string(payload, "created_at"),
+                score: point.score,
+            }
+        })
+        .collect();
 
     Ok(results)
 }
 
-pub async fn delete_memory(config: &MindConfig, library: &str, id: &str) -> Result<()> {
+pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {
     let client = get_client(config).await?;
-    let col = collection_name(library);
-
-    if !client.collection_exists(&col).await.unwrap_or(false) {
-        anyhow::bail!(
-            "{}",
-            crate::error::MindError::LibraryNotFound(library.to_string())
-        );
-    }
-
+    // IDs are globally unique (UUIDv5 of library+content), so a delete by id in
+    // the single collection is unambiguous — the library arg is kept only for
+    // CLI/MCP signature compatibility.
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
-
     client
         .delete_points(
-            DeletePointsBuilder::new(&col)
+            DeletePointsBuilder::new(MEMORIES_COLLECTION)
                 .points(PointsIdsList {
                     ids: vec![point_id],
                 })
@@ -386,7 +462,6 @@ pub async fn delete_memory(config: &MindConfig, library: &str, id: &str) -> Resu
         )
         .await
         .context("Failed to delete memory")?;
-
     Ok(())
 }
 
@@ -418,50 +493,53 @@ pub async fn scroll_all(
     Ok(out)
 }
 
-/// Recent memories across all libraries, newest first.
-///
-/// NOTE (v0.3): this scrolls every collection fully into memory and then keeps
-/// the top `limit`. Correct, but O(total memories) regardless of `limit` — fine
-/// at the current scale, a known scalability item. The proper fix is a Qdrant
-/// `order_by` over a datetime payload index on `created_at` (newest-N without
-/// reading everything), which needs a payload-index migration on existing
-/// collections — deferred to the v0.3 storage rework alongside #16/#18.
+/// Recent memories, newest first. Single collection + a datetime index on
+/// `created_at` let Qdrant return the newest `limit` via `order_by` — no longer
+/// O(total memories) (audit #18, fixes the post-0.2 review's `history` finding).
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
-    let collections = client.list_collections().await?;
-
-    let mut all_results = Vec::new();
-
-    for col in &collections.collections {
-        if let Some(lib_name) = col.name.strip_prefix(MEMORIES_PREFIX) {
-            let points = scroll_all(&client, &col.name).await.unwrap_or_default();
-            for point in points {
-                let payload = &point.payload;
-                let content = extract_string(payload, "content").unwrap_or_default();
-                let source = extract_string(payload, "source");
-                let created_at = extract_string(payload, "created_at");
-
-                let id = match &point.id {
-                    Some(pid) => format_point_id(pid),
-                    None => "unknown".to_string(),
-                };
-
-                all_results.push(SearchResult {
-                    id,
-                    library: lib_name.to_string(),
-                    content: truncate_str(&content, 200),
-                    source,
-                    created_at,
-                    score: 0.0,
-                });
-            }
-        }
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
     }
 
-    // Newest first. RFC3339 timestamps sort chronologically as strings (audit #9).
-    all_results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    all_results.truncate(limit);
-    Ok(all_results)
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .limit(limit as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("history scroll failed")?;
+
+    let results = response
+        .result
+        .into_iter()
+        .map(|point| {
+            let payload = &point.payload;
+            let content = extract_string(payload, "content").unwrap_or_default();
+            SearchResult {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                library: extract_string(payload, "library").unwrap_or_default(),
+                content: truncate_str(&content, 200),
+                source: extract_string(payload, "source"),
+                created_at: extract_string(payload, "created_at"),
+                score: 0.0,
+            }
+        })
+        .collect();
+
+    Ok(results)
 }
 
 pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> Result<usize> {
@@ -470,49 +548,53 @@ pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> 
     }
 
     let client = get_client(config).await?;
-    let collections = client.list_collections().await?;
-
     std::fs::create_dir_all(output_dir)?;
 
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(0);
+    }
+
+    // Group every point by its `library` payload, then write one file per library.
+    let points = scroll_all(&client, MEMORIES_COLLECTION)
+        .await
+        .unwrap_or_default();
+    let mut by_library: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+    for point in &points {
+        let payload = &point.payload;
+        let Some(content) = extract_string(payload, "content") else {
+            continue;
+        };
+        let library = extract_string(payload, "library").unwrap_or_else(|| "default".to_string());
+        by_library
+            .entry(library)
+            .or_default()
+            .push(serde_json::json!({
+                "id": point.id.as_ref().map(format_point_id),
+                "content": content,
+                "source": extract_string(payload, "source"),
+                "created_at": extract_string(payload, "created_at"),
+            }));
+    }
+
     let mut total = 0;
-
-    for col in &collections.collections {
-        let lib_name = col.name.strip_prefix(MEMORIES_PREFIX).unwrap_or(&col.name);
-
-        // Full pagination — no silent 10k cap (audit #10).
-        let points = scroll_all(&client, &col.name).await.unwrap_or_default();
-
-        let entries: Vec<serde_json::Value> = points
-            .iter()
-            .filter_map(|point| {
-                let payload = &point.payload;
-                let content = extract_string(payload, "content")?;
-                let source = extract_string(payload, "source");
-                let created = extract_string(payload, "created_at");
-                let id = point.id.as_ref().map(format_point_id);
-
-                Some(serde_json::json!({
-                    "id": id,
-                    "content": content,
-                    "source": source,
-                    "created_at": created,
-                }))
-            })
-            .collect();
-
+    for (lib_name, entries) in &by_library {
         total += entries.len();
-
         let file_path = format!("{output_dir}/{lib_name}.{format}");
         let path = std::path::Path::new(&file_path);
 
         match format {
             "json" => {
-                let json = serde_json::to_string_pretty(&entries)?;
+                let json = serde_json::to_string_pretty(entries)?;
                 crate::util::atomic_write_str(path, &json)?;
             }
             "md" => {
                 let mut md = format!("# {lib_name}\n\n");
-                for entry in &entries {
+                for entry in entries {
                     if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
                         md.push_str(&format!("---\n\n{content}\n\n"));
                         if let Some(src) = entry.get("source").and_then(|v| v.as_str()) {
@@ -529,27 +611,101 @@ pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> 
     Ok(total)
 }
 
+async fn count_library(client: &Qdrant, library: &str) -> u64 {
+    client
+        .count(CountPointsBuilder::new(MEMORIES_COLLECTION).filter(library_filter(library)))
+        .await
+        .ok()
+        .and_then(|r| r.result)
+        .map(|c| c.count)
+        .unwrap_or(0)
+}
+
 pub async fn stats(config: &MindConfig) -> Result<(Vec<(String, u64)>, u64)> {
     let client = get_client(config).await?;
-    let collections = client.list_collections().await?;
 
     let mut libraries = Vec::new();
-    let mut facts_count = 0u64;
-
-    for col in &collections.collections {
-        let info = client.collection_info(&col.name).await;
-        let count = info
-            .map(|i| i.result.map(|r| r.points_count.unwrap_or(0)).unwrap_or(0))
-            .unwrap_or(0);
-
-        if col.name == FACTS_COLLECTION {
-            facts_count = count;
-        } else if let Some(lib_name) = col.name.strip_prefix(MEMORIES_PREFIX) {
-            libraries.push((lib_name.to_string(), count));
+    if client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        for lib in registered_libraries() {
+            let count = count_library(&client, &lib).await;
+            libraries.push((lib, count));
         }
     }
 
+    let facts_count = client
+        .collection_info(FACTS_COLLECTION)
+        .await
+        .ok()
+        .and_then(|i| i.result)
+        .and_then(|r| r.points_count)
+        .unwrap_or(0);
+
     Ok((libraries, facts_count))
+}
+
+/// Migrate legacy per-library collections (`mem_<library>`) into the single
+/// `memories` collection (audit #18). Re-embeds each entry from its stored
+/// `content` (no fragile raw-vector extraction) while preserving the original
+/// `created_at`; deterministic IDs make it idempotent (safe to re-run). With
+/// `purge`, the old collections are deleted after a successful copy.
+pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<String>)> {
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    let collections = client.list_collections().await?;
+    let mut moved = 0usize;
+    let mut libs: Vec<String> = Vec::new();
+
+    for col in &collections.collections {
+        let Some(lib) = col.name.strip_prefix(LEGACY_PREFIX) else {
+            continue;
+        };
+        register_library(lib)?;
+        libs.push(lib.to_string());
+
+        let points = scroll_all(&client, &col.name).await.unwrap_or_default();
+        for p in points {
+            let Some(content) = extract_string(&p.payload, "content") else {
+                continue;
+            };
+            let source = extract_string(&p.payload, "source");
+            let now = chrono::Utc::now().to_rfc3339();
+            let created_at =
+                extract_string(&p.payload, "created_at").unwrap_or_else(|| now.clone());
+
+            let embedding = embedder::embed(config, &content).await?;
+            check_dim(&embedding, config)?;
+            let id = deterministic_id(lib, &content);
+            let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+            let payload = build_payload(&content, &hash, &created_at, &now, lib, source.as_deref());
+
+            client
+                .upsert_points(
+                    UpsertPointsBuilder::new(
+                        MEMORIES_COLLECTION,
+                        vec![PointStruct::new(id, embedding, payload)],
+                    )
+                    .wait(true),
+                )
+                .await
+                .with_context(|| format!("migrate: upsert from {} failed", col.name))?;
+            moved += 1;
+        }
+
+        if purge {
+            let _ = client
+                .delete_collection(DeleteCollectionBuilder::new(&col.name))
+                .await;
+        }
+    }
+
+    libs.sort();
+    libs.dedup();
+    Ok((moved, libs))
 }
 
 /// Native gzip+tar backup of the data dir — no `tar` shellout (audit #19).
@@ -593,7 +749,6 @@ mod tests {
         );
         assert_ne!(a, c, "different content must differ");
         assert_ne!(a, d, "different library must differ");
-        // valid UUID string
         assert!(uuid::Uuid::parse_str(&a).is_ok());
     }
 
@@ -602,7 +757,6 @@ mod tests {
         let s = "alpha beta gamma delta epsilon";
         let t = super::truncate_str(s, 12);
         assert!(t.ends_with("..."));
-        // must not cut mid-word: the part before "..." ends at a full word
         let body = t.trim_end_matches('.');
         assert!(s.starts_with(body.trim_end()));
         assert!(!body.ends_with("gam"));

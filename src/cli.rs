@@ -153,6 +153,14 @@ pub enum Commands {
     /// Run the long-lived daemon (keeps the embedding model warm; serves the
     /// MCP client over a Unix socket to avoid per-call model reloads — audit #16)
     Daemon,
+
+    /// Migrate legacy per-library collections into the single `memories`
+    /// collection (audit #18). Idempotent; re-embeds from stored content.
+    Migrate {
+        /// Delete the old per-library collections after a successful copy
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,12 +296,36 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
         Commands::Daemon => cmd_daemon().await,
+        Commands::Migrate { purge } => cmd_migrate(purge).await,
     }
 }
 
 async fn cmd_daemon() -> Result<()> {
     let config = crate::config::MindConfig::load()?;
     crate::daemon::run(config).await
+}
+
+async fn cmd_migrate(purge: bool) -> Result<()> {
+    let config = crate::config::MindConfig::load()?;
+    println!(
+        "Migrating legacy per-library collections into '{}'...",
+        crate::storage::MEMORIES_COLLECTION
+    );
+    let (moved, libs) = crate::storage::migrate(&config, purge).await?;
+    if libs.is_empty() {
+        println!("No legacy collections found — nothing to migrate.");
+    } else {
+        println!(
+            "Migrated {moved} entries from libraries: {}",
+            libs.join(", ")
+        );
+        if purge {
+            println!("Old per-library collections were purged.");
+        } else {
+            println!("Old collections kept. Re-run with --purge to delete them once verified.");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_init() -> Result<()> {
@@ -773,11 +805,12 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
         other => anyhow::bail!("Unknown source: {other}. Supported: obsidian, markdown"),
     }
 
-    // Ensure library exists
-    let client = crate::storage::get_client(&config).await?;
-    let col_name = format!("mem_{library}");
-    if !client.collection_exists(&col_name).await.unwrap_or(false) {
-        crate::storage::create_library(&config, library).await?;
+    // Ensure the target library is registered (single-collection layout, #18).
+    // create_library is idempotent-friendly here: a LibraryExists error is fine.
+    if crate::storage::create_library(&config, library)
+        .await
+        .is_ok()
+    {
         println!("Created library '{library}'");
     }
 
