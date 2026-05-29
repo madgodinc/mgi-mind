@@ -238,21 +238,21 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
         let dest = model_dir.join(local_name);
 
         if dest.exists() {
-            println!("  {local_name} already exists, skipping.");
+            eprintln!("  {local_name} already exists, skipping.");
             continue;
         }
 
         let pin = model_file_pin(&config.model_name, local_name);
         if pin.is_none() {
-            println!(
+            eprintln!(
                 "  [warn] no pinned checksum for {local_name} (custom model) - integrity not verified"
             );
         }
-        println!("  Downloading {local_name}...");
+        eprintln!("  Downloading {local_name}...");
         crate::util::download_file(&url, &dest, pin).await?;
     }
 
-    println!("  Model downloaded to {}", model_dir.display());
+    eprintln!("  Model downloaded to {}", model_dir.display());
     Ok(())
 }
 
@@ -314,7 +314,7 @@ pub fn extract_member_zip(archive: &Path, member: &str, dest: &Path) -> Result<(
 pub async fn download_ort_runtime() -> Result<()> {
     let dest = ort_lib_path();
     if dest.exists() {
-        println!("  ONNX Runtime already exists at {}", dest.display());
+        eprintln!("  ONNX Runtime already exists at {}", dest.display());
         return Ok(());
     }
 
@@ -364,14 +364,14 @@ pub async fn download_ort_runtime() -> Result<()> {
     let archive_path = tmp_dir.join(format!("ort.{archive_ext}"));
 
     if expected.is_none() {
-        println!(
+        eprintln!(
             "  [warn] no pinned checksum for this platform's ONNX Runtime - integrity not verified"
         );
     }
-    println!("  Downloading ONNX Runtime v{ORT_VERSION}...");
+    eprintln!("  Downloading ONNX Runtime v{ORT_VERSION}...");
     crate::util::download_file(&url, &archive_path, expected).await?;
 
-    println!("  Extracting...");
+    eprintln!("  Extracting...");
     if archive_ext == "zip" {
         extract_member_zip(&archive_path, &lib_path_in_archive, &dest)?;
     } else {
@@ -384,7 +384,7 @@ pub async fn download_ort_runtime() -> Result<()> {
             dest.display()
         );
     }
-    println!("  ONNX Runtime installed to {}", dest.display());
+    eprintln!("  ONNX Runtime installed to {}", dest.display());
 
     // SAFETY: called during `doctor --fix` before any ORT usage.
     unsafe {

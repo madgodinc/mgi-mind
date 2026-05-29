@@ -150,9 +150,9 @@ pub enum Commands {
     /// Stop bundled Qdrant server
     Stop,
 
-    /// Run the long-lived daemon (keeps the embedding model warm; serves the
-    /// MCP client over a Unix socket to avoid per-call model reloads - audit #16)
-    Daemon,
+    /// Run as an MCP server over stdio. One process is the whole server and
+    /// stays warm for the session - no daemon, no Unix socket, no Node wrapper.
+    Mcp,
 
     /// Migrate legacy per-library collections into the single `memories`
     /// collection (audit #18). Idempotent; re-embeds from stored content.
@@ -295,14 +295,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
-        Commands::Daemon => cmd_daemon().await,
+        Commands::Mcp => crate::mcp::serve().await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
     }
-}
-
-async fn cmd_daemon() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
-    crate::daemon::run(config).await
 }
 
 async fn cmd_migrate(purge: bool) -> Result<()> {
@@ -332,15 +327,22 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
 }
 
 async fn cmd_init() -> Result<()> {
+    print!("{}", run_init().await?);
+    Ok(())
+}
+
+/// Initialize MGI-Mind and return the summary as text (no direct stdout, so it
+/// can be embedded in the `doctor` report and reused off the MCP path).
+pub(crate) async fn run_init() -> Result<String> {
     use crate::config::{self, MindConfig};
     use crate::storage;
+    use std::fmt::Write;
 
     if config::is_initialized() {
-        println!(
-            "MGI-Mind is already initialized at {}",
+        return Ok(format!(
+            "MGI-Mind is already initialized at {}\n",
             config::mind_home().display()
-        );
-        return Ok(());
+        ));
     }
 
     let config = MindConfig::default();
@@ -352,40 +354,73 @@ async fn cmd_init() -> Result<()> {
     // Save config
     config.save()?;
 
+    let mut out = String::new();
+
     // Try to initialize storage (Qdrant may not be running yet)
     if is_qdrant_running()
         && let Err(e) = storage::init(&config).await
     {
-        println!("  Note: Could not initialize Qdrant collections: {e}");
-        println!("  Collections will be created on first use.");
+        let _ = writeln!(out, "  Note: Could not initialize Qdrant collections: {e}");
+        let _ = writeln!(out, "  Collections will be created on first use.");
     }
 
-    println!("MGI-Mind initialized at {}", config::mind_home().display());
-    println!("  Data:     {}", config.data_dir.display());
-    println!("  Sessions: {}", config::sessions_dir().display());
-    println!("  Models:   {}", config::models_dir().display());
-    println!("\nReady. Connect your AI assistant via MCP or use CLI directly.");
+    let _ = writeln!(
+        out,
+        "MGI-Mind initialized at {}",
+        config::mind_home().display()
+    );
+    let _ = writeln!(out, "  Data:     {}", config.data_dir.display());
+    let _ = writeln!(out, "  Sessions: {}", config::sessions_dir().display());
+    let _ = writeln!(out, "  Models:   {}", config::models_dir().display());
+    let _ = writeln!(
+        out,
+        "\nReady. Connect your AI assistant via MCP or use CLI directly."
+    );
 
-    Ok(())
+    Ok(out)
 }
 
 async fn cmd_doctor(fix: bool) -> Result<()> {
-    use crate::config;
+    // Progress from any downloads goes to stderr (inside the download fns); the
+    // report itself is the returned text. Print it to stdout for the CLI.
+    print!("{}", run_doctor(fix).await?);
+    Ok(())
+}
 
+/// Diagnose a download that reported success but left no usable file on disk -
+/// almost always antivirus / Windows SmartScreen quarantine (1.2). Returned as
+/// report text so both CLI and MCP surface the same actionable diagnosis
+/// instead of silently looping on `--fix` while the AV keeps eating the file.
+fn av_quarantine_hint(what: &str) -> String {
+    format!(
+        "       '{what}' reported as downloaded, but no usable file is on disk.\n\
+         \x20\x20\x20\x20\x20\x20 This usually means antivirus or Windows SmartScreen quarantined it.\n\
+         \x20\x20\x20\x20\x20\x20 Allow mgimind and its model cache in your AV, then re-run `mgimind doctor --fix`."
+    )
+}
+
+/// Run the health checks, optionally fixing, and return the full report as text.
+/// Shared by the `doctor` CLI command and the `mind_doctor` MCP tool, so neither
+/// writes to stdout directly (the MCP stdout channel is JSON-RPC only).
+pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
+    use crate::config;
+    use std::fmt::Write;
+
+    let mut out = String::new();
     let mut issues = 0;
     let mut fixed = 0;
 
     // Check initialization
     if !config::is_initialized() {
-        println!("[FAIL] MGI-Mind not initialized");
+        let _ = writeln!(out, "[FAIL] MGI-Mind not initialized");
         if fix {
-            cmd_init().await?;
+            out.push_str(&run_init().await?);
             fixed += 1;
         } else {
             issues += 1;
         }
     } else {
-        println!("[OK]   Config exists");
+        let _ = writeln!(out, "[OK]   Config exists");
     }
 
     // Check directories
@@ -394,12 +429,12 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         ("Models dir", config::models_dir()),
     ] {
         if path.exists() {
-            println!("[OK]   {name}");
+            let _ = writeln!(out, "[OK]   {name}");
         } else {
-            println!("[FAIL] {name} missing: {}", path.display());
+            let _ = writeln!(out, "[FAIL] {name} missing: {}", path.display());
             if fix {
                 std::fs::create_dir_all(&path)?;
-                println!("       Fixed: created {}", path.display());
+                let _ = writeln!(out, "       Fixed: created {}", path.display());
                 fixed += 1;
             } else {
                 issues += 1;
@@ -410,12 +445,12 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     // Check Qdrant data
     let qdrant_dir = config::mind_home().join("qdrant");
     if qdrant_dir.exists() {
-        println!("[OK]   Qdrant data directory");
+        let _ = writeln!(out, "[OK]   Qdrant data directory");
     } else {
-        println!("[FAIL] Qdrant data directory missing");
+        let _ = writeln!(out, "[FAIL] Qdrant data directory missing");
         if fix {
             std::fs::create_dir_all(&qdrant_dir)?;
-            println!("       Fixed: created {}", qdrant_dir.display());
+            let _ = writeln!(out, "       Fixed: created {}", qdrant_dir.display());
             fixed += 1;
         } else {
             issues += 1;
@@ -424,13 +459,26 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
 
     // Check Qdrant binary
     if is_qdrant_available() {
-        println!("[OK]   Qdrant binary");
+        let _ = writeln!(out, "[OK]   Qdrant binary");
     } else {
-        println!("[FAIL] Qdrant binary not found");
+        let _ = writeln!(out, "[FAIL] Qdrant binary not found");
         if fix {
-            println!("       Downloading Qdrant...");
-            download_qdrant().await?;
-            fixed += 1;
+            let _ = writeln!(out, "       Downloading Qdrant...");
+            match download_qdrant().await {
+                Ok(()) if is_qdrant_available() => {
+                    let _ = writeln!(out, "       Fixed: Qdrant downloaded");
+                    fixed += 1;
+                }
+                // Download "succeeded" but the binary isn't there -> AV/quarantine.
+                Ok(()) => {
+                    let _ = writeln!(out, "{}", av_quarantine_hint("Qdrant binary"));
+                    issues += 1;
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "       Download failed: {e}");
+                    issues += 1;
+                }
+            }
         } else {
             issues += 1;
         }
@@ -438,20 +486,35 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
 
     // Check Qdrant running
     if is_qdrant_running() {
-        println!("[OK]   Qdrant server (running)");
+        let _ = writeln!(out, "[OK]   Qdrant server (running)");
     } else {
-        println!("[WARN] Qdrant server not running. Start with `mgimind serve`");
+        let _ = writeln!(
+            out,
+            "[WARN] Qdrant server not running. Start with `mgimind serve`"
+        );
     }
 
     // Check ONNX Runtime
     if crate::embedder::is_ort_available() {
-        println!("[OK]   ONNX Runtime");
+        let _ = writeln!(out, "[OK]   ONNX Runtime");
     } else {
-        println!("[FAIL] ONNX Runtime not found");
+        let _ = writeln!(out, "[FAIL] ONNX Runtime not found");
         if fix {
-            println!("       Installing ONNX Runtime...");
-            crate::embedder::download_ort_runtime().await?;
-            fixed += 1;
+            let _ = writeln!(out, "       Installing ONNX Runtime...");
+            match crate::embedder::download_ort_runtime().await {
+                Ok(()) if crate::embedder::is_ort_available() => {
+                    let _ = writeln!(out, "       Fixed: ONNX Runtime installed");
+                    fixed += 1;
+                }
+                Ok(()) => {
+                    let _ = writeln!(out, "{}", av_quarantine_hint("ONNX Runtime"));
+                    issues += 1;
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "       Install failed: {e}");
+                    issues += 1;
+                }
+            }
         } else {
             issues += 1;
         }
@@ -461,13 +524,25 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     if config::is_initialized() {
         let cfg = crate::config::MindConfig::load()?;
         if crate::embedder::is_model_downloaded(&cfg) {
-            println!("[OK]   Embedding model");
+            let _ = writeln!(out, "[OK]   Embedding model");
         } else {
-            println!("[FAIL] Embedding model not downloaded");
+            let _ = writeln!(out, "[FAIL] Embedding model not downloaded");
             if fix {
-                println!("       Downloading model...");
-                crate::embedder::download_model(&cfg).await?;
-                fixed += 1;
+                let _ = writeln!(out, "       Downloading model...");
+                match crate::embedder::download_model(&cfg).await {
+                    Ok(()) if crate::embedder::is_model_downloaded(&cfg) => {
+                        let _ = writeln!(out, "       Fixed: model downloaded");
+                        fixed += 1;
+                    }
+                    Ok(()) => {
+                        let _ = writeln!(out, "{}", av_quarantine_hint("Embedding model"));
+                        issues += 1;
+                    }
+                    Err(e) => {
+                        let _ = writeln!(out, "       Download failed: {e}");
+                        issues += 1;
+                    }
+                }
             } else {
                 issues += 1;
             }
@@ -476,13 +551,25 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         // Reranker model (audit #22) - only when reranking is enabled.
         if cfg.rerank_enabled {
             if crate::reranker::is_model_downloaded(&cfg) {
-                println!("[OK]   Reranker model");
+                let _ = writeln!(out, "[OK]   Reranker model");
             } else {
-                println!("[FAIL] Reranker model not downloaded");
+                let _ = writeln!(out, "[FAIL] Reranker model not downloaded");
                 if fix {
-                    println!("       Downloading reranker...");
-                    crate::reranker::download_model(&cfg).await?;
-                    fixed += 1;
+                    let _ = writeln!(out, "       Downloading reranker...");
+                    match crate::reranker::download_model(&cfg).await {
+                        Ok(()) if crate::reranker::is_model_downloaded(&cfg) => {
+                            let _ = writeln!(out, "       Fixed: reranker downloaded");
+                            fixed += 1;
+                        }
+                        Ok(()) => {
+                            let _ = writeln!(out, "{}", av_quarantine_hint("Reranker model"));
+                            issues += 1;
+                        }
+                        Err(e) => {
+                            let _ = writeln!(out, "       Download failed: {e}");
+                            issues += 1;
+                        }
+                    }
                 } else {
                     issues += 1;
                 }
@@ -491,21 +578,33 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     }
 
     if issues == 0 && fixed == 0 {
-        println!("\nAll checks passed.");
+        let _ = write!(out, "\nAll checks passed.");
+    } else if fix && issues == 0 {
+        let _ = write!(out, "\nFixed {fixed} issue(s).");
     } else if fix {
-        println!("\nFixed {fixed} issue(s).");
+        let _ = write!(
+            out,
+            "\nFixed {fixed} issue(s); {issues} still need attention (see above)."
+        );
     } else {
-        println!("\n{issues} issue(s) found. Run `mgimind doctor --fix` to fix.");
+        let _ = write!(
+            out,
+            "\n{issues} issue(s) found. Run `mgimind doctor --fix` to fix."
+        );
     }
 
-    Ok(())
+    Ok(out)
 }
 
 async fn cmd_create(name: &str) -> Result<()> {
+    println!("{}", run_create(name).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_create(name: &str) -> Result<String> {
     let config = crate::config::MindConfig::load()?;
     crate::storage::create_library(&config, name).await?;
-    println!("Library '{name}' created.");
-    Ok(())
+    Ok(format!("Library '{name}' created."))
 }
 
 async fn cmd_drop(name: &str) -> Result<()> {
@@ -516,29 +615,38 @@ async fn cmd_drop(name: &str) -> Result<()> {
 }
 
 async fn cmd_list() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
-    let libraries = crate::storage::list_libraries(&config).await?;
-    if libraries.is_empty() {
-        println!("No libraries. Create one with `mgimind create <name>`");
-    } else {
-        println!("Libraries:");
-        for lib in libraries {
-            println!("  - {lib}");
-        }
-    }
+    println!("{}", run_list().await?);
     Ok(())
 }
 
+pub(crate) async fn run_list() -> Result<String> {
+    use std::fmt::Write;
+    let config = crate::config::MindConfig::load()?;
+    let libraries = crate::storage::list_libraries(&config).await?;
+    if libraries.is_empty() {
+        return Ok("No libraries. Create one with `mgimind create <name>`".to_string());
+    }
+    let mut out = String::from("Libraries:");
+    for lib in libraries {
+        let _ = write!(out, "\n  - {lib}");
+    }
+    Ok(out)
+}
+
 async fn cmd_delete(library: &str, id: &str) -> Result<()> {
+    println!("{}", run_delete(library, id).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_delete(library: &str, id: &str) -> Result<String> {
     let config = crate::config::MindConfig::load()?;
     crate::storage::delete_memory(&config, library, id).await?;
-    println!("Deleted from '{library}' [id: {id}]");
-    Ok(())
+    Ok(format!("Deleted from '{library}' [id: {id}]"))
 }
 
 /// Build the compact session-start briefing as a string (last session, key
 /// facts, libraries, vault status). Shared by the `context` CLI command and the
-/// daemon's `context` request so both render identically.
+/// `mind_context` MCP tool so both render identically.
 pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<String> {
     use std::fmt::Write;
 
@@ -626,7 +734,7 @@ async fn cmd_context() -> Result<()> {
     Ok(())
 }
 
-/// Render recent-memories list as text (shared by CLI `history` and the daemon).
+/// Render recent-memories list as text (shared by CLI `history` and MCP `mind_history`).
 pub(crate) fn render_history(results: &[crate::storage::SearchResult]) -> String {
     use std::fmt::Write;
     if results.is_empty() {
@@ -650,6 +758,11 @@ async fn cmd_history(limit: usize) -> Result<()> {
 }
 
 async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
+    println!("{}", run_web(url, save_to).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_web(url: &str, save_to: Option<&str>) -> Result<String> {
     // Use CRW to fetch page
     let output = std::process::Command::new("crw").arg(url).output();
 
@@ -672,13 +785,10 @@ async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
         let config = crate::config::MindConfig::load()?;
         // add_memory chunks long content itself (audit #3).
         let n = crate::storage::add_memory(&config, library, markdown.trim(), Some(url)).await?;
-        println!("Saved {n} chunk(s) from {url} to '{library}'");
+        Ok(format!("Saved {n} chunk(s) from {url} to '{library}'"))
     } else {
-        // Just print
-        println!("{markdown}");
+        Ok(markdown)
     }
-
-    Ok(())
 }
 
 async fn cmd_add(library: &str, content: &str, source: Option<&str>) -> Result<()> {
@@ -689,7 +799,7 @@ async fn cmd_add(library: &str, content: &str, source: Option<&str>) -> Result<(
 }
 
 /// Render search results as text. Shared by the `search` CLI command and the
-/// daemon, so both produce identical output (audit #16).
+/// `mind_search` MCP tool, so both produce identical output.
 pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String {
     use std::fmt::Write;
     if results.is_empty() {
@@ -728,7 +838,7 @@ async fn cmd_fact_add(subject: &str, predicate: &str, object: &str) -> Result<()
     Ok(())
 }
 
-/// Render fact-query results as text (shared by CLI `fact query` and the daemon).
+/// Render fact-query results as text (shared by CLI `fact query` and MCP `mind_fact_query`).
 pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> String {
     use std::fmt::Write;
     if facts.is_empty() {
@@ -752,30 +862,46 @@ async fn cmd_fact_query(subject: &str) -> Result<()> {
 }
 
 async fn cmd_fact_invalidate(id: &str) -> Result<()> {
+    println!("{}", run_fact_invalidate(id).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_fact_invalidate(id: &str) -> Result<String> {
     let config = crate::config::MindConfig::load()?;
     crate::knowledge::invalidate_fact(&config, id).await?;
-    println!("Fact '{id}' invalidated.");
-    Ok(())
+    Ok(format!("Fact '{id}' invalidated."))
 }
 
 async fn cmd_session_start(agent: &str) -> Result<()> {
-    crate::session::start(agent)?;
-    println!("Session started (agent: {agent})");
+    println!("{}", run_session_start(agent).await?);
     Ok(())
+}
+
+pub(crate) async fn run_session_start(agent: &str) -> Result<String> {
+    crate::session::start(agent)?;
+    Ok(format!("Session started (agent: {agent})"))
 }
 
 async fn cmd_session_last(agent: Option<&str>) -> Result<()> {
-    match crate::session::last(agent)? {
-        Some(summary) => println!("{summary}"),
-        None => println!("No previous sessions found."),
-    }
+    println!("{}", run_session_last(agent).await?);
     Ok(())
 }
 
+pub(crate) async fn run_session_last(agent: Option<&str>) -> Result<String> {
+    Ok(match crate::session::last(agent)? {
+        Some(summary) => summary,
+        None => "No previous sessions found.".to_string(),
+    })
+}
+
 async fn cmd_session_end(agent: &str, summary: &str) -> Result<()> {
-    crate::session::end(agent, summary)?;
-    println!("Session ended.");
+    println!("{}", run_session_end(agent, summary).await?);
     Ok(())
+}
+
+pub(crate) async fn run_session_end(agent: &str, summary: &str) -> Result<String> {
+    crate::session::end(agent, summary)?;
+    Ok("Session ended.".to_string())
 }
 
 async fn cmd_backup(output: &str) -> Result<()> {
@@ -793,17 +919,28 @@ async fn cmd_restore(input: &str) -> Result<()> {
 }
 
 async fn cmd_export(format: &str, output: Option<&str>) -> Result<()> {
+    println!("{}", run_export(format, output).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<String> {
     let config = crate::config::MindConfig::load()?;
     let out = output.unwrap_or("./mgimind-export");
-    println!("Exporting as {format} to {out}...");
     let count = crate::storage::export_all(&config, format, out).await?;
-    println!("Exported {count} entries to {out}/");
-    Ok(())
+    Ok(format!(
+        "Exporting as {format} to {out}...\nExported {count} entries to {out}/"
+    ))
 }
 
 // --- Import ---
 
 async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
+    println!("{}", run_import(source, path, library).await?);
+    Ok(())
+}
+
+pub(crate) async fn run_import(source: &str, path: &str, library: &str) -> Result<String> {
+    use std::fmt::Write;
     let config = crate::config::MindConfig::load()?;
     let dir = std::path::Path::new(path);
 
@@ -816,20 +953,22 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
         other => anyhow::bail!("Unknown source: {other}. Supported: obsidian, markdown"),
     }
 
+    let mut out = String::new();
+
     // Ensure the target library is registered (single-collection layout, #18).
     // create_library is idempotent-friendly here: a LibraryExists error is fine.
     if crate::storage::create_library(&config, library)
         .await
         .is_ok()
     {
-        println!("Created library '{library}'");
+        let _ = writeln!(out, "Created library '{library}'");
     }
 
     // Scan for .md files
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     scan_md_files(dir, &mut files)?;
 
-    println!("Found {} markdown files in {path}", files.len());
+    let _ = writeln!(out, "Found {} markdown files in {path}", files.len());
 
     let mut imported = 0;
     let mut skipped = 0;
@@ -860,6 +999,7 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
         match crate::storage::add_memory(&config, library, trimmed, Some(&filename)).await {
             Ok(n) => imported += n,
             Err(e) => {
+                // Per-file progress/errors go to stderr (never the stdout/MCP channel).
                 eprintln!("  Error importing {filename}: {e}");
                 skipped += 1;
             }
@@ -870,8 +1010,11 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
         }
     }
 
-    println!("\nImport complete: {imported} chunks imported, {skipped} skipped");
-    Ok(())
+    let _ = write!(
+        out,
+        "Import complete: {imported} chunks imported, {skipped} skipped"
+    );
+    Ok(out)
 }
 
 fn scan_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> Result<()> {
@@ -893,7 +1036,7 @@ fn scan_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> 
 
 // --- Stats ---
 
-/// Render the statistics block as text (shared by CLI `stats` and the daemon).
+/// Render the statistics block as text (shared by CLI `stats` and MCP `mind_stats`).
 pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<String> {
     use std::fmt::Write;
     let (libraries, facts_count) = crate::storage::stats(config).await?;
@@ -1011,7 +1154,7 @@ const QDRANT_VERSION: &str = "1.18.1";
 pub async fn download_qdrant() -> Result<()> {
     let dest = qdrant_binary_path();
     if dest.exists() {
-        println!("  Qdrant binary already exists at {}", dest.display());
+        eprintln!("  Qdrant binary already exists at {}", dest.display());
         return Ok(());
     }
 
@@ -1044,12 +1187,14 @@ pub async fn download_qdrant() -> Result<()> {
     let archive_path = tmp_dir.join(format!("qdrant.{archive_ext}"));
 
     if expected.is_none() {
-        println!("  [warn] no pinned checksum for this platform's Qdrant - integrity not verified");
+        eprintln!(
+            "  [warn] no pinned checksum for this platform's Qdrant - integrity not verified"
+        );
     }
-    println!("  Downloading Qdrant v{QDRANT_VERSION}...");
+    eprintln!("  Downloading Qdrant v{QDRANT_VERSION}...");
     crate::util::download_file(&url, &archive_path, expected).await?;
 
-    println!("  Extracting...");
+    eprintln!("  Extracting...");
     let member = qdrant_binary_name();
     if archive_ext == "zip" {
         crate::embedder::extract_member_zip(&archive_path, member, &dest)?;
@@ -1068,18 +1213,19 @@ pub async fn download_qdrant() -> Result<()> {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    println!("  Qdrant installed to {}", dest.display());
+    eprintln!("  Qdrant installed to {}", dest.display());
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())
 }
 
-async fn cmd_serve() -> Result<()> {
-    if is_qdrant_running() {
-        println!("Qdrant is already running on port 6334.");
-        return Ok(());
-    }
-
+/// Spawn the bundled Qdrant as a **detached** background process and return its
+/// PID. Detached so it survives the parent exiting - data lives inside Qdrant,
+/// so it must outlive the MCP session (or the foreground `serve` shell) instead
+/// of dying with it. Platform-specific: on Unix the child gets its own process
+/// group so a terminal Ctrl-C (SIGINT to the foreground group) doesn't reach it;
+/// on Windows we use DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP.
+fn spawn_qdrant_detached() -> Result<u32> {
     let qdrant_path = qdrant_binary_path();
     if !qdrant_path.exists() {
         anyhow::bail!(
@@ -1090,8 +1236,6 @@ async fn cmd_serve() -> Result<()> {
 
     let data_dir = crate::config::mind_home().join("qdrant");
     std::fs::create_dir_all(&data_dir)?;
-
-    println!("Starting Qdrant...");
 
     let mut command = std::process::Command::new(&qdrant_path);
     command
@@ -1112,22 +1256,77 @@ async fn cmd_serve() -> Result<()> {
         command.env("QDRANT__SERVICE__API_KEY", key);
     }
 
-    let child = command.spawn().context("Failed to start Qdrant")?;
-
-    // Save PID
-    std::fs::write(qdrant_pid_path(), child.id().to_string())?;
-
-    // Wait for Qdrant to be ready
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if is_qdrant_running() {
-            println!("Qdrant started on port 6333/6334 (PID: {})", child.id());
-            warn_on_dimension_mismatch().await;
-            return Ok(());
-        }
+    // Detach from the parent's process group / console.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
-    anyhow::bail!("Qdrant started but not responding after 15 seconds");
+    let child = command.spawn().context("Failed to start Qdrant")?;
+    let pid = child.id();
+
+    // Save the PID for `mgimind stop`. We deliberately drop the Child handle
+    // without waiting: std never kills children on drop, so the detached Qdrant
+    // keeps running after we exit.
+    std::fs::write(qdrant_pid_path(), pid.to_string())?;
+    Ok(pid)
+}
+
+/// Poll the Qdrant gRPC port until it answers or the timeout elapses. Returns
+/// whether it is running - true also covers the race where another session
+/// brought Qdrant up first (the port is busy for our child, but it IS running).
+fn wait_for_qdrant_ready(max_attempts: u32) -> bool {
+    for _ in 0..max_attempts {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if is_qdrant_running() {
+            return true;
+        }
+    }
+    is_qdrant_running()
+}
+
+/// Ensure Qdrant is up, starting it detached if needed. Used by `mgimind mcp` so
+/// a minimal user never has to run `serve` by hand. Soft on the "two sessions
+/// start at once" race: if the port is already (or becomes) live, that's success
+/// regardless of whose process won. Errors only when Qdrant truly can't be
+/// started (e.g. binary missing), so the caller can surface a `doctor` hint.
+pub(crate) async fn ensure_qdrant_running() -> Result<()> {
+    if is_qdrant_running() {
+        return Ok(());
+    }
+    let pid = spawn_qdrant_detached()?;
+    if wait_for_qdrant_ready(30) {
+        warn_on_dimension_mismatch().await;
+        Ok(())
+    } else {
+        anyhow::bail!("Qdrant was started (PID {pid}) but did not become ready within 15 seconds")
+    }
+}
+
+async fn cmd_serve() -> Result<()> {
+    if is_qdrant_running() {
+        println!("Qdrant is already running on port 6334.");
+        return Ok(());
+    }
+
+    println!("Starting Qdrant...");
+    let pid = spawn_qdrant_detached()?;
+
+    if wait_for_qdrant_ready(30) {
+        println!("Qdrant started on port 6333/6334 (PID: {pid})");
+        warn_on_dimension_mismatch().await;
+        Ok(())
+    } else {
+        anyhow::bail!("Qdrant started but not responding after 15 seconds");
+    }
 }
 
 /// On startup, surface any collection whose vector dimension disagrees with the
