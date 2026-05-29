@@ -6,6 +6,8 @@ import { promisify } from "util";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { accessSync } from "fs";
+import { createConnection } from "net";
+import { homedir } from "os";
 
 const execFileAsync = promisify(execFile);
 
@@ -50,9 +52,71 @@ async function run(args) {
   }
 }
 
+// Long-lived daemon socket (audit #16). The daemon keeps the embedding model
+// warm, so routing embed-heavy calls to it avoids the ~2-5s per-call model
+// reload that spawning the CLI incurs.
+const SOCKET_PATH =
+  process.env.MGIMIND_SOCKET || resolve(homedir(), "mgimind", "daemon.sock");
+
+// Send one newline-delimited JSON request to the daemon and resolve its rendered
+// text. Returns null on any connection/parse failure so the caller can fall back
+// to spawning the CLI — i.e. the daemon is a pure optimization, never required.
+function daemonRequest(req, timeoutMs = 60000) {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const done = (val) => {
+      if (!settled) {
+        settled = true;
+        resolvePromise(val);
+      }
+    };
+    let sock;
+    try {
+      sock = createConnection(SOCKET_PATH);
+    } catch {
+      return done(null);
+    }
+    let buf = "";
+    const timer = setTimeout(() => {
+      try {
+        sock.destroy();
+      } catch {}
+      done(null);
+    }, timeoutMs);
+    sock.on("connect", () => sock.write(JSON.stringify(req) + "\n"));
+    sock.on("data", (chunk) => {
+      buf += chunk.toString();
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      clearTimeout(timer);
+      const line = buf.slice(0, nl);
+      try {
+        sock.destroy();
+      } catch {}
+      try {
+        const resp = JSON.parse(line);
+        if (resp.ok) done(resp.data?.text ?? "(no output)");
+        else done(`Error: ${resp.error}`);
+      } catch {
+        done(null);
+      }
+    });
+    sock.on("error", () => {
+      clearTimeout(timer);
+      done(null);
+    });
+  });
+}
+
+// Try the daemon first; fall back to spawning the CLI if it isn't there.
+async function runVia(req, args) {
+  const viaDaemon = await daemonRequest(req);
+  return viaDaemon !== null ? viaDaemon : run(args);
+}
+
 const server = new McpServer({
   name: "mgi-mind",
-  version: "0.2.0",
+  version: "0.2.1",
 });
 
 // --- Tools ---
@@ -65,7 +129,9 @@ server.tool("mind_search", "Semantic search across memories", {
 }, async ({ query, library, limit, tier }) => {
   const args = ["search", query, "--limit", String(limit), "--tier", String(tier)];
   if (library) args.push("--library", library);
-  const result = await run(args);
+  const req = { cmd: "search", query, limit, tier };
+  if (library) req.library = library;
+  const result = await runVia(req, args);
   return { content: [{ type: "text", text: result }] };
 });
 
@@ -76,7 +142,9 @@ server.tool("mind_add", "Add a memory entry", {
 }, async ({ library, content, source }) => {
   const args = ["add", library, content];
   if (source) args.push("--source", source);
-  const result = await run(args);
+  const req = { cmd: "add", library, content };
+  if (source) req.source = source;
+  const result = await runVia(req, args);
   return { content: [{ type: "text", text: result }] };
 });
 
@@ -85,14 +153,17 @@ server.tool("mind_fact_add", "Add a knowledge graph fact", {
   predicate: z.string(),
   object: z.string(),
 }, async ({ subject, predicate, object }) => {
-  const result = await run(["fact", "add", subject, predicate, object]);
+  const result = await runVia(
+    { cmd: "fact_add", subject, predicate, object },
+    ["fact", "add", subject, predicate, object],
+  );
   return { content: [{ type: "text", text: result }] };
 });
 
 server.tool("mind_fact_query", "Query facts about a subject", {
   subject: z.string(),
 }, async ({ subject }) => {
-  const result = await run(["fact", "query", subject]);
+  const result = await runVia({ cmd: "fact_query", subject }, ["fact", "query", subject]);
   return { content: [{ type: "text", text: result }] };
 });
 
@@ -153,14 +224,14 @@ server.tool("mind_delete", "Delete a specific memory by ID", {
 });
 
 server.tool("mind_context", "Generate compact context briefing for session start", {}, async () => {
-  const result = await run(["context"]);
+  const result = await runVia({ cmd: "context" }, ["context"]);
   return { content: [{ type: "text", text: result }] };
 });
 
 server.tool("mind_history", "Show recent additions chronologically", {
   limit: z.number().default(10),
 }, async ({ limit }) => {
-  const result = await run(["history", "--limit", String(limit)]);
+  const result = await runVia({ cmd: "history", limit }, ["history", "--limit", String(limit)]);
   return { content: [{ type: "text", text: result }] };
 });
 
@@ -228,7 +299,7 @@ server.tool("mind_vault_list", "List stored secret keys (values hidden)", {}, as
 });
 
 server.tool("mind_stats", "Show memory statistics", {}, async () => {
-  const result = await run(["stats"]);
+  const result = await runVia({ cmd: "stats" }, ["stats"]);
   return { content: [{ type: "text", text: result }] };
 });
 

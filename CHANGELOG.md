@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 — Daemon (audit #16)
+
+The MCP server spawned a fresh `mgimind` process per call, reloading the ONNX
+session + tokenizer every time. This release adds a long-lived daemon so the model
+stays warm.
+
+### Added
+- **`mgimind daemon`** (`src/daemon.rs`): loads the embedding model once and serves
+  newline-delimited JSON requests over a Unix socket (`~/mgimind/daemon.sock`).
+  Supported: search, add, context, history, fact_add, fact_query, stats, ping.
+- **Thin MCP client**: `mcp-server/index.js` routes embed-heavy/common tools to the
+  daemon and **falls back to spawning the CLI** when the socket isn't there — the
+  daemon is a pure optimization, never a hard dependency.
+- Shared render helpers (`cli::render_search/render_history/render_facts/build_stats/
+  build_context`) so daemon and CLI output are identical (one source of truth).
+
+### Validated
+- End-to-end against live data (12 587 memories read correctly via the daemon).
+- Latency: warm daemon add ~31ms vs cold CLI add ~175ms (~5.6×). The audit's "2–5s"
+  figure is the cold-disk/first-load case; the model is normally OS page-cached.
+
+### Still open
+- **Operational:** autostart entry for the daemon + cutover of the live instance.
+- Deferred audit items unchanged: single-collection (#18), code embedder / reranker
+  / hybrid search (#21–23); `history` O(total) rides with #18.
+
 ## 0.2.1 — Post-review fixes
 
 A follow-up code review of 0.2.0 found four issues the hardening pass either
