@@ -147,7 +147,7 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
     ] {
         let dest = dir.join(local);
         if dest.exists() {
-            println!("  {local} already exists, skipping.");
+            eprintln!("  {local} already exists, skipping.");
             continue;
         }
         // Pinned SHA-256 for the default reranker; fail-closed (audit #6).
@@ -161,11 +161,11 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
             _ => None,
         };
         if pin.is_none() {
-            println!("  [warn] no pinned checksum for {local} - integrity not verified");
+            eprintln!("  [warn] no pinned checksum for {local} - integrity not verified");
         }
-        println!("  Downloading reranker {local}...");
+        eprintln!("  Downloading reranker {local}...");
         crate::util::download_file(&format!("{base}/{remote}"), &dest, pin).await?;
     }
-    println!("  Reranker downloaded to {}", dir.display());
+    eprintln!("  Reranker downloaded to {}", dir.display());
     Ok(())
 }

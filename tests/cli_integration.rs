@@ -14,6 +14,26 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_mgimind")
 }
 
+/// Write a tempdir `config.json` for `multilingual-e5-base` pointed at `port`,
+/// symlink in the model, and return the fake HOME. Shared by the search tests.
+#[cfg(unix)]
+fn setup_model_home(port: &str, model_src: &std::path::Path) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(mind.join("models")).unwrap();
+    std::os::unix::fs::symlink(model_src, mind.join("models/multilingual-e5-base")).unwrap();
+    std::fs::write(
+        mind.join("config.json"),
+        format!(
+            r#"{{"version":"it","data_dir":"{}","model_name":"multilingual-e5-base","qdrant_port":{},"vector_size":768,"pooling":"mean","uses_token_type_ids":false,"query_prefix":"query: ","passage_prefix":"passage: ","rerank_enabled":false}}"#,
+            mind.display(),
+            port
+        ),
+    )
+    .unwrap();
+    home
+}
+
 /// Returns the test Qdrant gRPC port, or None to skip.
 fn qdrant_port() -> Option<String> {
     std::env::var("MGIMIND_IT_QDRANT").ok()
@@ -97,21 +117,7 @@ fn add_then_search_finds_the_memory() {
         return;
     }
 
-    let home = tempfile::tempdir().expect("tempdir");
-    let mind = home.path().join("mgimind");
-    std::fs::create_dir_all(mind.join("models")).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&model_src, mind.join("models/multilingual-e5-base")).unwrap();
-    std::fs::write(
-        mind.join("config.json"),
-        format!(
-            r#"{{"version":"it","data_dir":"{}","model_name":"multilingual-e5-base","qdrant_port":{},"vector_size":768,"pooling":"mean","uses_token_type_ids":false,"query_prefix":"query: ","passage_prefix":"passage: ","rerank_enabled":false}}"#,
-            mind.display(),
-            port
-        ),
-    )
-    .unwrap();
-
+    let home = setup_model_home(&port, &model_src);
     let lib = format!("itsearch_{}", std::process::id());
     let run = |args: &[&str]| -> (bool, String, String) {
         let out = Command::new(bin())
@@ -149,5 +155,99 @@ fn add_then_search_finds_the_memory() {
     assert!(
         out.contains("Eiffel Tower") && out.contains("Paris"),
         "hybrid search should retrieve the added memory, got:\n{out}"
+    );
+}
+
+/// Same retrieval path as above, but driven over the **MCP stdio transport** end
+/// to end: feed JSON-RPC `initialize` + `tools/call` lines into `mgimind mcp` and
+/// assert the `mind_search` response retrieves what `mind_add` stored. Proves the
+/// hand-rolled protocol, the warm in-process path, and the round-trip together.
+/// Also asserts stdout is pure JSON-RPC (every non-empty line parses as JSON).
+#[cfg(unix)]
+#[test]
+fn mcp_add_then_search_roundtrip() {
+    use std::io::Write;
+
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let home = setup_model_home(&port, &model_src);
+    let lib = format!("itmcp_{}", std::process::id());
+
+    // id 1 init, 2 create, 3 add, 4 search. Sequential handling guarantees the
+    // add commits before the search runs.
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_create","arguments":{"name":lib}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_add","arguments":{"library":lib,
+                "content":"The Eiffel Tower stands in Paris and was completed in 1889."}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"mind_search","arguments":{
+                "query":"where is the eiffel tower located","library":lib,"tier":3}}}),
+    );
+
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .env("HOME", home.path())
+        .env("ORT_DYLIB_PATH", &ort)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mgimind mcp");
+
+    // Write all requests, then close stdin so the server hits EOF and exits.
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        stdin.write_all(input.as_bytes()).expect("write requests");
+    }
+
+    let out = child.wait_with_output().expect("wait mcp");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let _ = Command::new(bin())
+        .args(["drop", &lib])
+        .env("HOME", home.path())
+        .env("ORT_DYLIB_PATH", &ort)
+        .output(); // cleanup regardless of assertions
+
+    // Every non-empty stdout line must be valid JSON-RPC - no stray prints.
+    let mut search_text = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("non-JSON on stdout: {e}\n{line}"));
+        if v.get("id").and_then(serde_json::Value::as_i64) == Some(4) {
+            assert_eq!(
+                v["result"]["isError"], false,
+                "search reported isError\n{line}"
+            );
+            search_text = v["result"]["content"][0]["text"]
+                .as_str()
+                .map(str::to_owned);
+        }
+    }
+
+    let text = search_text.unwrap_or_else(|| {
+        panic!("no search response (id 4)\nstdout:\n{stdout}\nstderr:\n{stderr}")
+    });
+    assert!(
+        text.contains("Eiffel Tower") && text.contains("Paris"),
+        "MCP search should retrieve the added memory, got:\n{text}"
     );
 }

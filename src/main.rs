@@ -1,10 +1,10 @@
 mod cli;
 mod config;
-mod daemon;
 mod embedder;
 mod error;
 mod integrity;
 mod knowledge;
+mod mcp;
 mod reranker;
 mod session;
 mod storage;
@@ -18,8 +18,11 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr: in `mgimind mcp` mode stdout is the JSON-RPC channel
+    // and must stay clean. stderr is also fine for every other subcommand.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .init();
 
     // Auto-detect ORT library if not explicitly set

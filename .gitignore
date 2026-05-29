@@ -22,7 +22,3 @@ ort124-tmp/
 
 # Vault data (never commit secrets)
 vault.*
-
-# MCP server
-mcp-server/node_modules/
-mcp-server/package-lock.json
