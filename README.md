@@ -13,6 +13,12 @@ It's a self-hosted memory system that sits between you and your AI. The AI store
 -> Deploy server is 10.0.0.5:8080 (score: 0.72)
 ```
 
+> **v0.2.0** rebuilds the data & security layers around a full code audit: atomic
+> writes, content-addressed IDs (idempotent upserts), masked/zeroized vault password,
+> SHA-256-verified downloads, loopback-only Qdrant, per-agent sessions, native
+> HTTP/archive handling, and a test suite + CI. Full accounting in
+> [`AUDIT_STATUS.md`](AUDIT_STATUS.md) · changes in [`CHANGELOG.md`](CHANGELOG.md).
+
 ---
 
 ## Table of Contents
@@ -184,6 +190,8 @@ Type=simple
 User=YOUR_USER
 ExecStart=/home/YOUR_USER/.cargo/bin/qdrant
 Environment=QDRANT__STORAGE__STORAGE_PATH=/home/YOUR_USER/mgimind/qdrant/storage
+# Bind to loopback only — never expose Qdrant on all interfaces.
+Environment=QDRANT__SERVICE__HOST=127.0.0.1
 Restart=always
 
 [Install]
@@ -304,14 +312,13 @@ Qdrant compares vectors using cosine similarity. Close vectors = similar meaning
 
 ```
 ~/mgimind/
-├── config.json              # Settings (qdrant port, model name)
+├── config.json              # Settings (qdrant port, model name, vector size)
 ├── vault.enc                # AES-256-GCM encrypted secrets
 ├── vault.salt               # Argon2 salt (32 bytes)
-├── vault.count              # Number of secrets (unencrypted, for stats)
 ├── sessions/
-│   ├── 2026-05-28_14-30_claude-code.md
-│   ├── 2026-05-29_09-00_cursor.md
-│   └── .current             # Pointer to active session
+│   ├── 2026-05-28_14-30-05_claude-code_a1b2c3.md
+│   ├── 2026-05-29_09-00-11_cursor_d4e5f6.md
+│   └── .current.claude-code # Per-agent active-session pointer
 ├── models/
 │   └── all-MiniLM-L6-v2/
 │       ├── model.onnx       # Neural network (44MB)
@@ -406,14 +413,16 @@ Libraries:
 
 #### `mgimind add <library> "<content>" [--source "<tag>"]`
 
-Store a memory. Generates embedding automatically. Deduplicates - won't store the same text twice.
+Store a memory. Generates embedding automatically. Memory IDs are content-addressed
+(`UUIDv5` of library + content), so re-adding the same text is an idempotent upsert —
+it overwrites the same entry instead of creating a duplicate (no error, no race).
 
 ```bash
 $ mgimind add work "Deploy server is 10.0.0.5, SSH port 22"
 Added to 'work' [id: 6ef4f51f-efc0-48ef-bfa4-213dedc9e3d9]
 
 $ mgimind add work "Deploy server is 10.0.0.5, SSH port 22"
-Error: Duplicate content already exists [id: 6ef4f51f-...]
+Added to 'work' [id: 6ef4f51f-efc0-48ef-bfa4-213dedc9e3d9]   # same id — overwritten, not duplicated
 
 $ mgimind add work "React frontend deployed on Vercel" --source "standup-notes"
 Added to 'work' [id: 3b7a2aa8-d127-4d01-b01f-530259b7e272]
@@ -523,8 +532,8 @@ status = completed
 ended = 2026-05-28T16:00:00+00:00
 summary = Discussed MGI-Mind architecture. Decided on Qdrant + Rust. Built CLI with 18 commands.
 
-# End with a summary
-$ mgimind session end --summary "Added vault encryption and web reader. All tests pass."
+# End with a summary (scope to the same agent you started)
+$ mgimind session end --agent claude-code --summary "Added vault encryption and web reader. All tests pass."
 Session ended.
 ```
 
@@ -703,7 +712,7 @@ summary = Built vault encryption, added web reader.
   personal: 12 memories
   docs: 1247 memories
 
-[Vault: 2 secrets stored]
+[Vault: initialized (locked)]
 
 === End Context ===
 ```
@@ -733,8 +742,12 @@ Libraries:  3
 Total memories: 1304
 KG facts:       3
 Sessions:       7
-Vault secrets:  2
+Vault:          initialized (locked)
 ```
+
+> The vault secret **count is not stored in plaintext** — `stats`/`context` show
+> only `initialized (locked)` or `empty`, never a number derived from an
+> unencrypted file.
 
 #### `mgimind backup <file>` / `mgimind restore <file>`
 
@@ -914,7 +927,7 @@ An AI using Tier 2 by default saves 10-20x tokens compared to dumping all contex
 | MCP server | **Bun** | Fast JS runtime, thin layer calling Rust binary |
 | Web reader | **CRW** | Rust, reads any page as Markdown, bypasses bot protection |
 | Vault encryption | **AES-256-GCM** + **Argon2** | Industry standard, password-derived keys |
-| Deduplication | **BLAKE3** | Fast hash, prevents duplicate entries |
+| Deduplication | **content-addressed `UUIDv5`** | Same content → same point ID → idempotent upsert (BLAKE3 hash stored in payload) |
 | License | **Apache 2.0** | Use it commercially, fork it, modify it |
 
 ---
@@ -925,10 +938,12 @@ Config file: `~/mgimind/config.json`
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "data_dir": "/home/user/mgimind",
   "model_name": "all-MiniLM-L6-v2",
-  "qdrant_port": 6334
+  "qdrant_port": 6334,
+  "vector_size": 384,
+  "qdrant_api_key": null
 }
 ```
 
@@ -937,6 +952,11 @@ Config file: `~/mgimind/config.json`
 | `data_dir` | `~/mgimind` | Where all data lives |
 | `model_name` | `all-MiniLM-L6-v2` | ONNX embedding model |
 | `qdrant_port` | `6334` | Qdrant gRPC port |
+| `vector_size` | `384` | Embedding dimension; validated on every op (change requires a re-index) |
+| `qdrant_api_key` | `null` | Optional Qdrant API key; when set, the server requires it and the client sends it |
+
+> Older `config.json` files without `vector_size`/`qdrant_api_key` load fine — the
+> fields default to `384` / `null`.
 
 ### Environment Variables
 
@@ -1055,8 +1075,12 @@ cargo build --release                                     # macOS/Linux
 ### Running Tests
 
 ```bash
-mgimind doctor    # Verify all components
+cargo test        # Unit tests (atomic writes, crypto round-trip, IDs, chunking, config)
+cargo clippy --all-targets -- -D warnings
+mgimind doctor    # Runtime health check (Qdrant, ONNX, model)
 ```
+
+CI runs fmt + clippy + tests + `cargo audit` on every push (`.github/workflows/ci.yml`).
 
 ---
 

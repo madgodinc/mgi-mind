@@ -116,6 +116,9 @@ docker run -d --restart=always -p 6333:6333 -p 6334:6334 \
 2. Run `mgimind session start --agent <your-name>` to begin logging
 3. Greet the user with context from the last session
 
+> Always use the SAME `--agent <your-name>` for `start` and `end`. Sessions are
+> per-agent, so concurrent agents never clobber each other's session (audit #14).
+
 ### During Session
 - Before answering about past events, projects, or preferences: `mgimind search "<query>"`
 - When user shares new information: `mgimind add <library> "<content>"`
@@ -165,7 +168,7 @@ Rules for self-configuration:
 - If unsure whether something is permanent, ask: "Should this be a permanent rule?"
 
 ### On Session End
-- Run `mgimind session end --summary "<what was done, what's planned next>"`
+- Run `mgimind session end --agent <your-name> --summary "<what was done, what's planned next>"`
 - Keep summaries concise (under 200 words)
 
 ## Commands Reference
@@ -200,21 +203,24 @@ mgimind fact invalidate "<id>"
 ### Session Management
 ```bash
 mgimind session start --agent <name>
-mgimind session last
-mgimind session end --summary "<text>"
+mgimind session last [--agent <name>]
+mgimind session end --agent <name> --summary "<text>"
 ```
 
 ### Secure Vault (passwords, SSH, API keys)
 ```bash
 mgimind vault store <key> <value> --category ssh --desc "My server"
-mgimind vault get <key>           # ASKS user confirmation before revealing
+mgimind vault get <key>           # TERMINAL ONLY: prompts for master password (hidden) + confirm
 mgimind vault list                # Shows keys only, never values
 mgimind vault delete <key>
 ```
 
 IMPORTANT: Vault is separate from regular memory. Secrets never appear in search results.
 When user asks to store a password/key/token, use vault, NOT add.
-When you need a secret (e.g., SSH login), call `vault get` - the user will be prompted to confirm.
+The vault is **terminal-only**: the master password and decrypted secrets are NEVER
+passed through MCP/the model channel. Do not try to read a secret yourself — tell the
+user to run `mgimind vault get <key>` in their terminal (the `mind_vault_get` MCP tool
+returns these instructions, not the secret).
 
 ### Qdrant Management
 ```bash
@@ -308,9 +314,9 @@ User owns all data. User can move, backup, delete at any time.
 3. PREFER tier 1-2 searches to minimize token usage
 4. LOG every session - continuity depends on it
 5. VERIFY facts before stating them - search first, answer second
-6. When accessing vault secrets via MCP, WARN the user first
+6. NEVER read vault secrets yourself — direct the user to `mgimind vault get` in a terminal (secrets don't cross the MCP channel)
 7. Use CRW to read web pages - do NOT hallucinate content from URLs
 8. After reading a web page, offer to save key info to MGI-Mind memory
 
 ---
-MGI-Mind v0.1.0 | Apache 2.0 | Mad God Inc
+MGI-Mind v0.2.0 | Apache 2.0 | Mad God Inc

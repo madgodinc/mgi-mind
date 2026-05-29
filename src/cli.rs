@@ -160,9 +160,7 @@ pub enum FactAction {
         object: String,
     },
     /// Query facts about a subject
-    Query {
-        subject: String,
-    },
+    Query { subject: String },
     /// Invalidate a fact
     Invalidate {
         /// Fact ID
@@ -178,10 +176,17 @@ pub enum SessionAction {
         #[arg(long, default_value = "unknown")]
         agent: String,
     },
-    /// Show last session summary
-    Last,
-    /// End current session with summary
+    /// Show last session summary (optionally scoped to an agent)
+    Last {
+        /// Only consider this agent's sessions
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// End the active session for an agent with a summary
     End {
+        /// Agent name whose session to end
+        #[arg(long, default_value = "unknown")]
+        agent: String,
         /// Session summary
         #[arg(long)]
         summary: String,
@@ -227,39 +232,51 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Create { name } => cmd_create(&name).await,
         Commands::Drop { name } => cmd_drop(&name).await,
         Commands::List => cmd_list().await,
-        Commands::Add { library, content, source } => {
-            cmd_add(&library, &content, source.as_deref()).await
-        }
-        Commands::Search { query, library, limit, tier } => {
-            cmd_search(&query, library.as_deref(), limit, tier).await
-        }
+        Commands::Add {
+            library,
+            content,
+            source,
+        } => cmd_add(&library, &content, source.as_deref()).await,
+        Commands::Search {
+            query,
+            library,
+            limit,
+            tier,
+        } => cmd_search(&query, library.as_deref(), limit, tier).await,
         Commands::Delete { library, id } => cmd_delete(&library, &id).await,
         Commands::Context => cmd_context().await,
         Commands::History { limit } => cmd_history(limit).await,
         Commands::Web { url, save } => cmd_web(&url, save.as_deref()).await,
         Commands::Fact { action } => match action {
-            FactAction::Add { subject, predicate, object } => {
-                cmd_fact_add(&subject, &predicate, &object).await
-            }
+            FactAction::Add {
+                subject,
+                predicate,
+                object,
+            } => cmd_fact_add(&subject, &predicate, &object).await,
             FactAction::Query { subject } => cmd_fact_query(&subject).await,
             FactAction::Invalidate { id } => cmd_fact_invalidate(&id).await,
         },
         Commands::Session { action } => match action {
             SessionAction::Start { agent } => cmd_session_start(&agent).await,
-            SessionAction::Last => cmd_session_last().await,
-            SessionAction::End { summary } => cmd_session_end(&summary).await,
+            SessionAction::Last { agent } => cmd_session_last(agent.as_deref()).await,
+            SessionAction::End { agent, summary } => cmd_session_end(&agent, &summary).await,
         },
         Commands::Vault { action } => match action {
-            VaultAction::Store { key, value, category, desc } => {
-                cmd_vault_store(&key, &value, &category, &desc).await
-            }
+            VaultAction::Store {
+                key,
+                value,
+                category,
+                desc,
+            } => cmd_vault_store(&key, &value, &category, &desc).await,
             VaultAction::Get { key, yes } => cmd_vault_get(&key, yes).await,
             VaultAction::List => cmd_vault_list().await,
             VaultAction::Delete { key } => cmd_vault_delete(&key).await,
         },
-        Commands::Import { source, path, library } => {
-            cmd_import(&source, &path, &library).await
-        }
+        Commands::Import {
+            source,
+            path,
+            library,
+        } => cmd_import(&source, &path, &library).await,
         Commands::Stats => cmd_stats().await,
         Commands::Backup { output } => cmd_backup(&output).await,
         Commands::Restore { input } => cmd_restore(&input).await,
@@ -274,7 +291,10 @@ async fn cmd_init() -> Result<()> {
     use crate::storage;
 
     if config::is_initialized() {
-        println!("MGI-Mind is already initialized at {}", config::mind_home().display());
+        println!(
+            "MGI-Mind is already initialized at {}",
+            config::mind_home().display()
+        );
         return Ok(());
     }
 
@@ -288,11 +308,11 @@ async fn cmd_init() -> Result<()> {
     config.save()?;
 
     // Try to initialize storage (Qdrant may not be running yet)
-    if is_qdrant_running() {
-        if let Err(e) = storage::init(&config).await {
-            println!("  Note: Could not initialize Qdrant collections: {e}");
-            println!("  Collections will be created on first use.");
-        }
+    if is_qdrant_running()
+        && let Err(e) = storage::init(&config).await
+    {
+        println!("  Note: Could not initialize Qdrant collections: {e}");
+        println!("  Collections will be created on first use.");
     }
 
     println!("MGI-Mind initialized at {}", config::mind_home().display());
@@ -459,11 +479,15 @@ async fn cmd_context() -> Result<()> {
     let config = crate::config::MindConfig::load()?;
 
     // 1. Last session
-    let session = crate::session::last()?.unwrap_or_else(|| "No previous sessions.".to_string());
+    let session =
+        crate::session::last(None)?.unwrap_or_else(|| "No previous sessions.".to_string());
 
     // 2. Key facts from KG
     let client = crate::storage::get_client(&config).await?;
-    let facts_exist = client.collection_exists(crate::storage::FACTS_COLLECTION).await.unwrap_or(false);
+    let facts_exist = client
+        .collection_exists(crate::storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false);
 
     let mut facts_summary = String::new();
     if facts_exist {
@@ -492,8 +516,8 @@ async fn cmd_context() -> Result<()> {
     // 3. Libraries overview
     let (libraries, facts_count) = crate::storage::stats(&config).await?;
 
-    // 4. Vault count
-    let vault_count = crate::vault::count();
+    // 4. Vault status (no plaintext count on disk — audit #26)
+    let vault_summary = crate::vault::summary();
 
     // Build compact context
     println!("=== MGI-Mind Context ===");
@@ -501,7 +525,9 @@ async fn cmd_context() -> Result<()> {
     println!("[Last Session]");
     // Only print first 10 lines of session
     for (i, line) in session.lines().enumerate() {
-        if i >= 10 { break; }
+        if i >= 10 {
+            break;
+        }
         println!("{line}");
     }
     println!();
@@ -516,9 +542,9 @@ async fn cmd_context() -> Result<()> {
     for (name, count) in &libraries {
         println!("  {name}: {count} memories");
     }
-    if vault_count > 0 {
+    if crate::vault::is_vault_initialized() {
         println!();
-        println!("[Vault: {vault_count} secrets stored]");
+        println!("[Vault: {vault_summary}]");
     }
     println!();
     println!("=== End Context ===");
@@ -545,14 +571,10 @@ async fn cmd_history(limit: usize) -> Result<()> {
 
 async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
     // Use CRW to fetch page
-    let output = std::process::Command::new("crw")
-        .arg(url)
-        .output();
+    let output = std::process::Command::new("crw").arg(url).output();
 
     let markdown = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!("CRW failed: {err}. Is crw installed? Run: cargo install crw-cli");
@@ -573,7 +595,9 @@ async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
         let chunks = chunk_text(markdown.trim(), 500);
         let mut saved = 0;
         for chunk in &chunks {
-            if chunk.trim().len() < 10 { continue; }
+            if chunk.trim().len() < 10 {
+                continue;
+            }
             match crate::storage::add_memory(&config, library, chunk, Some(url)).await {
                 Ok(_) => saved += 1,
                 Err(e) => {
@@ -606,7 +630,13 @@ async fn cmd_search(query: &str, library: Option<&str>, limit: usize, tier: u8) 
         println!("No results.");
     } else {
         for (i, r) in results.iter().enumerate() {
-            println!("{}. [{}] (score: {:.3}) id: {}", i + 1, r.library, r.score, r.id);
+            println!(
+                "{}. [{}] (score: {:.3}) id: {}",
+                i + 1,
+                r.library,
+                r.score,
+                r.id
+            );
             println!("   {}", r.content);
             if let Some(src) = &r.source {
                 println!("   source: {src}");
@@ -653,16 +683,16 @@ async fn cmd_session_start(agent: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_session_last() -> Result<()> {
-    match crate::session::last()? {
+async fn cmd_session_last(agent: Option<&str>) -> Result<()> {
+    match crate::session::last(agent)? {
         Some(summary) => println!("{summary}"),
         None => println!("No previous sessions found."),
     }
     Ok(())
 }
 
-async fn cmd_session_end(summary: &str) -> Result<()> {
-    crate::session::end(summary)?;
+async fn cmd_session_end(agent: &str, summary: &str) -> Result<()> {
+    crate::session::end(agent, summary)?;
     println!("Session ended.");
     Ok(())
 }
@@ -725,7 +755,10 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
     for file in &files {
         let content = match std::fs::read_to_string(file) {
             Ok(c) => c,
-            Err(_) => { skipped += 1; continue; }
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
 
         // Skip empty files and very short ones
@@ -736,7 +769,8 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
         }
 
         // Use filename as source tag
-        let filename = file.file_name()
+        let filename = file
+            .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -787,23 +821,47 @@ fn scan_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> 
     Ok(())
 }
 
+/// Split text into ~`max_chars` chunks with a small overlap between consecutive
+/// chunks, and hard-split any single line longer than `max_chars` so it never
+/// becomes a giant chunk that the embedder would silently truncate (audit #20).
+/// (Token-aware / AST-aware chunking is planned for v0.3.)
 fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
     if text.chars().count() <= max_chars {
         return vec![text.to_string()];
     }
 
+    let overlap = (max_chars / 8).max(32);
+
+    // Break into line units, hard-splitting overlong lines first.
+    let mut units: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.chars().count() <= max_chars {
+            units.push(line.to_string());
+        } else {
+            let chars: Vec<char> = line.chars().collect();
+            for piece in chars.chunks(max_chars) {
+                units.push(piece.iter().collect());
+            }
+        }
+    }
+
     let mut chunks = Vec::new();
     let mut current = String::new();
 
-    for line in text.lines() {
-        if current.chars().count() + line.chars().count() > max_chars && !current.is_empty() {
+    for unit in &units {
+        if !current.is_empty() && current.chars().count() + unit.chars().count() + 1 > max_chars {
             chunks.push(current.clone());
-            current.clear();
+            // Seed the next chunk with the tail of this one for context continuity.
+            let count = current.chars().count();
+            current = current
+                .chars()
+                .skip(count.saturating_sub(overlap))
+                .collect();
         }
         if !current.is_empty() {
             current.push('\n');
         }
-        current.push_str(line);
+        current.push_str(unit);
     }
 
     if !current.trim().is_empty() {
@@ -823,13 +881,15 @@ async fn cmd_stats() -> Result<()> {
 
     // Count sessions
     let session_count = std::fs::read_dir(crate::config::sessions_dir())
-        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| {
-            e.file_name().to_string_lossy().ends_with(".md")
-        }).count())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+                .count()
+        })
         .unwrap_or(0);
 
-    // Count vault entries
-    let vault_count = crate::vault::count();
+    // Vault status (no plaintext count on disk — audit #26)
+    let vault_summary = crate::vault::summary();
 
     println!("MGI-Mind Statistics");
     println!("-------------------");
@@ -840,7 +900,7 @@ async fn cmd_stats() -> Result<()> {
     println!("Total memories: {total_memories}");
     println!("KG facts:       {facts_count}");
     println!("Sessions:       {session_count}");
-    println!("Vault secrets:  {vault_count}");
+    println!("Vault:          {vault_summary}");
 
     Ok(())
 }
@@ -869,7 +929,14 @@ async fn cmd_vault_list() -> Result<()> {
         println!("Vault secrets:");
         for (key, category, desc) in &keys {
             let desc_str = if desc.is_empty() { "" } else { desc.as_str() };
-            println!("  [{category}] {key}{}", if desc_str.is_empty() { String::new() } else { format!(" - {desc_str}") });
+            println!(
+                "  [{category}] {key}{}",
+                if desc_str.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {desc_str}")
+                }
+            );
         }
     }
     Ok(())
@@ -923,21 +990,25 @@ pub async fn download_qdrant() -> Result<()> {
         return Ok(());
     }
 
-    let (archive_name, archive_ext) = if cfg!(target_os = "windows") {
-        ("qdrant-x86_64-pc-windows-msvc", "zip")
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            ("qdrant-aarch64-apple-darwin", "tar.gz")
+    let is_x64 = cfg!(target_arch = "x86_64");
+    let (archive_name, archive_ext, expected): (&str, &str, Option<&str>) =
+        if cfg!(target_os = "windows") {
+            ("qdrant-x86_64-pc-windows-msvc", "zip", None)
+        } else if cfg!(target_os = "macos") {
+            if cfg!(target_arch = "aarch64") {
+                ("qdrant-aarch64-apple-darwin", "tar.gz", None)
+            } else {
+                ("qdrant-x86_64-apple-darwin", "tar.gz", None)
+            }
+        } else if is_x64 {
+            (
+                "qdrant-x86_64-unknown-linux-gnu",
+                "tar.gz",
+                crate::integrity::pin(crate::integrity::QDRANT_LINUX_X64_1_18_1),
+            )
         } else {
-            ("qdrant-x86_64-apple-darwin", "tar.gz")
-        }
-    } else {
-        if cfg!(target_arch = "aarch64") {
-            ("qdrant-aarch64-unknown-linux-musl", "tar.gz")
-        } else {
-            ("qdrant-x86_64-unknown-linux-gnu", "tar.gz")
-        }
-    };
+            ("qdrant-aarch64-unknown-linux-musl", "tar.gz", None)
+        };
 
     let url = format!(
         "https://github.com/qdrant/qdrant/releases/download/v{QDRANT_VERSION}/{archive_name}.{archive_ext}"
@@ -947,58 +1018,29 @@ pub async fn download_qdrant() -> Result<()> {
     std::fs::create_dir_all(&tmp_dir)?;
     let archive_path = tmp_dir.join(format!("qdrant.{archive_ext}"));
 
-    println!("  Downloading Qdrant v{QDRANT_VERSION}...");
-    let status = std::process::Command::new("curl")
-        .args(["-sL", "-o", &archive_path.to_string_lossy(), &url])
-        .status()
-        .context("Failed to download Qdrant")?;
-
-    if !status.success() {
-        anyhow::bail!("Qdrant download failed");
+    if expected.is_none() {
+        println!("  [warn] no pinned checksum for this platform's Qdrant — integrity not verified");
     }
+    println!("  Downloading Qdrant v{QDRANT_VERSION}...");
+    crate::util::download_file(&url, &archive_path, expected).await?;
 
     println!("  Extracting...");
+    let member = qdrant_binary_name();
     if archive_ext == "zip" {
-        // Windows zip
-        let _ = std::process::Command::new("tar")
-            .args(["-xf", &archive_path.to_string_lossy(), "-C", &tmp_dir.to_string_lossy()])
-            .status();
-
-        // Try to find extracted binary
-        let extracted = tmp_dir.join(qdrant_binary_name());
-        if extracted.exists() {
-            std::fs::copy(&extracted, &dest)?;
-        } else {
-            // Fallback: unzip
-            let _ = std::process::Command::new("unzip")
-                .args(["-o", &archive_path.to_string_lossy().to_string(), "-d", &tmp_dir.to_string_lossy().to_string()])
-                .status();
-            let extracted = tmp_dir.join(qdrant_binary_name());
-            if extracted.exists() {
-                std::fs::copy(&extracted, &dest)?;
-            } else {
-                anyhow::bail!("Could not find qdrant binary after extraction");
-            }
-        }
+        crate::embedder::extract_member_zip(&archive_path, member, &dest)?;
     } else {
-        // tar.gz
-        std::process::Command::new("tar")
-            .args(["-xzf", &archive_path.to_string_lossy(), "-C", &tmp_dir.to_string_lossy()])
-            .status()
-            .context("Failed to extract Qdrant")?;
+        crate::embedder::extract_member_tar_gz(&archive_path, member, &dest)?;
+    }
 
-        let extracted = tmp_dir.join(qdrant_binary_name());
-        if extracted.exists() {
-            std::fs::copy(&extracted, &dest)?;
-            // Make executable on Unix
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-            }
-        } else {
-            anyhow::bail!("Could not find qdrant binary after extraction");
-        }
+    if !dest.exists() {
+        anyhow::bail!("Could not find qdrant binary after extraction");
+    }
+
+    // Make executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
     }
 
     println!("  Qdrant installed to {}", dest.display());
@@ -1026,13 +1068,26 @@ async fn cmd_serve() -> Result<()> {
 
     println!("Starting Qdrant...");
 
-    let child = std::process::Command::new(&qdrant_path)
-        .env("QDRANT__STORAGE__STORAGE_PATH", data_dir.join("storage").to_string_lossy().to_string())
+    let mut command = std::process::Command::new(&qdrant_path);
+    command
+        .env(
+            "QDRANT__STORAGE__STORAGE_PATH",
+            data_dir.join("storage").to_string_lossy().to_string(),
+        )
         .env("QDRANT__LOG_LEVEL", "WARN")
+        // Bind to loopback only — never expose Qdrant on all interfaces (audit #7).
+        .env("QDRANT__SERVICE__HOST", "127.0.0.1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("Failed to start Qdrant")?;
+        .stderr(std::process::Stdio::null());
+
+    // Optional API-key authentication (audit #7).
+    if let Ok(cfg) = crate::config::MindConfig::load()
+        && let Some(key) = cfg.qdrant_api_key
+    {
+        command.env("QDRANT__SERVICE__API_KEY", key);
+    }
+
+    let child = command.spawn().context("Failed to start Qdrant")?;
 
     // Save PID
     std::fs::write(qdrant_pid_path(), child.id().to_string())?;
@@ -1066,12 +1121,49 @@ async fn cmd_stop() -> Result<()> {
             .args(["/PID", pid, "/F"])
             .status();
     } else {
-        let _ = std::process::Command::new("kill")
-            .arg(pid)
-            .status();
+        let _ = std::process::Command::new("kill").arg(pid).status();
     }
 
     std::fs::remove_file(&pid_path)?;
     println!("Qdrant stopped.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_text;
+
+    #[test]
+    fn short_text_is_single_chunk() {
+        assert_eq!(chunk_text("hello", 100), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn long_text_splits_with_bounded_chunks() {
+        let line = "word ".repeat(400); // ~2000 chars, multiple lines worth
+        let chunks = chunk_text(&line, 200);
+        assert!(chunks.len() > 1, "should split into multiple chunks");
+        // No chunk should be wildly over the limit (overlap adds a little).
+        for c in &chunks {
+            assert!(
+                c.chars().count() <= 200 + 64,
+                "chunk too large: {}",
+                c.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_single_line_is_hard_split() {
+        let giant = "x".repeat(1000); // one line, no whitespace
+        let chunks = chunk_text(&giant, 200);
+        assert!(
+            chunks.len() >= 5,
+            "overlong line must be hard-split, got {}",
+            chunks.len()
+        );
+        for c in &chunks {
+            assert!(c.chars().count() <= 200 + 64);
+        }
+    }
 }
