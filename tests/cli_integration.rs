@@ -75,3 +75,79 @@ fn library_lifecycle_against_real_qdrant() {
         "library should be gone after drop"
     );
 }
+
+/// Full retrieval path: add -> embed -> hybrid search -> assert the memory is found.
+/// Needs the embedding model, so it is gated on `MGIMIND_IT_MODELS` (a models dir
+/// holding `multilingual-e5-base/`) and `ORT_DYLIB_PATH`. CI without the model skips
+/// it; run it locally with a downloaded model. Reranking is off here so the test
+/// stays deterministic and does not also require the reranker model.
+#[test]
+fn add_then_search_finds_the_memory() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(mind.join("models")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&model_src, mind.join("models/multilingual-e5-base")).unwrap();
+    std::fs::write(
+        mind.join("config.json"),
+        format!(
+            r#"{{"version":"it","data_dir":"{}","model_name":"multilingual-e5-base","qdrant_port":{},"vector_size":768,"pooling":"mean","uses_token_type_ids":false,"query_prefix":"query: ","passage_prefix":"passage: ","rerank_enabled":false}}"#,
+            mind.display(),
+            port
+        ),
+    )
+    .unwrap();
+
+    let lib = format!("itsearch_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("HOME", home.path())
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // create -> add a distinctive memory -> search a paraphrase -> assert it is found.
+    assert!(run(&["create", &lib]).0);
+    let (ok, _out, err) = run(&[
+        "add",
+        &lib,
+        "The Eiffel Tower stands in Paris and was completed in 1889.",
+    ]);
+    assert!(ok, "add failed: {err}");
+
+    let (ok, out, err) = run(&[
+        "search",
+        "where is the eiffel tower located",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    let _ = run(&["drop", &lib]); // cleanup regardless of assertions below
+    assert!(ok, "search failed: {err}");
+    assert!(
+        out.contains("Eiffel Tower") && out.contains("Paris"),
+        "hybrid search should retrieve the added memory, got:\n{out}"
+    );
+}

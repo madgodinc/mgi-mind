@@ -116,7 +116,7 @@ async function runVia(req, args) {
 
 const server = new McpServer({
   name: "mgi-mind",
-  version: "0.7.2",
+  version: "0.7.3",
 });
 
 // --- Tools ---
@@ -164,6 +164,13 @@ server.tool("mind_fact_query", "Query facts about a subject", {
   subject: z.string(),
 }, async ({ subject }) => {
   const result = await runVia({ cmd: "fact_query", subject }, ["fact", "query", subject]);
+  return { content: [{ type: "text", text: result }] };
+});
+
+server.tool("mind_fact_invalidate", "Soft-delete a fact by ID (for superseding a changed single-valued fact)", {
+  id: z.string().describe("Fact ID from mind_fact_query"),
+}, async ({ id }) => {
+  const result = await run(["fact", "invalidate", id]);
   return { content: [{ type: "text", text: result }] };
 });
 
