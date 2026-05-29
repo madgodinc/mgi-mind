@@ -52,17 +52,26 @@ pub async fn add_fact(
 
     let text = format!("{subject} {predicate} {object}");
     let embedding = embedder::embed(config, &text).await?;
+    // Same model-swap guard the memory path has (audit #11): the facts
+    // collection was previously left unprotected.
+    storage::check_dim(&embedding, config)?;
 
     // Deterministic ID dedups identical triples (audit #13): re-adding the same
     // (s,p,o) overwrites instead of piling up duplicates.
     let id = fact_id(subject, predicate, object);
     let now = chrono::Utc::now().to_rfc3339();
+    // Keep the original created_at on re-add; only updated_at moves.
+    let created_at =
+        storage::existing_payload_string(&client, storage::FACTS_COLLECTION, &id, "created_at")
+            .await
+            .unwrap_or_else(|| now.clone());
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("subject".into(), subject.into());
     payload.insert("predicate".into(), predicate.into());
     payload.insert("object".into(), object.into());
-    payload.insert("created_at".into(), now.into());
+    payload.insert("created_at".into(), created_at.into());
+    payload.insert("updated_at".into(), now.into());
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
 

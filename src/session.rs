@@ -12,17 +12,22 @@ fn current_pointer(agent: &str) -> PathBuf {
     config::sessions_dir().join(format!(".current.{}", sanitize(agent)))
 }
 
+/// Injective filesystem-safe encoding of an agent name. Every byte outside
+/// `[A-Za-z0-9-]` — including the escape byte `_` itself — becomes `_HH`, so
+/// distinct names can never collapse onto the same `.current.<agent>` pointer.
+/// (The old `_`-for-everything mapping reintroduced audit #14: `team a`,
+/// `team/a`, `team.a` all shared one pointer and clobbered each other.)
 fn sanitize(agent: &str) -> String {
-    agent
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(agent.len());
+    for &b in agent.as_bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' {
+            out.push(b as char);
+        } else {
+            out.push('_');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
 }
 
 pub fn start(agent: &str) -> Result<()> {
@@ -111,5 +116,38 @@ pub fn last(agent: Option<&str>) -> Result<Option<String>> {
         Ok(Some(content))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize;
+
+    #[test]
+    fn sanitize_is_injective_for_colliding_names() {
+        // The old mapping collapsed all of these to "team_a" (audit #14 rerun).
+        let a = sanitize("team a");
+        let b = sanitize("team_a");
+        let c = sanitize("team/a");
+        let d = sanitize("team.a");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_ne!(b, c);
+        assert_ne!(b, d);
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn sanitize_preserves_safe_chars() {
+        assert_eq!(sanitize("claude-code"), "claude-code");
+        assert_eq!(sanitize("Cursor2"), "Cursor2");
+    }
+
+    #[test]
+    fn sanitize_escapes_underscore_itself() {
+        // A literal underscore must not be confused with the escape prefix.
+        assert_eq!(sanitize("_"), "_5F");
+        assert_ne!(sanitize("a_b"), sanitize("a b"));
     }
 }

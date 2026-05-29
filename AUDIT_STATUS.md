@@ -26,17 +26,17 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 | 8 | Incoherent dedup logic | ✅ | Removed the `score > 0.99 && hash ==` check entirely. Replaced by content-addressed IDs (see #15) — identical content is an idempotent upsert. |
 | 9 | `history()` doesn't sort | ✅ | Sorted by `created_at` descending (RFC3339 sorts chronologically). |
 | 10 | `export` silently caps at 10k | ✅ | `scroll_all()` paginates via `next_page_offset` to the end. |
-| 11 | Vector size hardcoded (384) | ✅ | `vector_size` is in config; collections use it; `check_dim()` validates every embedding against it and errors on mismatch (model-swap detection). |
+| 11 | Vector size hardcoded (384) | 🟡 | `vector_size` is in config; collections use it; `check_dim()` validates every embedding (memory **and**, since 0.2.1, facts) against it. 0.2.1 also adds a config↔collection dimension check at `serve` startup (`dimension_mismatches`, best-effort warn). Still no automatic re-index on a model swap — that migration is a deploy-time step. |
 | 12 | KG query loses data (top-20 + substring) | ✅ | `query_facts` scrolls the full facts collection and filters by subject **or** predicate **or** object; valid-only. |
 | 13 | `invalidate` hard-deletes; `valid` unused; no fact dedup | ✅ | `invalidate_fact` now `set_payload valid=false` (soft delete, honored by queries). Facts get deterministic IDs from `(s,p,o)` → dedup. |
-| 14 | Session model breaks under concurrency | ✅ | Removed the single global `.current`; per-agent `.current.<agent>` pointers. Filenames carry seconds + a random suffix (no same-minute collision). `session end`/`last` are scoped by `--agent`. |
+| 14 | Session model breaks under concurrency | ✅ | Removed the single global `.current`; per-agent `.current.<agent>` pointers. Filenames carry seconds + a random suffix (no same-minute collision). `session end`/`last` are scoped by `--agent`. (0.2.1: the agent-name `sanitize` is now injective `_HH` escaping — a review found the original `_`-for-everything mapping let `team a`/`team/a`/`team.a` collapse to one pointer and re-clobber.) |
 | 15 | TOCTOU race in `add_memory` | ✅ | Deterministic `UUIDv5(namespace, library + content)`: same content → same point ID → idempotent upsert. No read-before-write, no race, no duplicate. |
 
 ## Part I — Architecture & performance (🟡)
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 16 | MCP spawns a process per call → model reloads | 🔜 v0.3 | Big architectural change (long-lived daemon + thin MCP client). Deferred so v0.2 ships safe correctness fixes without a rewrite. Mitigated meanwhile by #17. |
+| 16 | MCP spawns a process per call → model reloads | 🔜 v0.3 | Big architectural change (long-lived daemon + thin MCP client). Deferred so v0.2 ships safe correctness fixes without a rewrite. **Not** mitigated on the MCP path: #17's caches live in process memory, and the per-call CLI process dies after each call, so the model still reloads (~2–5s) every MCP call until this daemon lands. #17 only helps a long-lived CLI process (e.g. bulk import). |
 | 17 | Tokenizer re-read from disk every embed | ✅ | Tokenizer cached in a `OnceCell`, loaded once (like the ONNX session). |
 | 18 | Cross-library search is sequential | 🔜 v0.3 | Tied to a single-collection redesign (one collection + `library` payload filter). Deferred with #16; current per-collection layout is unchanged and correct. |
 | 19 | Heavy shellouts (curl/tar/unzip) | ✅ | Native `reqwest` downloads; native `flate2`+`tar` and `zip` extraction; native gzip+tar backup/restore. No external `curl`/`tar`/`unzip` needed. (`crw` web reader stays optional/external.) |
@@ -75,7 +75,17 @@ core; planned as a sibling project.
 
 ---
 
-**Summary:** of the 27 audited issues, **20 are fixed in v0.2**, **4 are partial**
-(mechanism shipped, hardening continues: #6, #20, #24, #25), and **3 are deferred to
-v0.3** (#16 daemon, #18 single-collection, #21–23 ML/search — all requiring either a
-data migration or new models, to be done at deploy time with the owner's sign-off).
+**Summary (counted per issue, not per group):** of the 27 audited issues, **18 are
+fully fixed**, **5 are partial** (#6, #11, #20, #24, #25 — mechanism shipped,
+hardening continues), and **4 are deferred to v0.3** (#16 daemon, #18
+single-collection, #21–23 ML/search — counted here as one group of four issues; all
+requiring a data migration or new models, done at deploy time with the owner's
+sign-off). The earlier "20 fixed / 3 deferred" headline counted #21–23 as a single
+line — per-issue the split is 18 / 5 / 4.
+
+A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
+source, and surfaced regressions introduced by the fixes themselves — a `sanitize`
+collision (re-opened #14), `created_at` being reset on re-add, and an unguarded
+facts path (#11). Those are fixed in **0.2.1** (see `CHANGELOG.md`). The remaining
+known limitation is `history` being O(total memories); its `order_by` fix rides with
+the v0.3 storage rework.
