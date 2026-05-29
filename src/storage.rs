@@ -755,12 +755,13 @@ pub async fn stats(config: &MindConfig) -> Result<(Vec<(String, u64)>, u64)> {
 /// `content` (no fragile raw-vector extraction) while preserving the original
 /// `created_at`; deterministic IDs make it idempotent (safe to re-run). With
 /// `purge`, the old collections are deleted after a successful copy.
-pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<String>)> {
+pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, Vec<String>)> {
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
     let collections = client.list_collections().await?;
     let mut moved = 0usize;
+    let mut skipped = 0usize;
     let mut libs: Vec<String> = Vec::new();
 
     for col in &collections.collections {
@@ -780,8 +781,22 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
             let created_at =
                 extract_string(&p.payload, "created_at").unwrap_or_else(|| now.clone());
 
-            let embedding = embedder::embed_passage(config, &content).await?;
-            check_dim(&embedding, config)?;
+            // Skip (don't abort) on a per-entry failure, so one bad record can't
+            // kill a long migration. Truncation in the embedder handles overlong
+            // inputs; this catches anything else.
+            let embedding = match embedder::embed_passage(config, &content).await {
+                Ok(e) if check_dim(&e, config).is_ok() => e,
+                Ok(_) => {
+                    eprintln!("  [skip] dimension mismatch for one entry in {}", col.name);
+                    skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("  [skip] embed failed in {}: {e}", col.name);
+                    skipped += 1;
+                    continue;
+                }
+            };
             let id = deterministic_id(lib, &content);
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
             let payload = build_payload(&content, &hash, &created_at, &now, lib, source.as_deref());
@@ -790,7 +805,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
                 .add_vector(DENSE_VEC, Vector::new_dense(embedding))
                 .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
 
-            client
+            if let Err(e) = client
                 .upsert_points(
                     UpsertPointsBuilder::new(
                         MEMORIES_COLLECTION,
@@ -799,7 +814,11 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
                     .wait(true),
                 )
                 .await
-                .with_context(|| format!("migrate: upsert from {} failed", col.name))?;
+            {
+                eprintln!("  [skip] upsert failed in {}: {e}", col.name);
+                skipped += 1;
+                continue;
+            }
             moved += 1;
         }
 
@@ -812,7 +831,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
 
     libs.sort();
     libs.dedup();
-    Ok((moved, libs))
+    Ok((moved, skipped, libs))
 }
 
 /// Native gzip+tar backup of the data dir — no `tar` shellout (audit #19).

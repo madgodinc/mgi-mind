@@ -78,12 +78,13 @@ pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Re
     }
 
     let n = encodings.len();
+    // Cap at the model's 512-position limit (longer pairs crash the ONNX Expand).
     let max_len = encodings
         .iter()
         .map(|e| e.get_ids().len())
         .max()
         .unwrap_or(0)
-        .max(1);
+        .clamp(1, 512);
 
     // Right-pad every pair to max_len (pad id + mask 0) for a rectangular batch.
     let mut ids = vec![XLMR_PAD_ID; n * max_len];
@@ -91,7 +92,7 @@ pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Re
     for (i, enc) in encodings.iter().enumerate() {
         let eids = enc.get_ids();
         let emask = enc.get_attention_mask();
-        for (j, (&id, &m)) in eids.iter().zip(emask.iter()).enumerate() {
+        for (j, (&id, &m)) in eids.iter().zip(emask.iter()).take(max_len).enumerate() {
             ids[i * max_len + j] = id as i64;
             mask[i * max_len + j] = m as i64;
         }

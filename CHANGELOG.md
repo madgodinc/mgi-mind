@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1 - Sequence-length fix and resilient migrate
+
+A real-data migration of 12,587 entries surfaced two issues.
+
+### Fixed
+- Inputs longer than the model's 512-token limit crashed ONNX inference with
+  "invalid expand shape". The embedder and reranker now truncate to 512 tokens.
+- `migrate` aborted the whole run on a single failing entry. It now logs and skips
+  the entry, continues, and reports how many were skipped.
+
+### Notes
+- Reranking is on by default. `bge-reranker-base` is strong on English (the target
+  audience) and improves precision there. It does lower Russian ranking, so turn it
+  off (`rerank_enabled=false`) or use a stronger multilingual reranker if you need
+  good Russian results.
+
 ## 0.7.0 — Hybrid search: dense + sparse + RRF (audit #23)
 
 Dense (semantic) retrieval misses exact rare terms; lexical (BM25) retrieval
