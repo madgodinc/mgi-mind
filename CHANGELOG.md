@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.0 - one cross-platform binary that is itself the MCP server
+
+A single Rust binary now speaks MCP over stdio directly (`mgimind mcp`), replacing the
+three-process stack (Node MCP server -> Unix-socket daemon -> per-call CLI). The process
+lives for the whole session, so the embedding models load once and stay warm with no
+daemon to run. This also removes the only Unix-only code (`UnixListener`), so the
+Windows build compiles, and drops the Node/npm dependency entirely. Net change: about
+450 fewer lines.
+
+### Added
+- **`mgimind mcp`** - hand-rolled JSON-RPC 2.0 MCP server over stdio (no SDK
+  dependency). Implements `initialize`, `tools/list` and `tools/call` for all 21 tools,
+  plus `ping` and the lifecycle notifications. Tool-execution failures are returned as
+  a result with `isError: true` (not a JSON-RPC error), so a failing tool never drops
+  the client session. Requests are handled sequentially - one stdio client needs no
+  session pool.
+- **Automatic Qdrant startup.** `mgimind mcp` brings up the bundled Qdrant (detached,
+  in its own process group on Unix / `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on
+  Windows) so Qdrant outlives the session and a minimal user never runs `serve` by
+  hand. Soft on the "two sessions start at once" race.
+- **Antivirus / quarantine diagnosis in `doctor`.** When a download reports success but
+  the file is missing afterward, `doctor` now says so ("likely antivirus/SmartScreen
+  quarantine") instead of silently looping on `--fix`.
+- **MCP round-trip integration test** (`mcp_add_then_search_roundtrip`): drives
+  `mgimind mcp` over real stdin/stdout and asserts add -> search retrieves, and that
+  every stdout line is valid JSON-RPC.
+
+### Changed
+- The 14 tools that previously shelled out to the CLI now call shared text-returning
+  `run_*`/`render_*`/`build_*` functions in-process. All download/progress output moved
+  from stdout to stderr so the MCP stdout channel stays pure JSON-RPC.
+- `vault_list` is now terminal-only (like `vault_get`/`vault_store`): it needs the
+  master password on a TTY, which MCP has no access to, so it returns instructions
+  instead of failing.
+- Logs go to stderr in every mode.
+
+### Removed
+- The Unix-socket daemon (`src/daemon.rs`, `mgimind daemon`) and the Node MCP server
+  (`mcp-server/`). Their job - keeping models warm and bridging the assistant - is now
+  done by the single `mgimind mcp` process.
+
+### Distribution
+- Release workflow builds Linux/macOS/Windows binaries on a tag and publishes them to
+  GitHub Releases, so users download instead of building.
+
 ## 0.7.4 - retrieval test is now a real CI gate
 
 The 0.7.3 `add -> search` integration test only ran locally, because CI did not

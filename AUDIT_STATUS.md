@@ -1,4 +1,4 @@
-# Audit Status - MGI-Mind v0.7.x
+# Audit Status - MGI-Mind v0.8.x
 
 This document accounts for **every** item in the security/quality audit (27 issues
 across Parts I-III, plus the Part II competitive roadmap). Each row is either
@@ -11,7 +11,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 1 | No tests | ✅ | 28 unit tests (util, storage, vault, config, daemon, integrity), including a vault encrypt/decrypt property roundtrip over varied payloads, plus a black-box integration test (`tests/cli_integration.rs`) driving the built binary against a real Qdrant. CI: fmt + clippy `-D warnings` + unit tests on Linux/macOS/Windows, an integration job against a Qdrant service container, and `cargo audit`. (Isolation is the CI Qdrant service; the full embed/search end-to-end is runtime-validated, not yet a model-loading CI test.) |
+| 1 | No tests | ✅ | 33 unit tests (util, storage, vault, config, mcp, integrity), including a vault encrypt/decrypt property roundtrip over varied payloads and the MCP protocol surface (tools/list, lifecycle, isError semantics), plus black-box integration tests (`tests/cli_integration.rs`) driving the built binary against a real Qdrant - over both the CLI and the `mgimind mcp` stdio transport (`mcp_add_then_search_roundtrip`). CI: fmt + clippy `-D warnings` + unit tests on Linux/macOS/Windows, an integration job against a Qdrant service container, and `cargo audit`. |
 | 2 | Vault broken/insecure over MCP | ✅ | Master password read via `rpassword` (needs a TTY) - over a non-interactive MCP channel it errors instead of silently using an empty password. `mind_vault_get` no longer returns plaintext over MCP; it instructs the user to run `mgimind vault get` in a terminal. |
 | 3 | Master password not masked | ✅ | `rpassword::prompt_password` (no echo). Password buffers `zeroize()`d after key derivation. |
 | 4 | Non-atomic file writes → corruption | ✅ | `util::atomic_write` (temp file + fsync + rename) used for config, vault, salt, sessions, exports. |
@@ -36,7 +36,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 16 | MCP spawns a process per call → model reloads | ✅ (0.3.0) | `mgimind daemon` (`src/daemon.rs`) loads the ONNX session + tokenizer once and serves newline-JSON requests over a Unix socket (`~/mgimind/daemon.sock`); the MCP client (`mcp-server/index.js`) routes embed-heavy calls (search/add/fact_add/context/history/stats) to it and **falls back to spawning the CLI** if the socket is absent - so the daemon is a pure optimization, never required. Runtime-validated against live data: warm add 31ms vs cold CLI 175ms (~5.6×; the audit's "2-5s" applies to a cold-disk/first load - the model is normally page-cached). **Operational steps remaining:** autostart entry + cutover of the live instance. |
+| 16 | MCP spawns a process per call → model reloads | ✅ (0.8.0) | Solved structurally: `mgimind mcp` (`src/mcp.rs`) **is** the MCP server, one Rust process for the whole session, so the ONNX session + tokenizer (global `OnceCell`) load once and stay warm - there is no per-call spawn to optimize away. This replaced the 0.3.0 Unix-socket daemon + Node client entirely (both removed), which also fixed the Windows build (no more `UnixListener`) and dropped the Node dependency. Warm vs cold remains ~5.6× (warm add 31ms vs cold CLI 175ms). |
 | 17 | Tokenizer re-read from disk every embed | ✅ | Tokenizer cached in a `OnceCell`, loaded once (like the ONNX session). |
 | 18 | Cross-library search is sequential | ✅ (0.4.0) | Single `memories` collection with a `library` payload field + keyword index; search runs one query (global top-k, or a `library` filter) instead of scanning N collections and merging. A `created_at` datetime index powers `history` via `order_by` (this also fixes the post-0.2 review's O(total) `history` finding - newest-N without scrolling everything). `mgimind migrate [--purge]` imports legacy `mem_*` collections (re-embeds from stored content, preserves `created_at`, idempotent). Runtime-validated on an isolated instance: global+filtered search, ordered history, per-library counts, drop-by-filter, and migrate all verified. |
 | 19 | Heavy shellouts (curl/tar/unzip) | ✅ | Native `reqwest` downloads; native `flate2`+`tar` and `zip` extraction; native gzip+tar backup/restore. No external `curl`/`tar`/`unzip` needed. (`crw` web reader stays optional/external.) |
@@ -64,8 +64,8 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 Tracked, not implemented in v0.2 (these are net-new features, intentionally staged
 after the core is solid): Д1 bench harness (LoCoMo/LongMemEval), Д2 auto-extraction
 ingest pipeline, Д3 bi-temporal facts, Д4 decay/consolidation, Д5 self-editing memory,
-Д6 procedural memory, Д7 multi-tenant shared memory. The single-collection + daemon
-foundation (#16, #18) is the prerequisite for most of these.
+Д6 procedural memory, Д7 multi-tenant shared memory. The single-collection + warm
+in-process MCP foundation (#16, #18) is the prerequisite for most of these.
 
 ## Part III - Code-verification gate - 🔜 separate component
 
@@ -80,16 +80,17 @@ core; planned as a sibling project.
 default stack pinned, custom/other-platform still warn; #11 Argon2 pinned, no
 versioned re-derivation; #13 fact dedup + soft-delete, no supersession; #20 char
 chunking, not token/AST-aware; #24 word-boundary truncation, no precomputed
-summaries; #25 `ort` on rc), and **0 are deferred**. 0.3.0 daemon (#16), 0.4.0
-single-collection (#18), 0.5.0 e5 embedder (#21), 0.6.0 reranker (#22), 0.7.0 hybrid
-search (#23), 0.7.1 sequence-length + resilient migrate, 0.7.2 code-review fixes
-(pins, chunking, vault durability, daemon socket, tests).
+summaries; #25 `ort` on rc), and **0 are deferred**. 0.3.0 daemon (#16, later
+superseded), 0.4.0 single-collection (#18), 0.5.0 e5 embedder (#21), 0.6.0 reranker
+(#22), 0.7.0 hybrid search (#23), 0.7.1 sequence-length + resilient migrate, 0.7.2
+code-review fixes (pins, chunking, vault durability, tests), 0.8.0 single
+cross-platform `mgimind mcp` binary replacing the daemon + Node stack (#16).
 
 **Honest gaps a reviewer should know:** fact supersession is not implemented (#13);
-the facts collection stores an unused dense vector; embedding is not batched; the
-daemon serializes inference under one mutex (fine for one user). **Operationally
-remaining** (not audit items): the live cutover (deploy, `doctor --fix`, `migrate`)
-and daemon autostart.
+the facts collection stores an unused dense vector; embedding is not batched; the MCP
+server handles requests sequentially (one stdio client, so no concurrency - a session
+pool is deferred until it serves many clients). **Operationally remaining** (not audit
+items): the live cutover (deploy, `doctor --fix`, `migrate`).
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves - a `sanitize`
