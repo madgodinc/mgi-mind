@@ -149,6 +149,10 @@ pub enum Commands {
 
     /// Stop bundled Qdrant server
     Stop,
+
+    /// Run the long-lived daemon (keeps the embedding model warm; serves the
+    /// MCP client over a Unix socket to avoid per-call model reloads — audit #16)
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -283,7 +287,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
+        Commands::Daemon => cmd_daemon().await,
     }
+}
+
+async fn cmd_daemon() -> Result<()> {
+    let config = crate::config::MindConfig::load()?;
+    crate::daemon::run(config).await
 }
 
 async fn cmd_init() -> Result<()> {
@@ -475,15 +485,18 @@ async fn cmd_delete(library: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_context() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+/// Build the compact session-start briefing as a string (last session, key
+/// facts, libraries, vault status). Shared by the `context` CLI command and the
+/// daemon's `context` request so both render identically.
+pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<String> {
+    use std::fmt::Write;
 
     // 1. Last session
     let session =
         crate::session::last(None)?.unwrap_or_else(|| "No previous sessions.".to_string());
 
     // 2. Key facts from KG
-    let client = crate::storage::get_client(&config).await?;
+    let client = crate::storage::get_client(config).await?;
     let facts_exist = client
         .collection_exists(crate::storage::FACTS_COLLECTION)
         .await
@@ -507,65 +520,74 @@ async fn cmd_context() -> Result<()> {
                 let obj = crate::storage::extract_string_pub(p, "object").unwrap_or_default();
                 let valid = crate::storage::extract_string_pub(p, "valid").unwrap_or_default();
                 if valid == "true" {
-                    facts_summary.push_str(&format!("  {subj} -> {pred} -> {obj}\n"));
+                    let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}");
                 }
             }
         }
     }
 
     // 3. Libraries overview
-    let (libraries, facts_count) = crate::storage::stats(&config).await?;
+    let (libraries, facts_count) = crate::storage::stats(config).await?;
 
     // 4. Vault status (no plaintext count on disk — audit #26)
     let vault_summary = crate::vault::summary();
 
-    // Build compact context
-    println!("=== MGI-Mind Context ===");
-    println!();
-    println!("[Last Session]");
-    // Only print first 10 lines of session
-    for (i, line) in session.lines().enumerate() {
-        if i >= 10 {
-            break;
-        }
-        println!("{line}");
+    let mut out = String::new();
+    let _ = writeln!(out, "=== MGI-Mind Context ===");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "[Last Session]");
+    // Only include the first 10 lines of the session.
+    for line in session.lines().take(10) {
+        let _ = writeln!(out, "{line}");
     }
-    println!();
-    println!("[Knowledge Graph - {} facts]", facts_count);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "[Knowledge Graph - {facts_count} facts]");
     if facts_summary.is_empty() {
-        println!("  (none)");
+        let _ = writeln!(out, "  (none)");
     } else {
-        print!("{facts_summary}");
+        out.push_str(&facts_summary);
     }
-    println!();
-    println!("[Libraries]");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "[Libraries]");
     for (name, count) in &libraries {
-        println!("  {name}: {count} memories");
+        let _ = writeln!(out, "  {name}: {count} memories");
     }
     if crate::vault::is_vault_initialized() {
-        println!();
-        println!("[Vault: {vault_summary}]");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "[Vault: {vault_summary}]");
     }
-    println!();
-    println!("=== End Context ===");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "=== End Context ===");
 
+    Ok(out)
+}
+
+async fn cmd_context() -> Result<()> {
+    let config = crate::config::MindConfig::load()?;
+    print!("{}", build_context(&config).await?);
     Ok(())
+}
+
+/// Render recent-memories list as text (shared by CLI `history` and the daemon).
+pub(crate) fn render_history(results: &[crate::storage::SearchResult]) -> String {
+    use std::fmt::Write;
+    if results.is_empty() {
+        return "No memories yet.".to_string();
+    }
+    let mut out = String::from("Recent memories:\n");
+    for (i, r) in results.iter().enumerate() {
+        let _ = writeln!(out, "{}. [{}] {}", i + 1, r.library, r.content);
+        if let Some(src) = &r.source {
+            let _ = writeln!(out, "   source: {src}");
+        }
+    }
+    out.trim_end().to_string()
 }
 
 async fn cmd_history(limit: usize) -> Result<()> {
     let config = crate::config::MindConfig::load()?;
     let results = crate::storage::history(&config, limit).await?;
-    if results.is_empty() {
-        println!("No memories yet.");
-    } else {
-        println!("Recent memories:");
-        for (i, r) in results.iter().enumerate() {
-            println!("{}. [{}] {}", i + 1, r.library, r.content);
-            if let Some(src) = &r.source {
-                println!("   source: {src}");
-            }
-        }
-    }
+    println!("{}", render_history(&results));
     Ok(())
 }
 
@@ -623,27 +645,36 @@ async fn cmd_add(library: &str, content: &str, source: Option<&str>) -> Result<(
     Ok(())
 }
 
+/// Render search results as text. Shared by the `search` CLI command and the
+/// daemon, so both produce identical output (audit #16).
+pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String {
+    use std::fmt::Write;
+    if results.is_empty() {
+        return "No results.".to_string();
+    }
+    let mut out = String::new();
+    for (i, r) in results.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "{}. [{}] (score: {:.3}) id: {}",
+            i + 1,
+            r.library,
+            r.score,
+            r.id
+        );
+        let _ = writeln!(out, "   {}", r.content);
+        if let Some(src) = &r.source {
+            let _ = writeln!(out, "   source: {src}");
+        }
+        let _ = writeln!(out);
+    }
+    out.trim_end().to_string()
+}
+
 async fn cmd_search(query: &str, library: Option<&str>, limit: usize, tier: u8) -> Result<()> {
     let config = crate::config::MindConfig::load()?;
     let results = crate::storage::search(&config, query, library, limit, tier).await?;
-    if results.is_empty() {
-        println!("No results.");
-    } else {
-        for (i, r) in results.iter().enumerate() {
-            println!(
-                "{}. [{}] (score: {:.3}) id: {}",
-                i + 1,
-                r.library,
-                r.score,
-                r.id
-            );
-            println!("   {}", r.content);
-            if let Some(src) = &r.source {
-                println!("   source: {src}");
-            }
-            println!();
-        }
-    }
+    println!("{}", render_search(&results));
     Ok(())
 }
 
@@ -654,19 +685,26 @@ async fn cmd_fact_add(subject: &str, predicate: &str, object: &str) -> Result<()
     Ok(())
 }
 
+/// Render fact-query results as text (shared by CLI `fact query` and the daemon).
+pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> String {
+    use std::fmt::Write;
+    if facts.is_empty() {
+        return format!("No facts about '{subject}'.");
+    }
+    let mut out = String::new();
+    for f in facts {
+        let _ = writeln!(out, "  {} -> {} -> {}", f.subject, f.predicate, f.object);
+        if let Some(ts) = &f.created_at {
+            let _ = writeln!(out, "    added: {ts}");
+        }
+    }
+    out.trim_end().to_string()
+}
+
 async fn cmd_fact_query(subject: &str) -> Result<()> {
     let config = crate::config::MindConfig::load()?;
     let facts = crate::knowledge::query_facts(&config, subject).await?;
-    if facts.is_empty() {
-        println!("No facts about '{subject}'.");
-    } else {
-        for f in &facts {
-            println!("  {} -> {} -> {}", f.subject, f.predicate, f.object);
-            if let Some(ts) = &f.created_at {
-                println!("    added: {ts}");
-            }
-        }
-    }
+    println!("{}", render_facts(subject, &facts));
     Ok(())
 }
 
@@ -873,13 +911,12 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
 
 // --- Stats ---
 
-async fn cmd_stats() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
-    let (libraries, facts_count) = crate::storage::stats(&config).await?;
-
+/// Render the statistics block as text (shared by CLI `stats` and the daemon).
+pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<String> {
+    use std::fmt::Write;
+    let (libraries, facts_count) = crate::storage::stats(config).await?;
     let total_memories: u64 = libraries.iter().map(|(_, c)| c).sum();
 
-    // Count sessions
     let session_count = std::fs::read_dir(crate::config::sessions_dir())
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -891,17 +928,23 @@ async fn cmd_stats() -> Result<()> {
     // Vault status (no plaintext count on disk — audit #26)
     let vault_summary = crate::vault::summary();
 
-    println!("MGI-Mind Statistics");
-    println!("-------------------");
-    println!("Libraries:  {}", libraries.len());
+    let mut out = String::new();
+    let _ = writeln!(out, "MGI-Mind Statistics");
+    let _ = writeln!(out, "-------------------");
+    let _ = writeln!(out, "Libraries:  {}", libraries.len());
     for (name, count) in &libraries {
-        println!("  {name}: {count} memories");
+        let _ = writeln!(out, "  {name}: {count} memories");
     }
-    println!("Total memories: {total_memories}");
-    println!("KG facts:       {facts_count}");
-    println!("Sessions:       {session_count}");
-    println!("Vault:          {vault_summary}");
+    let _ = writeln!(out, "Total memories: {total_memories}");
+    let _ = writeln!(out, "KG facts:       {facts_count}");
+    let _ = writeln!(out, "Sessions:       {session_count}");
+    let _ = write!(out, "Vault:          {vault_summary}");
+    Ok(out)
+}
 
+async fn cmd_stats() -> Result<()> {
+    let config = crate::config::MindConfig::load()?;
+    println!("{}", build_stats(&config).await?);
     Ok(())
 }
 

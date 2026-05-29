@@ -6,7 +6,7 @@ fn default_vector_size() -> u64 {
     384
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MindConfig {
     pub version: String,
     pub data_dir: PathBuf,

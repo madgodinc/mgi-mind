@@ -36,7 +36,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 16 | MCP spawns a process per call → model reloads | 🔜 v0.3 | Big architectural change (long-lived daemon + thin MCP client). Deferred so v0.2 ships safe correctness fixes without a rewrite. **Not** mitigated on the MCP path: #17's caches live in process memory, and the per-call CLI process dies after each call, so the model still reloads (~2–5s) every MCP call until this daemon lands. #17 only helps a long-lived CLI process (e.g. bulk import). |
+| 16 | MCP spawns a process per call → model reloads | ✅ (0.3.0) | `mgimind daemon` (`src/daemon.rs`) loads the ONNX session + tokenizer once and serves newline-JSON requests over a Unix socket (`~/mgimind/daemon.sock`); the MCP client (`mcp-server/index.js`) routes embed-heavy calls (search/add/fact_add/context/history/stats) to it and **falls back to spawning the CLI** if the socket is absent — so the daemon is a pure optimization, never required. Runtime-validated against live data: warm add 31ms vs cold CLI 175ms (~5.6×; the audit's "2–5s" applies to a cold-disk/first load — the model is normally page-cached). **Operational steps remaining:** autostart entry + cutover of the live instance. |
 | 17 | Tokenizer re-read from disk every embed | ✅ | Tokenizer cached in a `OnceCell`, loaded once (like the ONNX session). |
 | 18 | Cross-library search is sequential | 🔜 v0.3 | Tied to a single-collection redesign (one collection + `library` payload filter). Deferred with #16; current per-collection layout is unchanged and correct. |
 | 19 | Heavy shellouts (curl/tar/unzip) | ✅ | Native `reqwest` downloads; native `flate2`+`tar` and `zip` extraction; native gzip+tar backup/restore. No external `curl`/`tar`/`unzip` needed. (`crw` web reader stays optional/external.) |
@@ -75,13 +75,13 @@ core; planned as a sibling project.
 
 ---
 
-**Summary (counted per issue, not per group):** of the 27 audited issues, **18 are
-fully fixed**, **5 are partial** (#6, #11, #20, #24, #25 — mechanism shipped,
-hardening continues), and **4 are deferred to v0.3** (#16 daemon, #18
-single-collection, #21–23 ML/search — counted here as one group of four issues; all
-requiring a data migration or new models, done at deploy time with the owner's
-sign-off). The earlier "20 fixed / 3 deferred" headline counted #21–23 as a single
-line — per-issue the split is 18 / 5 / 4.
+**Summary (counted per issue):** of the 27 audited issues, **18 are fully fixed**
+(#1–5, 7–10, 12–17, 19, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 —
+mechanism shipped, hardening continues), and **4 are deferred** (#18
+single-collection, #21–23 ML/search — all requiring a data migration or new models,
+done at deploy time with the owner's sign-off). 0.3.0 closed the daemon (#16); the
+remaining deferred items are the single-collection redesign and the search-quality
+ML work.
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves — a `sanitize`
