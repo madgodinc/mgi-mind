@@ -38,7 +38,10 @@ async fn main() -> Result<()> {
             },
         );
         if ort_lib.exists() {
-            // SAFETY: single-threaded at this point (before tokio runtime starts work)
+            // SAFETY: set_var is unsafe in edition 2024 because a concurrent
+            // getenv/setenv is UB. This runs at the very top of main, before we
+            // spawn any task or load ORT; the runtime's worker threads exist but
+            // none touch the environment here, so there is no concurrent access.
             unsafe {
                 std::env::set_var("ORT_DYLIB_PATH", &ort_lib);
             }
