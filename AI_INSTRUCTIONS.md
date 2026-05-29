@@ -104,8 +104,9 @@ Vault: `mind_vault_get`, `mind_vault_store` (both return terminal instructions).
 Web: `mind_web` (read a page as Markdown, if the `crw` tool is installed).
 Data: `mind_import`, `mind_export`, `mind_doctor`.
 
-Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind daemon`,
-`mgimind migrate`, `mgimind drop`, `mgimind backup`/`restore`.
+Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind migrate`,
+`mgimind drop`, `mgimind backup`/`restore`. (The MCP server itself is `mgimind mcp`,
+which the user wires into their AI client once; it starts Qdrant automatically.)
 
 ## A good session, end to end
 
@@ -147,4 +148,4 @@ Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind daemo
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v0.7.x | Apache-2.0 | Mad God Inc
+MGI-Mind v0.8.x | Apache-2.0 | Mad God Inc

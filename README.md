@@ -59,9 +59,10 @@ It is built for retrieval quality, not just storage:
   which is far more accurate than comparing vectors. It is on by default and is
   strong on English. (See [Languages and the reranker](#languages-and-the-reranker)
   for the trade-off on other languages.)
-- **A warm daemon.** A long-lived process keeps the models loaded in memory and
-  answers the assistant over a Unix socket, so a lookup costs milliseconds instead of
-  reloading a model on every call.
+- **One warm process.** The `mgimind mcp` server is itself the MCP server: it runs for
+  the whole session, so the models load once and stay warm in memory and a lookup costs
+  milliseconds instead of reloading a model on every call. No daemon, no socket, no Node
+  wrapper - a single Rust binary speaking MCP over stdio.
 
 Around retrieval there is a small knowledge graph for structured facts, per-agent
 session logs for continuity, and an encrypted, terminal-only vault for secrets.
@@ -88,69 +89,64 @@ never leaves the machine.
 
 ## Quick start
 
-You need a Rust toolchain (`rustup`) and Node or Bun (for the MCP server). Linux is
-shown here; macOS and Windows build the same way.
+One binary, three steps, all in the terminal. No build toolchain, no Node, no manual
+service to babysit.
 
 ```bash
-# 1. Build
-git clone https://github.com/madgodinc/mgi-mind.git
-cd mgi-mind
-cargo build --release                  # binary: target/release/mgimind
+# 1. Get the binary for your OS from Releases (or build from source, below) and put it
+#    on your PATH. Examples assume it is called `mgimind`.
 
 # 2. Set up: create ~/mgimind/, then download Qdrant, ONNX Runtime, and the models
-target/release/mgimind init
-target/release/mgimind doctor --fix
+mgimind init
+mgimind doctor --fix
 
-# 3. Start the vector database and the warm daemon
-target/release/mgimind serve           # bundled Qdrant (loopback only)
-target/release/mgimind daemon &         # keeps models warm for fast lookups
-
-# 4. Try it
-target/release/mgimind create work
-target/release/mgimind add work "Deploy server is 10.0.0.5:8080, SSH as deploy@"
-target/release/mgimind search "how do I reach the deploy box"
+# 3. Wire it into your assistant. `mgimind mcp` IS the MCP server; it starts Qdrant
+#    itself, so there is nothing else to run.
+claude mcp add mgimind -- /absolute/path/to/mgimind mcp
 ```
+
+That's it. `mgimind mcp` runs for the whole session with the models warm; it brings up
+the bundled Qdrant on first use. Point your assistant at
+[`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md) once so it knows the protocol (log a session,
+search before answering, use the vault for secrets).
 
 `doctor --fix` downloads into `~/mgimind/`: ONNX Runtime (the library the embedder
 loads), the Qdrant binary, the embedding model (multilingual-e5-base, quantized ONNX,
 about 270 MB) and the reranker (bge-reranker-base, quantized ONNX, about 280 MB).
 
-> **Run the daemon as a service.** Step 3 starts the daemon in the foreground with
-> `&`. For day-to-day use, keep it running so the assistant never hits a cold start.
-> A minimal systemd user unit:
->
-> ```ini
-> # ~/.config/systemd/user/mgimind-daemon.service
-> [Unit]
-> Description=MGI-Mind daemon
-> After=network.target
-> [Service]
-> ExecStart=%h/mgi-mind/target/release/mgimind daemon
-> Restart=on-failure
-> [Install]
-> WantedBy=default.target
-> ```
->
-> `systemctl --user enable --now mgimind-daemon`. Without the daemon everything still
-> works; the MCP server just spawns the CLI per call and reloads the model each time.
-
-### Connect your assistant (MCP)
+**Try it from the CLI** (optional - the same binary is a normal command-line tool):
 
 ```bash
-cd mcp-server
-bun install                            # or: npm install
+mgimind create work
+mgimind add work "Deploy server is 10.0.0.5:8080, SSH as deploy@"
+mgimind search "how do I reach the deploy box"
 ```
 
-Add it to Claude Code:
+### Per-OS notes
+
+- **Linux / macOS.** The steps above work as-is. On macOS the first run of a downloaded
+  binary may need `xattr -d com.apple.quarantine /path/to/mgimind`, or right-click ->
+  Open once in Finder.
+- **Windows.** SmartScreen may warn on the unsigned `mgimind.exe` ("Windows protected
+  your PC") - choose **More info -> Run anyway**. Antivirus can also quarantine the
+  binary or the models it downloads; if `mgimind doctor` reports a file as downloaded
+  but missing, allow `mgimind.exe` and the `%USERPROFILE%\mgimind` folder in your AV,
+  then re-run `mgimind doctor --fix`. (These are GUI prompts a terminal cannot click;
+  code signing to remove the SmartScreen prompt is on the roadmap.)
+
+### Build from source
+
+If there is no release for your platform, or you want to build it yourself, you need a
+Rust toolchain (`rustup`); no other dependencies.
 
 ```bash
-claude mcp add mgi-mind -- node /absolute/path/to/mgi-mind/mcp-server/index.js
+git clone https://github.com/madgodinc/mgi-mind.git
+cd mgi-mind
+cargo build --release                  # binary: target/release/mgimind
 ```
 
-The MCP server talks to the warm daemon if it is up and falls back to the CLI if not,
-so it works either way. Point your assistant at [`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md)
-once so it knows the protocol (log a session, search before answering, use the vault
-for secrets).
+Then run `target/release/mgimind init && target/release/mgimind doctor --fix` and wire
+it in with `claude mcp add mgimind -- /absolute/path/to/target/release/mgimind mcp`.
 
 ## Using it
 
@@ -188,15 +184,15 @@ Search returns results in tiers so the assistant spends tokens wisely: `--tier 1
 
 ```
   your AI assistant
-        |  MCP (stdio)
+        |  MCP (JSON-RPC over stdio)
         v
-  mcp-server (Node)  --- Unix socket --->  mgimind daemon (Rust, models warm)
-        |  fallback: spawn CLI                   |
-        v                                        v
-  mgimind (Rust CLI) ----------------------> Qdrant (local, loopback only)
-                                                 |
-                                  one "memories" collection, two vectors per point:
-                                  dense (e5, meaning) + sparse (TF-IDF, exact terms)
+  mgimind mcp  (one Rust process: MCP server + embedder, models stay warm)
+        |  starts on first use
+        v
+  Qdrant (local, loopback only)
+        |
+        one "memories" collection, two vectors per point:
+        dense (e5, meaning) + sparse (TF-IDF, exact terms)
 ```
 
 **Storage.** All memories live in one Qdrant collection. A `library` field on each
@@ -273,8 +269,8 @@ config, the vault, or sessions.
 
 | Command | What it does |
 |---|---|
-| `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant. |
-| `mgimind daemon` | Run the warm daemon (loads models once, serves the MCP client). |
+| `mgimind mcp` | Run as the MCP server over stdio (what your assistant connects to). One warm process; starts Qdrant automatically. |
+| `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant by hand (rarely needed - `mcp` does it for you). |
 | `mgimind migrate [--purge]` | Re-embed legacy per-library collections into the single `memories` collection. Idempotent. `--purge` deletes the old collections afterward. |
 | `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar of the whole data directory. |
 | `mgimind export [--format json\|md] [--output <dir>]` | Export memories to files. |
@@ -339,11 +335,14 @@ re-embedded:
 - **"invalid expand shape" / inference errors.** Usually an input far over 512 tokens.
   `add` chunks automatically; if you call the library directly, chunk first.
 - **Searches are slow.** That is the reranker on CPU. Lower `rerank_top_k`, or set
-  `rerank_enabled = false`. Make sure the daemon is running so models stay warm.
-- **Cold start on every call.** The daemon is not running. Start `mgimind daemon` (see
-  the service note in Quick start).
-- **Dimension mismatch warning on `serve`.** A collection's vectors do not match
-  `vector_size`, usually after a model change. Re-embed with `mgimind migrate`.
+  `rerank_enabled = false`. (Models stay warm automatically for the life of the
+  `mgimind mcp` process, so only the first lookup of a session pays the load cost.)
+- **A tool fails right after install.** Run `mgimind doctor` (the assistant can call
+  `mind_doctor`): it reports exactly what is missing - Qdrant not running, a model not
+  downloaded, ONNX Runtime absent, or a file quarantined by antivirus - and `--fix`
+  downloads what it can.
+- **Dimension mismatch warning.** A collection's vectors do not match `vector_size`,
+  usually after a model change. Re-embed with `mgimind migrate`.
 - **Russian results feel off.** Set `rerank_enabled = false` (see the language note).
 
 ## Security
@@ -354,14 +353,14 @@ re-embedded:
 - Qdrant binds to `127.0.0.1` only and supports an API key.
 - The vault is AES-256-GCM with an Argon2id-derived key (parameters pinned so a
   library upgrade cannot lock you out). It is terminal-only: the master password and
-  decrypted secrets never travel over the MCP channel, and the daemon socket is
-  owner-only (0600).
+  decrypted secrets never travel over the MCP channel. The `mind_vault_*` MCP tools
+  return terminal instructions, never the secret value.
 - File writes are atomic and directory-fsynced, so a crash leaves the old file or the
   new one, never a corrupt one.
 
 ## Status and audit
 
-Current version: **0.7.x**. The project went through a full code audit (27 issues):
+Current version: **0.8.x**. The project went through a full code audit (27 issues):
 **21 are fully fixed and 6 are partial** (the mechanism shipped, hardening continues).
 [`AUDIT_STATUS.md`](AUDIT_STATUS.md) accounts for every issue one by one, including the
 honest gaps (for example, fact supersession is not implemented yet).
@@ -378,14 +377,12 @@ src/
   knowledge.rs   knowledge-graph facts
   session.rs     per-agent session files
   vault.rs       encrypted secret vault (terminal only)
-  daemon.rs      Unix-socket daemon (warm models)
+  mcp.rs         MCP server over stdio (hand-rolled JSON-RPC; warm in-process models)
   config.rs      configuration
   integrity.rs   pinned SHA-256 hashes for downloads
   util.rs        atomic writes, verified downloads
-mcp-server/
-  index.js       MCP server (daemon client with CLI fallback)
 tests/
-  cli_integration.rs   black-box tests against a real Qdrant
+  cli_integration.rs   black-box tests against a real Qdrant (CLI + MCP round-trip)
 ```
 
 ## License
