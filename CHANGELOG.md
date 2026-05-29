@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.7.2 - Code-review fixes (security, correctness, tests)
+
+A line-by-line review found real issues; this release closes the actionable ones.
+
+### Security
+- **Supply chain (#6 regression).** The default stack (multilingual-e5-base and
+  bge-reranker-base) was downloading with no checksum because only the old MiniLM
+  was pinned. Both models' quantized ONNX and tokenizer now have pinned SHA-256 and
+  download fail-closed.
+- **Vault store over MCP.** `mind_vault_store` no longer accepts the secret value
+  over MCP (it would land in process argv, and needs a TTY anyway). It now returns
+  terminal instructions, matching `mind_vault_get`.
+- **Daemon socket.** The Unix socket is chmod 0600 so another local user cannot read
+  or write the whole memory. Per-connection bytes are capped (no OOM from a huge
+  line), and a transient accept error no longer kills the daemon.
+
+### Correctness
+- **add_memory now chunks (#3).** The main write path (including MCP `mind_add`) no
+  longer silently drops everything past 512 tokens; long content is split into
+  chunks. `add_memory` returns the number of chunks stored.
+- **Vault durability (#4, #11).** `atomic_write` fsyncs the parent directory so the
+  rename is durable after a crash. Argon2id parameters are pinned (not
+  `Argon2::default()`), so a crate upgrade cannot make existing vaults undecryptable.
+- **Context briefing (#10).** The key-facts section is ordered newest-first
+  (`order_by created_at`) instead of an arbitrary page; the facts collection gets a
+  `created_at` index.
+- **Consistent score.** Reranked results map the cross-encoder logit through a
+  sigmoid to 0..1, so the `score` field means the same thing with rerank on or off.
+- **No double model build.** Embedder and reranker sessions use `get_or_try_init`,
+  so concurrent first calls build the ONNX session exactly once.
+
+### Tests
+- Unit tests expanded to 28 (daemon request parsing, integrity pins, config
+  defaults + legacy-config shape, vault encrypt/decrypt property roundtrip on varied
+  payloads, chunking, sparse vectors).
+- New black-box integration test (`tests/cli_integration.rs`) that drives the built
+  binary against a real Qdrant. CI runs it against a Qdrant service container, and
+  the build/clippy/unit matrix now covers Linux, macOS, and Windows.
+
+### Known, not done here
+- Fact supersession for single-valued predicates (#13) is still not implemented
+  (dedup and soft-delete are); the facts collection stores an unused dense vector;
+  embedding is not batched; the daemon serializes inference under one mutex. These
+  are tracked, not closed.
+
 ## 0.7.1 - Sequence-length fix and resilient migrate
 
 A real-data migration of 12,587 entries surfaced two issues.

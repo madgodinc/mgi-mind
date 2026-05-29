@@ -11,12 +11,12 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 1 | No tests | ✅ | `cargo test` suite added (`util`, `storage`, `vault`, `config`, `cli` unit tests, 12 tests). GitHub Actions CI (`.github/workflows/ci.yml`): fmt + clippy `-D warnings` + test + `cargo audit`. |
+| 1 | No tests | ✅ | 28 unit tests (util, storage, vault, config, daemon, integrity), including a vault encrypt/decrypt property roundtrip over varied payloads, plus a black-box integration test (`tests/cli_integration.rs`) driving the built binary against a real Qdrant. CI: fmt + clippy `-D warnings` + unit tests on Linux/macOS/Windows, an integration job against a Qdrant service container, and `cargo audit`. (Isolation is the CI Qdrant service; the full embed/search end-to-end is runtime-validated, not yet a model-loading CI test.) |
 | 2 | Vault broken/insecure over MCP | ✅ | Master password read via `rpassword` (needs a TTY) - over a non-interactive MCP channel it errors instead of silently using an empty password. `mind_vault_get` no longer returns plaintext over MCP; it instructs the user to run `mgimind vault get` in a terminal. |
 | 3 | Master password not masked | ✅ | `rpassword::prompt_password` (no echo). Password buffers `zeroize()`d after key derivation. |
 | 4 | Non-atomic file writes → corruption | ✅ | `util::atomic_write` (temp file + fsync + rename) used for config, vault, salt, sessions, exports. |
 | 5 | `retrieve()` rewrites the whole vault on read | ✅ | Reads are read-only now; `last_accessed` is no longer written on `get`. |
-| 6 | Downloaded binaries unverified | 🟡 | `util::download_file` verifies SHA-256 fail-closed. Pinned hashes for linux-x64 ONNX Runtime, Qdrant, and the default model (`integrity.rs`). Other platforms/custom models download with an explicit "integrity not verified" warning (pin them in `integrity.rs`). |
+| 6 | Downloaded binaries unverified | 🟡 | `util::download_file` verifies SHA-256 fail-closed. **The full default stack is now pinned**: linux-x64 ONNX Runtime, Qdrant, the default embedder (multilingual-e5-base) and the reranker (bge-reranker-base) ONNX + tokenizers (`integrity.rs`). A 0.7.0 review caught that only the old MiniLM was pinned while the new defaults downloaded unverified; fixed in 0.7.2. Other platforms / custom models still download with an "integrity not verified" warning (pin them in `integrity.rs`). |
 | 7 | Qdrant no auth + plaintext-bound | ✅ | `mgimind serve` binds `QDRANT__SERVICE__HOST=127.0.0.1` (loopback only) and sets `QDRANT__SERVICE__API_KEY` when `qdrant_api_key` is configured; the client authenticates with it. |
 
 ## Part I - Correctness (🟠)
@@ -28,7 +28,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 | 10 | `export` silently caps at 10k | ✅ | `scroll_all()` paginates via `next_page_offset` to the end. |
 | 11 | Vector size hardcoded (384) | 🟡 | `vector_size` is in config; collections use it; `check_dim()` validates every embedding (memory **and**, since 0.2.1, facts) against it. 0.2.1 also adds a config↔collection dimension check at `serve` startup (`dimension_mismatches`, best-effort warn). Still no automatic re-index on a model swap - that migration is a deploy-time step. |
 | 12 | KG query loses data (top-20 + substring) | ✅ | `query_facts` scrolls the full facts collection and filters by subject **or** predicate **or** object; valid-only. |
-| 13 | `invalidate` hard-deletes; `valid` unused; no fact dedup | ✅ | `invalidate_fact` now `set_payload valid=false` (soft delete, honored by queries). Facts get deterministic IDs from `(s,p,o)` → dedup. |
+| 13 | `invalidate` hard-deletes; `valid` unused; no fact dedup | 🟡 | `invalidate_fact` now `set_payload valid=false` (soft delete, honored by queries) and facts get deterministic IDs from `(s,p,o)` (dedup). **Not done:** automatic supersession of single-valued predicates (e.g. `user lives_in X` then `... Y` leaves both valid). It is omitted deliberately - auto-superseding would corrupt multi-valued predicates (`user likes X`, `user likes Y`), which needs a per-predicate cardinality model. A 0.7.0 review flagged this as overclaimed; downgraded to partial. |
 | 14 | Session model breaks under concurrency | ✅ | Removed the single global `.current`; per-agent `.current.<agent>` pointers. Filenames carry seconds + a random suffix (no same-minute collision). `session end`/`last` are scoped by `--agent`. (0.2.1: the agent-name `sanitize` is now injective `_HH` escaping - a review found the original `_`-for-everything mapping let `team a`/`team/a`/`team.a` collapse to one pointer and re-clobber.) |
 | 15 | TOCTOU race in `add_memory` | ✅ | Deterministic `UUIDv5(namespace, library + content)`: same content → same point ID → idempotent upsert. No read-before-write, no race, no duplicate. |
 
@@ -75,17 +75,21 @@ core; planned as a sibling project.
 
 ---
 
-**Summary (counted per issue):** of the 27 audited issues, **22 are fully fixed**
-(#1-5, 7-10, 12-19, 21, 22, 23, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 -
-polish: more SHA-256 pins, auto-reindex on model swap, tree-sitter chunking,
-precomputed summaries, `ort` stable when released), and **0 are deferred**. Every
-audited issue is now addressed; the partials are non-blocking refinements. 0.3.0 closed the daemon (#16); 0.4.0 closed the
-single-collection redesign (#18); 0.5.0 closed the multilingual embedder (#21,
-e5-base); 0.6.0 closed the cross-encoder reranker (#22); 0.7.0 closed hybrid search
-(#23, dense+sparse RRF) - all runtime-validated. The audit roadmap is complete.
-**Operationally remaining** (not audit items): the live cutover - deploy v0.7.0,
-`doctor --fix` to fetch e5 + reranker, `migrate` to re-embed existing memories with
-the new (dense+sparse, 768-dim) schema - plus daemon autostart.
+**Summary (counted per issue):** of the 27 audited issues, **21 are fully fixed**
+(#1-5, 7-10, 12, 14-19, 21, 22, 23, 26, 27), **6 are partial** (#6 supply chain -
+default stack pinned, custom/other-platform still warn; #11 Argon2 pinned, no
+versioned re-derivation; #13 fact dedup + soft-delete, no supersession; #20 char
+chunking, not token/AST-aware; #24 word-boundary truncation, no precomputed
+summaries; #25 `ort` on rc), and **0 are deferred**. 0.3.0 daemon (#16), 0.4.0
+single-collection (#18), 0.5.0 e5 embedder (#21), 0.6.0 reranker (#22), 0.7.0 hybrid
+search (#23), 0.7.1 sequence-length + resilient migrate, 0.7.2 code-review fixes
+(pins, chunking, vault durability, daemon socket, tests).
+
+**Honest gaps a reviewer should know:** fact supersession is not implemented (#13);
+the facts collection stores an unused dense vector; embedding is not batched; the
+daemon serializes inference under one mutex (fine for one user). **Operationally
+remaining** (not audit items): the live cutover (deploy, `doctor --fix`, `migrate`)
+and daemon autostart.
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves - a `sanitize`

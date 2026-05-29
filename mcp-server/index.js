@@ -116,7 +116,7 @@ async function runVia(req, args) {
 
 const server = new McpServer({
   name: "mgi-mind",
-  version: "0.7.1",
+  version: "0.7.2",
 });
 
 // --- Tools ---
@@ -264,15 +264,22 @@ server.tool("mind_import", "Import markdown files from a directory (Obsidian, et
 
 // --- Vault (secrets with user confirmation) ---
 
-server.tool("mind_vault_store", "Store a secret (password, SSH key, API token)", {
-  key: z.string().describe("Unique key name"),
-  value: z.string().describe("Secret value"),
-  category: z.string().default("other").describe("Category: password, ssh, api-key, token, other"),
-  desc: z.string().default("").describe("What this secret is for"),
-}, async ({ key, value, category, desc }) => {
-  const args = ["vault", "store", key, value, "--category", category, "--desc", desc];
-  const result = await run(args);
-  return { content: [{ type: "text", text: result }] };
+server.tool("mind_vault_store", "Explain how to store a secret (never accepts the secret over MCP)", {
+  key: z.string().describe("Key name the user wants to store"),
+}, async ({ key }) => {
+  // The vault is terminal-only. Storing over MCP would (a) put the secret value in
+  // process argv (visible via ps / /proc/<pid>/cmdline) and (b) fail anyway, since
+  // the master password needs a TTY. Direct the user to a terminal instead.
+  return {
+    content: [{
+      type: "text",
+      text:
+        `For security, secret values are never accepted over this channel.\n` +
+        `Store "${key}" yourself in a terminal:\n\n` +
+        `    mgimind vault store ${key} <value> --category <password|ssh|api-key|token>\n\n` +
+        `You'll be prompted for the master password (hidden).`,
+    }],
+  };
 });
 
 server.tool("mind_vault_get", "Explain how to retrieve a secret (never returns plaintext over MCP)", {

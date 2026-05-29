@@ -23,6 +23,11 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         .context("Failed to fsync temp file")?;
     tmp.persist(path)
         .map_err(|e| anyhow::anyhow!("Failed to persist {}: {}", path.display(), e.error))?;
+    // fsync the directory so the rename itself is durable after a crash (audit #4).
+    // The vault has no recovery path, so this closes the last data-loss window.
+    if let Ok(dir_file) = fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
     Ok(())
 }
 

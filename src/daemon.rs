@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 use crate::config::MindConfig;
@@ -87,8 +87,8 @@ async fn handle(config: &MindConfig, req: Request) -> Result<Value> {
             content,
             source,
         } => {
-            let id = storage::add_memory(config, &library, &content, source.as_deref()).await?;
-            format!("Added to '{library}' [id: {id}]")
+            let n = storage::add_memory(config, &library, &content, source.as_deref()).await?;
+            format!("Added {n} chunk(s) to '{library}'")
         }
         Request::Context => crate::cli::build_context(config).await?,
         Request::History { limit } => {
@@ -121,6 +121,14 @@ pub async fn run(config: MindConfig) -> Result<()> {
     let listener =
         UnixListener::bind(&path).with_context(|| format!("Failed to bind {}", path.display()))?;
 
+    // Lock the socket to the owner (0600) so another local user can't read or
+    // write the whole memory through it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
     // Warm the model once up front so the first real request is already fast.
     // A search loads the ONNX session + tokenizer; failures here are non-fatal
     // (e.g. no collections yet) - the point is just to trigger the load.
@@ -129,11 +137,21 @@ pub async fn run(config: MindConfig) -> Result<()> {
     eprintln!("mgimind daemon: ready, listening on {}", path.display());
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        // A transient accept error must not kill the daemon.
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                eprintln!("mgimind daemon: accept error: {e}");
+                continue;
+            }
+        };
         let cfg = config.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = stream.into_split();
-            let mut lines = BufReader::new(read_half).lines();
+            // Cap bytes per connection so a malformed/huge request can't OOM the
+            // daemon. The MCP client opens one connection per request, so 1 MiB is
+            // ample for a real request.
+            let mut lines = BufReader::new(read_half.take(1 << 20)).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.trim().is_empty() {
                     continue;
@@ -152,5 +170,52 @@ pub async fn run(config: MindConfig) -> Result<()> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Request;
+
+    #[test]
+    fn parses_search_with_defaults() {
+        let r: Request = serde_json::from_str(r#"{"cmd":"search","query":"hi"}"#).unwrap();
+        match r {
+            Request::Search {
+                query, limit, tier, ..
+            } => {
+                assert_eq!(query, "hi");
+                assert_eq!(limit, 5);
+                assert_eq!(tier, 2);
+            }
+            _ => panic!("expected Search"),
+        }
+    }
+
+    #[test]
+    fn parses_add_and_ping_and_factadd() {
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"cmd":"add","library":"l","content":"c"}"#)
+                .unwrap(),
+            Request::Add { .. }
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"cmd":"ping"}"#).unwrap(),
+            Request::Ping
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Request>(
+                r#"{"cmd":"fact_add","subject":"s","predicate":"p","object":"o"}"#
+            )
+            .unwrap(),
+            Request::FactAdd { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_and_malformed() {
+        assert!(serde_json::from_str::<Request>(r#"{"cmd":"nope"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"query":"no cmd"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"not json"#).is_err());
     }
 }

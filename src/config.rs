@@ -151,5 +151,29 @@ mod tests {
         let back: MindConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.vector_size, cfg.vector_size);
         assert_eq!(back.model_name, cfg.model_name);
+        assert_eq!(back.pooling, cfg.pooling);
+        assert_eq!(back.rerank_enabled, cfg.rerank_enabled);
+    }
+
+    #[test]
+    fn default_is_e5_base_xlmr_shaped() {
+        let cfg = MindConfig::default();
+        assert_eq!(cfg.model_name, "multilingual-e5-base");
+        assert_eq!(cfg.vector_size, 768);
+        assert_eq!(cfg.pooling, "mean");
+        assert!(!cfg.uses_token_type_ids, "XLM-R/e5 has no token_type_ids");
+        assert_eq!(cfg.query_prefix, "query: ");
+        assert_eq!(cfg.passage_prefix, "passage: ");
+    }
+
+    #[test]
+    fn legacy_minilm_config_keeps_its_shape() {
+        // An old MiniLM config must still load as MiniLM (mean pool, type_ids,
+        // no prefixes) rather than inheriting the new e5 defaults.
+        let json = r#"{"version":"0.1.0","data_dir":"/tmp/x","model_name":"all-MiniLM-L6-v2","qdrant_port":6334}"#;
+        let cfg: MindConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.model_name, "all-MiniLM-L6-v2");
+        assert!(cfg.uses_token_type_ids);
+        assert_eq!(cfg.query_prefix, "");
     }
 }

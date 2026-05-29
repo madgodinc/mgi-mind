@@ -30,25 +30,25 @@ pub fn is_model_downloaded(config: &MindConfig) -> bool {
     d.join("model.onnx").exists() && d.join("tokenizer.json").exists()
 }
 
-fn init_session(config: &MindConfig) -> Result<()> {
-    if RERANK_SESSION.get().is_some() {
-        return Ok(());
-    }
-    let model_path = model_dir(config).join("model.onnx");
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Reranker model not found at {}. Run `mgimind doctor --fix`.",
-            model_path.display()
-        );
-    }
-    let session = Session::builder()
-        .map_err(|e| anyhow!("rerank session builder: {e}"))?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!("rerank optimization level: {e}"))?
-        .commit_from_file(&model_path)
-        .map_err(|e| anyhow!("load reranker ONNX: {e}"))?;
-    let _ = RERANK_SESSION.set(Mutex::new(session));
-    Ok(())
+/// Load the reranker ONNX session once (built exactly once even under concurrent
+/// first calls - no double-build race).
+fn session(config: &MindConfig) -> Result<&'static Mutex<Session>> {
+    RERANK_SESSION.get_or_try_init(|| {
+        let model_path = model_dir(config).join("model.onnx");
+        if !model_path.exists() {
+            anyhow::bail!(
+                "Reranker model not found at {}. Run `mgimind doctor --fix`.",
+                model_path.display()
+            );
+        }
+        let session = Session::builder()
+            .map_err(|e| anyhow!("rerank session builder: {e}"))?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("rerank optimization level: {e}"))?
+            .commit_from_file(&model_path)
+            .map_err(|e| anyhow!("load reranker ONNX: {e}"))?;
+        Ok(Mutex::new(session))
+    })
 }
 
 fn get_tokenizer(config: &MindConfig) -> Result<&'static tokenizers::Tokenizer> {
@@ -65,7 +65,7 @@ pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Re
     if passages.is_empty() {
         return Ok(Vec::new());
     }
-    init_session(config)?;
+    let session_lock = session(config)?;
     let tokenizer = get_tokenizer(config)?;
 
     // Encode (query, passage) pairs → [CLS] query [SEP] passage [SEP].
@@ -98,7 +98,6 @@ pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Re
         }
     }
 
-    let session_lock = RERANK_SESSION.get().unwrap();
     let mut session = session_lock
         .lock()
         .map_err(|e| anyhow!("rerank lock poisoned: {e}"))?;
@@ -151,8 +150,21 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
             println!("  {local} already exists, skipping.");
             continue;
         }
+        // Pinned SHA-256 for the default reranker; fail-closed (audit #6).
+        let pin = match (config.rerank_model.as_str(), local) {
+            ("bge-reranker-base", "model.onnx") => {
+                crate::integrity::pin(crate::integrity::RERANK_BGE_BASE_ONNX)
+            }
+            ("bge-reranker-base", "tokenizer.json") => {
+                crate::integrity::pin(crate::integrity::RERANK_BGE_BASE_TOKENIZER)
+            }
+            _ => None,
+        };
+        if pin.is_none() {
+            println!("  [warn] no pinned checksum for {local} - integrity not verified");
+        }
         println!("  Downloading reranker {local}...");
-        crate::util::download_file(&format!("{base}/{remote}"), &dest, None).await?;
+        crate::util::download_file(&format!("{base}/{remote}"), &dest, pin).await?;
     }
     println!("  Reranker downloaded to {}", dir.display());
     Ok(())

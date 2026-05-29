@@ -22,29 +22,25 @@ fn get_model_path(config: &MindConfig) -> std::path::PathBuf {
         .join("model.onnx")
 }
 
-fn init_session(config: &MindConfig) -> Result<()> {
-    if SESSION.get().is_some() {
-        return Ok(());
-    }
-
-    let model_path = get_model_path(config);
-
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Model not found at {}. Run `mgimind doctor --fix` to download it.",
-            model_path.display()
-        );
-    }
-
-    let session = Session::builder()
-        .map_err(|e| anyhow::anyhow!("Failed to create session builder: {e}"))?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {e}"))?
-        .commit_from_file(&model_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load ONNX model: {e}"))?;
-
-    let _ = SESSION.set(Mutex::new(session));
-    Ok(())
+/// Load the ONNX session once and reuse it. `get_or_try_init` ensures it is built
+/// exactly once even under concurrent first calls (no double-build race).
+fn session(config: &MindConfig) -> Result<&'static Mutex<Session>> {
+    SESSION.get_or_try_init(|| {
+        let model_path = get_model_path(config);
+        if !model_path.exists() {
+            anyhow::bail!(
+                "Model not found at {}. Run `mgimind doctor --fix` to download it.",
+                model_path.display()
+            );
+        }
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("Failed to create session builder: {e}"))?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {e}"))?
+            .commit_from_file(&model_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load ONNX model: {e}"))?;
+        Ok(Mutex::new(session))
+    })
 }
 
 fn get_tokenizer(config: &MindConfig) -> Result<&'static tokenizers::Tokenizer> {
@@ -77,9 +73,7 @@ async fn embed_prefixed(config: &MindConfig, prefix: &str, text: &str) -> Result
 }
 
 pub async fn embed(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
-    init_session(config)?;
-
-    let session_lock = SESSION.get().unwrap();
+    let session_lock = session(config)?;
     let mut session = session_lock
         .lock()
         .map_err(|e| anyhow::anyhow!("Session lock poisoned: {e}"))?;
@@ -200,14 +194,14 @@ pub fn is_model_downloaded(config: &MindConfig) -> bool {
 /// Look up the pinned checksum for the default model's files (audit #6).
 /// Custom models have no pin (returns None → download with a warning).
 fn model_file_pin(model_name: &str, local_name: &str) -> Option<&'static str> {
-    if model_name == "all-MiniLM-L6-v2" {
-        match local_name {
-            "model.onnx" => integrity::pin(integrity::MODEL_MINILM_ONNX),
-            "tokenizer.json" => integrity::pin(integrity::MODEL_MINILM_TOKENIZER),
-            _ => None,
+    match (model_name, local_name) {
+        ("multilingual-e5-base", "model.onnx") => integrity::pin(integrity::MODEL_E5_BASE_ONNX),
+        ("multilingual-e5-base", "tokenizer.json") => {
+            integrity::pin(integrity::MODEL_E5_BASE_TOKENIZER)
         }
-    } else {
-        None
+        ("all-MiniLM-L6-v2", "model.onnx") => integrity::pin(integrity::MODEL_MINILM_ONNX),
+        ("all-MiniLM-L6-v2", "tokenizer.json") => integrity::pin(integrity::MODEL_MINILM_TOKENIZER),
+        _ => None,
     }
 }
 
