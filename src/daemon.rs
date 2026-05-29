@@ -1,6 +1,6 @@
 //! Long-lived daemon (audit #16). The MCP server otherwise spawns a fresh
 //! `mgimind` process per call, so the ONNX session and tokenizer (cached in
-//! `OnceCell`s) are reloaded every time — ~2–5s of model-load latency on every
+//! `OnceCell`s) are reloaded every time - ~2-5s of model-load latency on every
 //! search/add/context. This daemon loads the model once, keeps it warm, and
 //! serves requests over a Unix socket; the MCP client talks to it and only
 //! falls back to spawning the CLI when the socket isn't there.
@@ -33,7 +33,7 @@ fn default_tier() -> u8 {
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
-    /// Liveness probe — lets a client check the daemon without loading anything.
+    /// Liveness probe - lets a client check the daemon without loading anything.
     Ping,
     Search {
         query: String,
@@ -66,7 +66,7 @@ enum Request {
     Stats,
 }
 
-/// Each request returns `{ "text": <rendered output> }` — the same text the
+/// Each request returns `{ "text": <rendered output> }` - the same text the
 /// equivalent CLI command prints (rendered via the shared `cli::render_*`
 /// helpers), so the MCP client can print it verbatim and output matches the
 /// CLI-spawn fallback path exactly.
@@ -123,7 +123,7 @@ pub async fn run(config: MindConfig) -> Result<()> {
 
     // Warm the model once up front so the first real request is already fast.
     // A search loads the ONNX session + tokenizer; failures here are non-fatal
-    // (e.g. no collections yet) — the point is just to trigger the load.
+    // (e.g. no collections yet) - the point is just to trigger the load.
     eprintln!("mgimind daemon: warming embedding model...");
     let _ = storage::search(&config, "warmup", None, 1, 1).await;
     eprintln!("mgimind daemon: ready, listening on {}", path.display());

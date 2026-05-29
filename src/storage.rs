@@ -16,7 +16,7 @@ use crate::config::MindConfig;
 use crate::embedder;
 
 /// Single unified collection for all memories (audit #18). Libraries are a
-/// `library` payload field + filter, not separate collections — so a search can
+/// `library` payload field + filter, not separate collections - so a search can
 /// rank globally in one query and `history` can `order_by` an indexed
 /// `created_at` instead of scrolling everything.
 pub const MEMORIES_COLLECTION: &str = "memories";
@@ -189,7 +189,7 @@ async fn create_vector_collection(client: &Qdrant, name: &str, dim: u64) -> Resu
 
 /// Create the payload indexes the single-collection layout relies on (audit #18):
 /// `library` (keyword) for fast per-library filtering, `created_at` (datetime)
-/// for `order_by` in `history`. Idempotent — "already exists" errors are ignored.
+/// for `order_by` in `history`. Idempotent - "already exists" errors are ignored.
 async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
     let _ = client
         .create_field_index(CreateFieldIndexCollectionBuilder::new(
@@ -309,7 +309,7 @@ pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
     if embedding.len() as u64 != config.vector_size {
         anyhow::bail!(
             "Embedding dimension {} does not match configured vector_size {} \
-             (model '{}' may have changed — run a reindex)",
+             (model '{}' may have changed - run a reindex)",
             embedding.len(),
             config.vector_size,
             config.model_name
@@ -320,7 +320,7 @@ pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
 
 /// Read the configured vector dimension of an existing collection, if it can be
 /// determined. Returns `None` for named-vector layouts or any shape we can't
-/// confidently parse — callers treat `None` as "unknown", never as a mismatch.
+/// confidently parse - callers treat `None` as "unknown", never as a mismatch.
 fn collection_dim(info: &qdrant_client::qdrant::CollectionInfo) -> Option<u64> {
     use qdrant_client::qdrant::vectors_config::Config;
     let vc = info
@@ -338,7 +338,7 @@ fn collection_dim(info: &qdrant_client::qdrant::CollectionInfo) -> Option<u64> {
 
 /// Best-effort check that the memories/facts collections' on-disk vector
 /// dimension matches `config.vector_size` (audit #11). A mismatch means the
-/// embedding model changed without a reindex — upserts would fail with a raw
+/// embedding model changed without a reindex - upserts would fail with a raw
 /// Qdrant error. Returns `(collection, actual_dim)` for each disagreement;
 /// collections whose dimension can't be parsed are skipped, never falsely flagged.
 pub async fn dimension_mismatches(config: &MindConfig) -> Result<Vec<(String, u64)>> {
@@ -552,7 +552,7 @@ pub async fn search(
 pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {
     let client = get_client(config).await?;
     // IDs are globally unique (UUIDv5 of library+content), so a delete by id in
-    // the single collection is unambiguous — the library arg is kept only for
+    // the single collection is unambiguous - the library arg is kept only for
     // CLI/MCP signature compatibility.
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
     client
@@ -597,7 +597,7 @@ pub async fn scroll_all(
 }
 
 /// Recent memories, newest first. Single collection + a datetime index on
-/// `created_at` let Qdrant return the newest `limit` via `order_by` — no longer
+/// `created_at` let Qdrant return the newest `limit` via `order_by` - no longer
 /// O(total memories) (audit #18, fixes the post-0.2 review's `history` finding).
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
@@ -834,7 +834,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, 
     Ok((moved, skipped, libs))
 }
 
-/// Native gzip+tar backup of the data dir — no `tar` shellout (audit #19).
+/// Native gzip+tar backup of the data dir - no `tar` shellout (audit #19).
 pub fn backup(output: &str) -> Result<()> {
     let home = crate::config::mind_home();
     let file = std::fs::File::create(output)
@@ -847,7 +847,7 @@ pub fn backup(output: &str) -> Result<()> {
     Ok(())
 }
 
-/// Native gzip+tar restore — no `tar` shellout (audit #19).
+/// Native gzip+tar restore - no `tar` shellout (audit #19).
 pub fn restore(input: &str) -> Result<()> {
     let home = crate::config::mind_home();
     std::fs::create_dir_all(&home)?;

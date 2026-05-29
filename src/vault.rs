@@ -190,7 +190,7 @@ pub fn store(key: &str, value: &str, category: &str, description: &str) -> Resul
 }
 
 /// Retrieve a secret. Requires master password + user confirmation.
-/// Does NOT rewrite the encrypted vault (audit #5) — reads stay read-only.
+/// Does NOT rewrite the encrypted vault (audit #5) - reads stay read-only.
 pub fn retrieve(key: &str, skip_confirm: bool) -> Result<Option<String>> {
     let mut password = prompt_password("Master password: ")?;
     let vault = load_vault(&password);

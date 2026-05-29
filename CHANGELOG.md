@@ -16,7 +16,7 @@ A real-data migration of 12,587 entries surfaced two issues.
   off (`rerank_enabled=false`) or use a stronger multilingual reranker if you need
   good Russian results.
 
-## 0.7.0 — Hybrid search: dense + sparse + RRF (audit #23)
+## 0.7.0 - Hybrid search: dense + sparse + RRF (audit #23)
 
 Dense (semantic) retrieval misses exact rare terms; lexical (BM25) retrieval
 misses paraphrases. The memories collection now carries **both** and fuses them.
@@ -29,23 +29,23 @@ misses paraphrases. The memories collection now carries **both** and fuses them.
   sparse NN) fused by **Reciprocal Rank Fusion (RRF)**, then cross-encoder reranked
   (#22). A library filter applies to both arms.
 - Sparse vectors are unicode-aware term-frequency (lowercased, split on
-  non-alphanumeric — handles Cyrillic; tokens hashed to u32 indices).
+  non-alphanumeric - handles Cyrillic; tokens hashed to u32 indices).
 
 ### Validated
 - Runtime-tested end-to-end: exact rare terms (`fossilize_replay`, `gamemoderun`)
   surface via the lexical arm, while semantic queries ("как стим компилирует
-  шейдеры") still hit via dense — fused and reranked correctly.
+  шейдеры") still hit via dense - fused and reranked correctly.
 
 ### Audit complete
 - 22 of 27 issues fully fixed, 5 partial (non-blocking polish), 0 deferred.
-- **Operational (not audit):** live cutover — deploy v0.7.0, `doctor --fix`
+- **Operational (not audit):** live cutover - deploy v0.7.0, `doctor --fix`
   (fetch e5 + reranker), `migrate` (re-embed at the new dense+sparse 768-dim
-  schema) — plus daemon autostart.
+  schema) - plus daemon autostart.
 
-## 0.6.0 — Cross-encoder reranker (audit #22)
+## 0.6.0 - Cross-encoder reranker (audit #22)
 
 Dense retrieval is fast but coarse. A cross-encoder now re-orders the top-K by
-scoring each (query, passage) pair jointly — a big precision win.
+scoring each (query, passage) pair jointly - a big precision win.
 
 ### Added
 - **`src/reranker.rs`**: `bge-reranker-base` (XLM-R, multilingual incl. RU;
@@ -56,7 +56,7 @@ scoring each (query, passage) pair jointly — a big precision win.
 - Config: `rerank_enabled` (default true), `rerank_model` (`bge-reranker-base`),
   `rerank_top_k` (20). `doctor --fix` fetches the reranker model.
 - **Best-effort**: any reranker failure (missing model, inference error) leaves the
-  dense order untouched — reranking is a quality boost, never a hard dependency.
+  dense order untouched - reranking is a quality boost, never a hard dependency.
 
 ### Validated
 - Runtime-tested: for «почему в доте мало фпс хотя видеокарта мощная» the reranker
@@ -67,9 +67,9 @@ scoring each (query, passage) pair jointly — a big precision win.
 - #23 hybrid/BM25 search (e5 is dense-only → needs a separate sparse path).
   Operational: daemon autostart + live cutover (re-embed at 768-dim + reranker).
 
-## 0.5.0 — Multilingual embedder support: e5-base (audit #21)
+## 0.5.0 - Multilingual embedder support: e5-base (audit #21)
 
-The English-only MiniLM is replaced as the default by **multilingual-e5-base** —
+The English-only MiniLM is replaced as the default by **multilingual-e5-base** -
 a big retrieval-quality win for Russian/mixed content, practical on CPU (768-dim,
 ~278M, runs quantized). The embedder is now model-architecture-flexible.
 
@@ -100,16 +100,16 @@ a big retrieval-quality win for Russian/mixed content, practical on CPU (768-dim
 - #22 cross-encoder reranker, #23 hybrid/BM25 search (e5 is dense-only → needs a
   separate sparse path). Operational: daemon autostart + live cutover.
 
-## 0.4.0 — Single-collection storage (audit #18)
+## 0.4.0 - Single-collection storage (audit #18)
 
 Memories moved from one Qdrant collection per library (`mem_<library>`) to a single
 `memories` collection with a `library` payload field. This is a storage-layout change
-— run `mgimind migrate` once to import existing data.
+- run `mgimind migrate` once to import existing data.
 
 ### Changed
 - **One `memories` collection** with payload indexes on `library` (keyword) and
-  `created_at` (datetime). Search runs a **single query** — true global top-k, or a
-  `library`-filtered query — instead of scanning N collections and merging.
+  `created_at` (datetime). Search runs a **single query** - true global top-k, or a
+  `library`-filtered query - instead of scanning N collections and merging.
 - **`history` is no longer O(total)**: it uses Qdrant `order_by` over the
   `created_at` datetime index to return the newest N directly (fixes the post-0.2
   review finding). 
@@ -131,9 +131,9 @@ Memories moved from one Qdrant collection per library (`mem_<library>`) to a sin
 - **Operational:** daemon autostart + cutover of the live instance (now also: run
   `migrate` on the live data during cutover).
 - Deferred audit items: code embedder (#21), cross-encoder reranker (#22),
-  hybrid/BM25 search (#23) — each needs a new model + full re-embed.
+  hybrid/BM25 search (#23) - each needs a new model + full re-embed.
 
-## 0.3.0 — Daemon (audit #16)
+## 0.3.0 - Daemon (audit #16)
 
 The MCP server spawned a fresh `mgimind` process per call, reloading the ONNX
 session + tokenizer every time. This release adds a long-lived daemon so the model
@@ -144,22 +144,22 @@ stays warm.
   newline-delimited JSON requests over a Unix socket (`~/mgimind/daemon.sock`).
   Supported: search, add, context, history, fact_add, fact_query, stats, ping.
 - **Thin MCP client**: `mcp-server/index.js` routes embed-heavy/common tools to the
-  daemon and **falls back to spawning the CLI** when the socket isn't there — the
+  daemon and **falls back to spawning the CLI** when the socket isn't there - the
   daemon is a pure optimization, never a hard dependency.
 - Shared render helpers (`cli::render_search/render_history/render_facts/build_stats/
   build_context`) so daemon and CLI output are identical (one source of truth).
 
 ### Validated
 - End-to-end against live data (12 587 memories read correctly via the daemon).
-- Latency: warm daemon add ~31ms vs cold CLI add ~175ms (~5.6×). The audit's "2–5s"
+- Latency: warm daemon add ~31ms vs cold CLI add ~175ms (~5.6×). The audit's "2-5s"
   figure is the cold-disk/first-load case; the model is normally OS page-cached.
 
 ### Still open
 - **Operational:** autostart entry for the daemon + cutover of the live instance.
 - Deferred audit items unchanged: single-collection (#18), code embedder / reranker
-  / hybrid search (#21–23); `history` O(total) rides with #18.
+  / hybrid search (#21-23); `history` O(total) rides with #18.
 
-## 0.2.1 — Post-review fixes
+## 0.2.1 - Post-review fixes
 
 A follow-up code review of 0.2.0 found four issues the hardening pass either
 over-claimed or introduced. This release closes the tractable ones; the rest are
@@ -187,9 +187,9 @@ documented honestly (see [`AUDIT_STATUS.md`](AUDIT_STATUS.md)).
   collection fully. Fine at current scale; the `order_by`-over-datetime-index fix
   rides with the v0.3 storage rework (#16/#18).
 - Deferred 0.3 items unchanged: daemon (#16), single-collection (#18),
-  code embedder / reranker / hybrid search (#21–23).
+  code embedder / reranker / hybrid search (#21-23).
 
-## 0.2.0 — Audit hardening
+## 0.2.0 - Audit hardening
 
 This release rebuilds the data and security layers around the findings of a full
 code audit. See [`AUDIT_STATUS.md`](AUDIT_STATUS.md) for the complete issue-by-issue
@@ -197,14 +197,14 @@ accounting. It is **API-compatible** with 0.1.x data on disk (config gains
 defaulted fields; existing Qdrant collections keep working).
 
 ### Security & data integrity
-- **Atomic writes** for config, vault, salt, sessions and exports (temp + fsync + rename) — a crash can no longer corrupt these files.
+- **Atomic writes** for config, vault, salt, sessions and exports (temp + fsync + rename) - a crash can no longer corrupt these files.
 - **Vault** master password is now read **without echo** (`rpassword`) and zeroized after key derivation; reads no longer rewrite the encrypted blob; the plaintext `vault.count` file is gone.
-- **Vault over MCP**: secrets are never returned through the MCP/LLM channel and the master password is never blank — `mind_vault_get` directs you to a terminal.
+- **Vault over MCP**: secrets are never returned through the MCP/LLM channel and the master password is never blank - `mind_vault_get` directs you to a terminal.
 - **Download integrity**: artifacts are fetched over HTTPS (native `reqwest`, no `curl`) and verified against pinned SHA-256 hashes (linux-x64 ONNX Runtime, Qdrant, default model); unknown targets warn instead of trusting blindly.
 - **Qdrant** is bound to `127.0.0.1` and supports an optional API key.
 
 ### Correctness
-- **Deterministic content-addressed IDs** (`UUIDv5` of library + content): re-adding identical content is an idempotent upsert — no duplicates, no read-before-write race. Same for facts (`subject,predicate,object`).
+- **Deterministic content-addressed IDs** (`UUIDv5` of library + content): re-adding identical content is an idempotent upsert - no duplicates, no read-before-write race. Same for facts (`subject,predicate,object`).
 - **`history`** is sorted newest-first; **`export`** paginates fully (no silent 10k cap).
 - **Embedding dimension** is configurable and validated on every operation (model-swap safety).
 - **Knowledge graph**: queries match subject/predicate/object via a full scan + filter (nothing lost outside a top-K window); `invalidate` is a soft delete (`valid=false`) that queries honor.
@@ -212,7 +212,7 @@ defaulted fields; existing Qdrant collections keep working).
 
 ### Performance & portability
 - Tokenizer loaded once and cached (no per-embed disk read).
-- Native gzip/tar/zip extraction and native gzip+tar backup/restore — no `tar`/`unzip` shellouts.
+- Native gzip/tar/zip extraction and native gzip+tar backup/restore - no `tar`/`unzip` shellouts.
 - Improved chunking: overlap between chunks and hard-split of overlong lines.
 - Tier truncation breaks on word boundaries.
 
@@ -222,7 +222,7 @@ defaulted fields; existing Qdrant collections keep working).
 ### Deferred to 0.3 (see AUDIT_STATUS.md)
 - Long-lived daemon + thin MCP client (kills per-call model reload).
 - Single-collection storage with `library` payload filter (parallel/global ranking).
-- Code-capable embedder + cross-encoder reranker + hybrid (BM25/RRF) search — these change the vector dimension and require a re-index, done at deploy time.
+- Code-capable embedder + cross-encoder reranker + hybrid (BM25/RRF) search - these change the vector dimension and require a re-index, done at deploy time.
 
 ## 0.1.0
 - Initial release.

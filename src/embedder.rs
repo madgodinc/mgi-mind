@@ -57,13 +57,13 @@ fn get_tokenizer(config: &MindConfig) -> Result<&'static tokenizers::Tokenizer> 
     })
 }
 
-/// Embed a search query — applies the model's query prefix (e5 needs "query: ";
+/// Embed a search query - applies the model's query prefix (e5 needs "query: ";
 /// MiniLM uses none). Audit #21.
 pub async fn embed_query(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
     embed_prefixed(config, &config.query_prefix, text).await
 }
 
-/// Embed a stored document — applies the passage prefix (e5 needs "passage: ").
+/// Embed a stored document - applies the passage prefix (e5 needs "passage: ").
 pub async fn embed_passage(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
     embed_prefixed(config, &config.passage_prefix, text).await
 }
@@ -116,7 +116,7 @@ pub async fn embed(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
         (std::borrow::Cow::from("attention_mask"), mask_value.into()),
     ];
     // BERT-family models (MiniLM) take token_type_ids; XLM-R models (bge-m3) do
-    // not — passing it to a model that doesn't expect it is a hard error (#21).
+    // not - passing it to a model that doesn't expect it is a hard error (#21).
     if config.uses_token_type_ids {
         let token_type_ids: Vec<i64> = encoding
             .get_type_ids()
@@ -251,7 +251,7 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
         let pin = model_file_pin(&config.model_name, local_name);
         if pin.is_none() {
             println!(
-                "  [warn] no pinned checksum for {local_name} (custom model) — integrity not verified"
+                "  [warn] no pinned checksum for {local_name} (custom model) - integrity not verified"
             );
         }
         println!("  Downloading {local_name}...");
@@ -371,7 +371,7 @@ pub async fn download_ort_runtime() -> Result<()> {
 
     if expected.is_none() {
         println!(
-            "  [warn] no pinned checksum for this platform's ONNX Runtime — integrity not verified"
+            "  [warn] no pinned checksum for this platform's ONNX Runtime - integrity not verified"
         );
     }
     println!("  Downloading ONNX Runtime v{ORT_VERSION}...");
