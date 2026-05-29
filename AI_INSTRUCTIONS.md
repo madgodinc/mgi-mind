@@ -1,161 +1,150 @@
-# MGI-Mind - AI Instructions
+# MGI-Mind - instructions for the AI
 
-You are connected to MGI-Mind, a self-hosted long-term memory system. All data stays
-on the user's machine. You are the interface to it. Read this file fully before you
-start.
+You are connected to MGI-Mind, the user's self-hosted long-term memory. It lets you
+remember across sessions: you write things down as you work and read them back by
+meaning. Everything is local to the user's machine. Read this file once at the start;
+it is your operating manual.
 
-For install and architecture details, see [`README.md`](README.md). This file is the
-operating protocol for you, the assistant.
+You reach MGI-Mind through MCP tools named `mind_*` (listed below). There is also a
+`mgimind` CLI, but as the assistant you use the MCP tools. When this file says
+"search", it means call `mind_search`.
 
-## What you get
+## The one rule
 
-A local memory the user owns. You write to it as you work and read from it by meaning.
-Retrieval is hybrid (dense e5 + sparse BM25, fused with RRF) and reranked by a
-cross-encoder, so a search returns results by semantic relevance and exact-term match
-at once. You do not manage any of that; you just call the tools below.
+**Search before you answer anything about the past.** If the user refers to a past
+decision, a project, a preference, a name, a value, a "we did/said/use" - call
+`mind_search` first and answer from what comes back. Do not answer from your own
+guess. This is the whole point of the system.
 
-If a warm daemon is running (`mgimind daemon`), the MCP server uses it and lookups are
-fast. If not, it falls back to spawning the CLI. Either way the commands are the same.
+## Session protocol (do this every session)
 
-## Your protocol (mandatory)
+**At the start:**
+1. `mind_session_last` with your agent name (e.g. `agent: "claude-code"`) to read your
+   last session summary.
+2. `mind_session_start` with the same agent name to begin logging.
+3. `mind_context` for a compact briefing (recent facts and libraries), then greet the
+   user with the relevant context.
 
-### On session start
-1. `mgimind session last` to read the previous session summary.
-2. `mgimind session start --agent <your-name>` to begin logging.
-3. Greet the user with context from the last session.
+Always use the **same agent name** for `session_start` and `session_end`. Sessions are
+per-agent so two assistants never overwrite each other's log.
 
-Always use the SAME `--agent <your-name>` for `start` and `end`. Sessions are
-per-agent, so concurrent agents never overwrite each other's session.
+**During the session:**
+- Past/preferences/projects question -> `mind_search` first.
+- The user shares something worth keeping -> `mind_add`.
+- The user states a durable fact -> `mind_fact_add`.
+- The user asks what you know about X -> `mind_fact_query`.
 
-### During the session
-- Before answering about past events, projects, or preferences: `mgimind search "<query>"`.
-- When the user shares something worth keeping: `mgimind add <library> "<content>"`.
-- When the user states a fact: `mgimind fact add "<subject>" "<predicate>" "<object>"`.
-- When the user asks what you know about something: `mgimind fact query "<term>"`.
-- Do not guess from memory. Search first, answer second.
+**At the end:**
+- `mind_session_end` with the same agent name and a `summary` of what was done and
+  what is next (keep it under ~200 words). Continuity depends on this.
 
-### On session end
-- `mgimind session end --agent <your-name> --summary "<what was done, what is next>"`.
-- Keep the summary under about 200 words.
+## What goes where
 
-## Where to put information
+| Kind of information | Tool | Example |
+|---|---|---|
+| Permanent rule / identity / workflow | the AI config file (CLAUDE.md, etc.) | "Always use Rust for new projects" |
+| Durable structured fact | `mind_fact_add` | user -> prefers -> Rust |
+| Details, notes, context | `mind_add` | "The staging DB is Postgres 16 on db-staging:5432" |
+| A secret (password, key, token) | the vault, in the user's terminal | never through MCP |
 
-```
-AI config file (CLAUDE.md, etc.)  permanent rules, identity, workflow   0 lookup cost
-KG facts (fact add)               structured facts: subject-predicate-object
-memories (add)                    details, notes, context
-vault (vault store)               secrets: passwords, keys, SSH         terminal only
-```
+When the user sets a **permanent rule or preference** ("always use X", "my name is
+Y", "never auto-commit"):
+1. Store it as a fact with `mind_fact_add`.
+2. Offer to also add it to the AI config file (CLAUDE.md for Claude Code,
+   `.cursorrules` for Cursor, `.clinerules` for Cline) so every future session has it
+   in the system prompt at zero lookup cost. Show exactly what you would add, append
+   only, and ask first.
 
-When the user sets a PERMANENT rule or preference (for example "always use Rust",
-"never auto-commit", "my name is X"):
-1. Store it: `mgimind fact add "<subject>" "<predicate>" "<value>"`.
-2. Suggest adding it to the AI config file so every future session has it in the
-   system prompt at zero lookup cost. Show exactly what you would add and ask first.
+## Facts and supersession (important)
 
-Config file by tool: Claude Code uses `CLAUDE.md` (project root or `~/.claude/`),
-Cursor uses `.cursorrules`, Cline uses `.clinerules`. Never remove existing config,
-only append, and always ask before writing.
+Facts are triples: subject, predicate, object. Adding the same triple again just
+overwrites it (dedup). But the store does **not** automatically retire an old fact
+when a single-valued one changes. So if the user switches preference, moves city,
+renames a thing, you must retire the old value yourself, or you will accumulate
+contradictory facts that all read as valid:
 
-## Commands
+1. `mind_fact_query` for the subject to find the old fact and its id.
+2. `mind_fact_invalidate` the old id (soft delete; it stays on disk, hidden from
+   queries).
+3. `mind_fact_add` the new value.
 
-### Memory
-```bash
-mgimind add <library> "<content>" [--source "<tag>"]
-mgimind search "<query>" [--library <name>] [--limit 5] [--tier 1|2|3]
-mgimind history [--limit 10]
-mgimind delete <library> <id>
-mgimind context
-```
+For genuinely multi-valued predicates (the user likes several things), just add; do
+not invalidate the others.
 
-Tier controls how much text comes back, not which results:
-- `--tier 1`: about 100 chars per hit. Quick lookups.
-- `--tier 2`: about 500 chars. Default.
-- `--tier 3`: full content. Use only when you need the detail.
+## Search and tiers (spend tokens wisely)
 
-Start at tier 1 or 2; escalate to tier 3 only if needed.
+`mind_search` is hybrid (semantic + exact-term) and reranked. Use `tier` to control
+how much text comes back, not which results:
+- `tier: 1` - about 100 characters per hit. Quick lookups.
+- `tier: 2` - about 500. The default, good balance.
+- `tier: 3` - full text. Only when you actually need the detail.
 
-### Libraries and stats
-```bash
-mgimind create <name>
-mgimind list
-mgimind drop <name>          # destructive: confirm with the user first
-mgimind stats
-```
+Start at tier 1 or 2 and escalate to tier 3 only if needed. Use `library` to scope a
+search to one namespace, and `limit` to cap the number of hits.
 
-### Knowledge graph
-```bash
-mgimind fact add "<subject>" "<predicate>" "<object>"
-mgimind fact query "<term>"
-mgimind fact invalidate "<id>"   # soft delete: kept, marked invalid
-```
+## Secrets: vault is terminal-only
 
-### Sessions
-```bash
-mgimind session start --agent <name>
-mgimind session last [--agent <name>]
-mgimind session end --agent <name> --summary "<text>"
-```
+No secret value crosses the MCP channel, in either direction. The MCP tools
+`mind_vault_get` and `mind_vault_store` return **terminal instructions**, never the
+secret, and they never take the secret value as a tool argument (it would otherwise
+land in the process command line).
 
-### Vault (terminal only)
-```bash
-mgimind vault store <key> <value> --category ssh --desc "My server"
-mgimind vault get <key>     # prompts for the master password in a terminal
-mgimind vault list          # keys only, never values
-mgimind vault delete <key>
-```
+- The user wants to store a secret -> tell them to run, in their terminal:
+  `mgimind vault store <key> <value> --category <password|ssh|api-key|token>`
+- The user wants a secret -> tell them to run: `mgimind vault get <key>`
+- Never store a secret with `mind_add`. Never try to read or echo a secret yourself.
 
-The vault is separate from regular memory and secrets never appear in search results.
-The master password and decrypted secrets NEVER cross the MCP channel. Do not try to
-read a secret yourself. Tell the user to run `mgimind vault get <key>` in their
-terminal. The `mind_vault_get` MCP tool returns these instructions, not the secret.
-When the user wants to store a password, key, or token, use the vault, not `add`.
+## Your MCP tools
 
-### Service and data
-```bash
-mgimind serve / mgimind stop      # bundled Qdrant
-mgimind daemon                    # warm daemon (keeps models loaded)
-mgimind migrate [--purge]         # import legacy per-library collections, re-embeds
-mgimind doctor [--fix]            # health check; --fix downloads what is missing
-mgimind backup <file> / mgimind restore <file>
-mgimind export [--format json|md] [--output <dir>]
-mgimind import obsidian /path/to/vault --library notes
-```
+Memory: `mind_search`, `mind_add`, `mind_history`, `mind_delete`, `mind_context`.
+Libraries: `mind_create`, `mind_list`, `mind_stats`.
+Facts: `mind_fact_add`, `mind_fact_query` (invalidate is CLI: `mgimind fact invalidate`).
+Sessions: `mind_session_start`, `mind_session_last`, `mind_session_end`.
+Vault: `mind_vault_get`, `mind_vault_store` (both return terminal instructions).
+Web: `mind_web` (read a page as Markdown, if the `crw` tool is installed).
+Data: `mind_import`, `mind_export`, `mind_doctor`.
 
-`migrate` is for upgrading old data: it re-embeds entries from the previous
-per-library layout into the single collection. It is idempotent, so it is safe to
-re-run. Use it after a model change too (it re-embeds from stored text).
+Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind daemon`,
+`mgimind migrate`, `mgimind drop`, `mgimind backup`/`restore`.
 
-## Reading web pages (optional)
-
-If the `crw` tool is installed, `mgimind web <url>` reads a page as clean Markdown.
-Use it instead of guessing a page's content from its URL. After reading, offer to save
-the useful parts with `mgimind add`.
-
-## Data location
+## A good session, end to end
 
 ```
-~/mgimind/
-  config.json          configuration
-  vault.enc            encrypted secrets
-  vault.salt           Argon2 salt
-  libraries.json       registered library names
-  sessions/            session logs
-  models/              ONNX models (embedder, reranker)
-  qdrant/              vector database storage
+(start)
+  mind_session_last  agent=claude-code      -> "last time: set up CI, next: write tests"
+  mind_session_start agent=claude-code
+  mind_context                               -> recent facts + libraries
+  "Welcome back. Last time we set up CI; you wanted to write tests next."
+
+(user: "what DB are we on for staging?")
+  mind_search "staging database"             -> "Postgres 16 on db-staging:5432"
+  -> answer from that, do not guess.
+
+(user: "from now on use Go, not Rust")
+  mind_fact_query "user"                     -> finds  user -> prefers -> Rust  (id X)
+  mind_fact_invalidate X
+  mind_fact_add "user" "prefers" "Go"
+  -> "Noted. Want me to put 'prefer Go' in CLAUDE.md too?"
+
+(user: "save the prod API key")
+  -> "I can't take secrets here. In your terminal:
+      mgimind vault store prod-api-key <value> --category api-key"
+
+(end)
+  mind_session_end agent=claude-code summary="Switched preference to Go; confirmed
+  staging DB. Next: migrate the Rust snippets in docs."
 ```
 
-The user owns all of this and can move, back up, or delete it at any time.
+## Rules of thumb
 
-## Rules
-
-1. Never store secrets in regular memory. Use the vault.
-2. Confirm before dropping a library; it is destructive.
-3. Prefer tier 1 or 2 searches; escalate only when needed.
-4. Log every session. Continuity depends on it.
-5. Verify before stating. Search first, answer second.
-6. Never read vault secrets yourself. Direct the user to `mgimind vault get` in a terminal.
-7. Do not hallucinate web content. Read the page first if `crw` is available.
+1. Search first, answer second. Never state a remembered fact you did not look up.
+2. Log every session (start and end), same agent name.
+3. Prefer tier 1 or 2; escalate only when you need the detail.
+4. Secrets only via the terminal vault, never `mind_add`, never echoed.
+5. Retire a changed single-valued fact (query, invalidate, add the new one).
+6. Confirm before destructive actions (dropping a library is CLI and irreversible).
+7. If `mind_web` is available, read a page before summarizing it; do not invent its
+   contents. Offer to save the useful parts with `mind_add`.
 
 ---
 MGI-Mind v0.7.x | Apache-2.0 | Mad God Inc
