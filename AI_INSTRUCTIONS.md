@@ -98,7 +98,7 @@ land in the process command line).
 
 Memory: `mind_search`, `mind_add`, `mind_history`, `mind_delete`, `mind_context`.
 Libraries: `mind_create`, `mind_list`, `mind_stats`.
-Facts: `mind_fact_add`, `mind_fact_query` (invalidate is CLI: `mgimind fact invalidate`).
+Facts: `mind_fact_add`, `mind_fact_query`, `mind_fact_invalidate`.
 Sessions: `mind_session_start`, `mind_session_last`, `mind_session_end`.
 Vault: `mind_vault_get`, `mind_vault_store` (both return terminal instructions).
 Web: `mind_web` (read a page as Markdown, if the `crw` tool is installed).

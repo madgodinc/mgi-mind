@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.3 - MCP fact-invalidate + a real retrieval integration test
+
+Follow-up to the 0.7.2 review.
+
+### Fixed
+- **`mind_fact_invalidate` was missing from the MCP server.** Fact supersession was
+  documented as "query, invalidate, add" for the agent, but the invalidate step had
+  no MCP tool, so over MCP the agent could not actually do it. Added the tool;
+  AI_INSTRUCTIONS now lists it as an MCP tool (not CLI-only).
+
+### Tests
+- New integration test `add_then_search_finds_the_memory`: creates a library, adds a
+  memory, runs a paraphrased hybrid search, and asserts the memory is retrieved. This
+  exercises the real path (add -> embed -> hybrid search), not just the library
+  lifecycle. Gated on `MGIMIND_IT_MODELS` + `ORT_DYLIB_PATH` so CI without the model
+  skips it; verified locally against a real Qdrant and the e5 model.
+
 ## 0.7.2 - Code-review fixes (security, correctness, tests)
 
 A line-by-line review found real issues; this release closes the actionable ones.
