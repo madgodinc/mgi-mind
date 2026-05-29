@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance, PointStruct,
-    PointsIdsList, ScrollPointsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
-    VectorParamsBuilder,
+    CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance,
+    GetPointsBuilder, PointStruct, PointsIdsList, ScrollPointsBuilder, SearchPointsBuilder,
+    UpsertPointsBuilder, VectorParamsBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,7 +164,7 @@ pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
 }
 
 /// Validate that an embedding matches the configured dimension (audit #11).
-fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
+pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
     if embedding.len() as u64 != config.vector_size {
         anyhow::bail!(
             "Embedding dimension {} does not match configured vector_size {} \
@@ -175,6 +175,67 @@ fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Read the configured vector dimension of an existing collection, if it can be
+/// determined. Returns `None` for named-vector layouts or any shape we can't
+/// confidently parse — callers treat `None` as "unknown", never as a mismatch.
+fn collection_dim(info: &qdrant_client::qdrant::CollectionInfo) -> Option<u64> {
+    use qdrant_client::qdrant::vectors_config::Config;
+    let vc = info
+        .config
+        .as_ref()?
+        .params
+        .as_ref()?
+        .vectors_config
+        .as_ref()?;
+    match vc.config.as_ref()? {
+        Config::Params(p) => Some(p.size),
+        Config::ParamsMap(_) => None,
+    }
+}
+
+/// Best-effort check that every memory/fact collection's on-disk vector
+/// dimension matches `config.vector_size` (audit #11). A mismatch means the
+/// embedding model changed without a reindex — upserts would fail with a raw
+/// Qdrant error. Returns `(collection, actual_dim)` for each disagreement;
+/// collections whose dimension can't be parsed are skipped, never falsely flagged.
+pub async fn dimension_mismatches(config: &MindConfig) -> Result<Vec<(String, u64)>> {
+    let client = get_client(config).await?;
+    let collections = client.list_collections().await?;
+    let mut out = Vec::new();
+
+    for col in &collections.collections {
+        if !col.name.starts_with(MEMORIES_PREFIX) && col.name != FACTS_COLLECTION {
+            continue;
+        }
+        if let Ok(info) = client.collection_info(&col.name).await
+            && let Some(ci) = info.result.as_ref()
+            && let Some(dim) = collection_dim(ci)
+            && dim != config.vector_size
+        {
+            out.push((col.name.clone(), dim));
+        }
+    }
+
+    Ok(out)
+}
+
+/// Fetch a payload string for an existing point by id (used to preserve
+/// `created_at` across idempotent re-upserts of content-addressed points).
+pub(crate) async fn existing_payload_string(
+    client: &Qdrant,
+    collection: &str,
+    id: &str,
+    key: &str,
+) -> Option<String> {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(GetPointsBuilder::new(collection, vec![pid]).with_payload(true))
+        .await
+        .ok()?;
+    let point = resp.result.into_iter().next()?;
+    extract_string(&point.payload, key)
 }
 
 pub async fn add_memory(
@@ -201,11 +262,18 @@ pub async fn add_memory(
     let id = deterministic_id(library, content);
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // Preserve the original first-seen timestamp on re-add; only `updated_at`
+    // moves. Otherwise re-adding identical content would reset created_at=now
+    // and the entry would jump to the top of chronological history.
+    let created_at = existing_payload_string(&client, &col, &id, "created_at")
+        .await
+        .unwrap_or_else(|| now.clone());
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("content".into(), content.into());
     payload.insert("hash".into(), hash.into());
-    payload.insert("created_at".into(), now.into());
+    payload.insert("created_at".into(), created_at.into());
+    payload.insert("updated_at".into(), now.into());
     payload.insert("library".into(), library.into());
     if let Some(src) = source {
         payload.insert("source".into(), src.into());
@@ -350,6 +418,14 @@ pub async fn scroll_all(
     Ok(out)
 }
 
+/// Recent memories across all libraries, newest first.
+///
+/// NOTE (v0.3): this scrolls every collection fully into memory and then keeps
+/// the top `limit`. Correct, but O(total memories) regardless of `limit` — fine
+/// at the current scale, a known scalability item. The proper fix is a Qdrant
+/// `order_by` over a datetime payload index on `created_at` (newest-N without
+/// reading everything), which needs a payload-index migration on existing
+/// collections — deferred to the v0.3 storage rework alongside #16/#18.
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     let collections = client.list_collections().await?;

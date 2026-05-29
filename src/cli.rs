@@ -1097,11 +1097,35 @@ async fn cmd_serve() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(500));
         if is_qdrant_running() {
             println!("Qdrant started on port 6333/6334 (PID: {})", child.id());
+            warn_on_dimension_mismatch().await;
             return Ok(());
         }
     }
 
     anyhow::bail!("Qdrant started but not responding after 15 seconds");
+}
+
+/// On startup, surface any collection whose vector dimension disagrees with the
+/// configured `vector_size` (model changed without a reindex — audit #11). This
+/// is the cheap once-per-serve check that complements the per-embedding guard,
+/// so a mismatch is reported up front instead of as a raw Qdrant error on the
+/// first add. Never fails serve — memory must still come up.
+async fn warn_on_dimension_mismatch() {
+    let Ok(cfg) = crate::config::MindConfig::load() else {
+        return;
+    };
+    if let Ok(mismatches) = crate::storage::dimension_mismatches(&cfg).await
+        && !mismatches.is_empty()
+    {
+        eprintln!("[WARN] vector dimension mismatch — embedding model changed without a reindex?");
+        for (name, dim) in &mismatches {
+            eprintln!(
+                "       collection '{name}' is dim {dim}, but config vector_size = {}",
+                cfg.vector_size
+            );
+        }
+        eprintln!("       Adds/searches on these collections will fail until you reindex.");
+    }
 }
 
 async fn cmd_stop() -> Result<()> {

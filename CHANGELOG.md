@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.1 — Post-review fixes
+
+A follow-up code review of 0.2.0 found four issues the hardening pass either
+over-claimed or introduced. This release closes the tractable ones; the rest are
+documented honestly (see [`AUDIT_STATUS.md`](AUDIT_STATUS.md)).
+
+### Fixed
+- **Session pointer collision (regression of #14).** `sanitize` mapped every
+  non-`[A-Za-z0-9-]` byte to `_`, so `team a`, `team_a`, `team/a`, `team.a` all
+  shared one `.current.<agent>` pointer and clobbered each other's session. It is
+  now an injective `_HH` escape (the escape byte `_` is itself escaped).
+- **`created_at` was reset on re-add.** Content-addressed upserts overwrote the
+  whole payload, so re-adding identical content set `created_at = now` and the
+  entry jumped to the top of chronological history. The original `created_at` is
+  now preserved (read-before-write by id); a separate `updated_at` records the
+  re-touch. Applies to both memories and facts.
+- **Facts had no dimension guard (#11 gap).** `add_fact` now runs the same
+  `check_dim` model-swap check as `add_memory`.
+- **Config↔collection dimension mismatch (#11).** `mgimind serve` now checks every
+  collection's on-disk vector dimension against the configured `vector_size` and
+  warns up front (best-effort; never blocks serve), instead of surfacing a raw
+  Qdrant error on the first upsert after a model change.
+
+### Known, still open (documented, not silently dropped)
+- **`history` is O(total memories).** Correct (newest-first), but scrolls every
+  collection fully. Fine at current scale; the `order_by`-over-datetime-index fix
+  rides with the v0.3 storage rework (#16/#18).
+- Deferred 0.3 items unchanged: daemon (#16), single-collection (#18),
+  code embedder / reranker / hybrid search (#21–23).
+
 ## 0.2.0 — Audit hardening
 
 This release rebuilds the data and security layers around the findings of a full
