@@ -46,7 +46,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
-| 21 | Weak/old embedder for code | 🔜 v0.3 | Requires choosing a code embedding model, which changes the vector dimension and forces re-embedding existing memories — a data migration done at deploy time, with the owner's sign-off. `vector_size` is now configurable (#11), so the swap is a config + reindex. |
+| 21 | Weak/old embedder for code | 🟡 (0.5.0) | Code landed: default model is now **multilingual-e5-base** (768-dim) — a big RU/EN upgrade over English-only MiniLM, CPU-practical (quantized ONNX). Embedder made architecture-flexible (mean/cls pooling, optional token_type_ids, query/passage prefixes; pooling unit-tested). Owner chose e5-base over bge-m3 (bge-m3 ONNX is 6.8 GB and too heavy on a GPU-less box). **Pending:** on-box `doctor --fix` (fetch model) + `migrate` (re-embed 12 587 at 768-dim) + RU-retrieval validation — the deploy-time, sign-off step. |
 | 22 | No reranker | 🔜 v0.3 | Cross-encoder rerank over top-k — ships with the code-embedder work. |
 | 23 | No hybrid (keyword/BM25) search | 🔜 v0.3 | Needs sparse vectors / full-text payload index + RRF fusion; pairs with the single-collection redesign (#18). |
 | 24 | Tiers blind-truncate by chars | 🟡 | Truncation now stops on a word boundary (no mid-token cuts). Precomputed summaries are a v0.3 item. |
@@ -77,12 +77,13 @@ core; planned as a sibling project.
 
 **Summary (counted per issue):** of the 27 audited issues, **19 are fully fixed**
 (#1–5, 7–10, 12–19, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 — mechanism
-shipped, hardening continues), and **3 are deferred** (#21–23: code embedder,
-cross-encoder reranker, hybrid/BM25 search — all requiring a new model + a full
-re-embed of existing memories, an owner-signed-off deploy-time step). 0.3.0 closed
-the daemon (#16); 0.4.0 closed the single-collection redesign (#18). What remains is
-purely the search-quality ML work (#21–23) — the architecture (single collection,
-warm daemon) is now in place to host it.
+shipped, hardening/deploy continues — now including **#21**), and **2 are deferred**
+(#22 cross-encoder reranker, #23 hybrid/BM25 search). 0.3.0 closed the daemon (#16);
+0.4.0 closed the single-collection redesign (#18); 0.5.0 landed the multilingual
+embedder (#21, e5-base) — code done, pending its on-box model fetch + reindex. What
+remains is the reranker (#22) and hybrid search (#23); since e5 is dense-only, #23
+needs a separate sparse path (where bge-m3 would have given sparse for free — traded
+away for CPU practicality).
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves — a `sanitize`

@@ -340,7 +340,7 @@ pub async fn add_memory(
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
-    let embedding = embedder::embed(config, content).await?;
+    let embedding = embedder::embed_passage(config, content).await?;
     check_dim(&embedding, config)?;
 
     // Deterministic ID → idempotent upsert. Identical content overwrites the same
@@ -405,7 +405,7 @@ pub async fn search(
         return Ok(Vec::new());
     }
 
-    let embedding = embedder::embed(config, query).await?;
+    let embedding = embedder::embed_query(config, query).await?;
     check_dim(&embedding, config)?;
 
     // One query over the single collection → true global top-k. An optional
@@ -677,7 +677,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
             let created_at =
                 extract_string(&p.payload, "created_at").unwrap_or_else(|| now.clone());
 
-            let embedding = embedder::embed(config, &content).await?;
+            let embedding = embedder::embed_passage(config, &content).await?;
             check_dim(&embedding, config)?;
             let id = deterministic_id(lib, &content);
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();

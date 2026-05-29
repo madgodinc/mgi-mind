@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.0 — Multilingual embedder support: e5-base (audit #21)
+
+The English-only MiniLM is replaced as the default by **multilingual-e5-base** —
+a big retrieval-quality win for Russian/mixed content, practical on CPU (768-dim,
+~278M, runs quantized). The embedder is now model-architecture-flexible.
+
+### Changed
+- **Default model → `multilingual-e5-base`** (768-dim). Existing MiniLM configs keep
+  working unchanged (serde preserves their `model_name`/`vector_size`/pooling).
+- **Embedder is architecture-flexible** (`pooling` = mean|cls; optional
+  `token_type_ids`): supports both BERT-family (MiniLM) and XLM-R (e5) models.
+  Pooling math is unit-tested.
+- **Query/passage prefixes** (`query_prefix`/`passage_prefix`): e5 requires
+  "query: " / "passage: ". `search` embeds as a query, stored memories/facts as
+  passages. MiniLM uses empty prefixes (no behaviour change).
+- **Model download is source-aware**: e5 ONNX is fetched (quantized) from the Xenova
+  mirror; sentence-transformers models keep their path.
+
+### Deploy step (not automatic)
+- On the box: `mgimind doctor --fix` fetches the e5 model, then `mgimind migrate`
+  re-embeds existing memories at 768-dim under e5. **Runtime validation of the e5
+  ONNX path (load + RU retrieval) is pending the on-box model fetch.**
+
+### Still open
+- #22 cross-encoder reranker, #23 hybrid/BM25 search (e5 is dense-only → needs a
+  separate sparse path). Operational: daemon autostart + live cutover.
+
 ## 0.4.0 — Single-collection storage (audit #18)
 
 Memories moved from one Qdrant collection per library (`mem_<library>`) to a single
