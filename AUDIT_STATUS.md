@@ -1,4 +1,4 @@
-# Audit Status - MGI-Mind v0.2.0
+# Audit Status - MGI-Mind v0.7.x
 
 This document accounts for **every** item in the security/quality audit (27 issues
 across Parts I-III, plus the Part II competitive roadmap). Each row is either
