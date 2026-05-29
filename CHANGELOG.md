@@ -18,10 +18,16 @@ a big retrieval-quality win for Russian/mixed content, practical on CPU (768-dim
 - **Model download is source-aware**: e5 ONNX is fetched (quantized) from the Xenova
   mirror; sentence-transformers models keep their path.
 
+### Validated
+- e5-base runtime-tested on an isolated instance with the real quantized model: RU
+  queries returned the correct top result every time (e.g. «искусственный интеллект
+  для трансляций» → Aurora 0.79; «что приготовить на обед» → борщ 0.82, not the tech
+  entries). Confirms the e5 ONNX path: no token_type_ids, mean pooling, query/passage
+  prefixes, 768-dim.
+
 ### Deploy step (not automatic)
-- On the box: `mgimind doctor --fix` fetches the e5 model, then `mgimind migrate`
-  re-embeds existing memories at 768-dim under e5. **Runtime validation of the e5
-  ONNX path (load + RU retrieval) is pending the on-box model fetch.**
+- Live cutover: `mgimind doctor --fix` fetches the e5 model, then `mgimind migrate`
+  re-embeds existing memories at 768-dim under e5.
 
 ### Still open
 - #22 cross-encoder reranker, #23 hybrid/BM25 search (e5 is dense-only → needs a
