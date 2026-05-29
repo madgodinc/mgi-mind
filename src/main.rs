@@ -2,9 +2,11 @@ mod cli;
 mod config;
 mod embedder;
 mod error;
+mod integrity;
 mod knowledge;
 mod session;
 mod storage;
+mod util;
 mod vault;
 
 use anyhow::Result;
@@ -32,7 +34,9 @@ async fn main() -> Result<()> {
         );
         if ort_lib.exists() {
             // SAFETY: single-threaded at this point (before tokio runtime starts work)
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", &ort_lib); }
+            unsafe {
+                std::env::set_var("ORT_DYLIB_PATH", &ort_lib);
+            }
         }
     }
 

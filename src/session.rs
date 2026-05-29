@@ -2,15 +2,27 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::fs;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 use crate::config;
 
-fn session_file(timestamp: &str, agent: &str) -> PathBuf {
-    config::sessions_dir().join(format!("{timestamp}_{agent}.md"))
+/// Per-agent active-session pointer. Each agent gets its own `.current.<agent>`
+/// so two agents no longer clobber a single shared `.current` (audit #14).
+fn current_pointer(agent: &str) -> PathBuf {
+    config::sessions_dir().join(format!(".current.{}", sanitize(agent)))
 }
 
-fn current_session_path() -> PathBuf {
-    config::sessions_dir().join(".current")
+fn sanitize(agent: &str) -> String {
+    agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub fn start(agent: &str) -> Result<()> {
@@ -18,29 +30,32 @@ pub fn start(agent: &str) -> Result<()> {
     fs::create_dir_all(&dir)?;
 
     let now = Utc::now();
-    let timestamp = now.format("%Y-%m-%d_%H-%M").to_string();
-    let path = session_file(&timestamp, agent);
+    // Seconds + a short random suffix → two starts in the same minute can't
+    // collide and overwrite each other's session file (audit #14).
+    let timestamp = now.format("%Y-%m-%d_%H-%M-%S").to_string();
+    let short = &Uuid::new_v4().simple().to_string()[..6];
+    let path = dir.join(format!("{timestamp}_{}_{short}.md", sanitize(agent)));
 
     let header = format!(
         "[session]\nagent = {agent}\nstarted = {}\nstatus = active\n\n---\n\n",
         now.to_rfc3339()
     );
 
-    fs::write(&path, &header)?;
-
-    // Save current session pointer
-    fs::write(current_session_path(), path.to_string_lossy().as_bytes())?;
+    crate::util::atomic_write_str(&path, &header)?;
+    crate::util::atomic_write_str(&current_pointer(agent), &path.to_string_lossy())?;
 
     Ok(())
 }
 
-pub fn end(summary: &str) -> Result<()> {
-    let current = current_session_path();
-    if !current.exists() {
-        anyhow::bail!("No active session. Start one with `mgimind session start`");
+pub fn end(agent: &str, summary: &str) -> Result<()> {
+    let pointer = current_pointer(agent);
+    if !pointer.exists() {
+        anyhow::bail!(
+            "No active session for agent '{agent}'. Start one with `mgimind session start --agent {agent}`"
+        );
     }
 
-    let path_str = fs::read_to_string(&current)?;
+    let path_str = fs::read_to_string(&pointer)?;
     let path = PathBuf::from(path_str.trim());
 
     if !path.exists() {
@@ -54,40 +69,45 @@ pub fn end(summary: &str) -> Result<()> {
     );
 
     let mut content = fs::read_to_string(&path)?;
+    content = content.replace("status = active", "status = completed");
     content.push_str(&footer);
 
-    // Replace status
-    content = content.replace("status = active", "status = completed");
-
-    fs::write(&path, content)?;
-
-    // Remove current pointer
-    fs::remove_file(&current)?;
+    crate::util::atomic_write_str(&path, &content)?;
+    fs::remove_file(&pointer).ok();
 
     Ok(())
 }
 
-pub fn last() -> Result<Option<String>> {
+/// Most recent session. With `agent`, scoped to that agent's sessions;
+/// otherwise the globally newest (audit #14: `last` is no longer a blind global pick).
+pub fn last(agent: Option<&str>) -> Result<Option<String>> {
     let dir = config::sessions_dir();
     if !dir.exists() {
         return Ok(None);
     }
+
+    let agent_tag = agent.map(|a| format!("_{}_", sanitize(a)));
 
     let mut sessions: Vec<_> = fs::read_dir(&dir)?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            name.ends_with(".md") && !name.starts_with('.')
+            if !name.ends_with(".md") || name.starts_with('.') {
+                return false;
+            }
+            match &agent_tag {
+                Some(tag) => name.contains(tag.as_str()),
+                None => true,
+            }
         })
         .collect();
 
-    // Sort by name descending (timestamps ensure chronological order)
-    sessions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    // Timestamped names sort chronologically; newest first.
+    sessions.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
     if let Some(entry) = sessions.first() {
-        let content = fs::read_to_string(entry.path())
-            .context("Failed to read session file")?;
+        let content = fs::read_to_string(entry.path()).context("Failed to read session file")?;
         Ok(Some(content))
     } else {
         Ok(None)

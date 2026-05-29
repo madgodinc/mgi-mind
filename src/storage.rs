@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use qdrant_client::qdrant::{
-    CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder,
-    VectorParamsBuilder, DeleteCollectionBuilder, UpsertPointsBuilder,
-    DeletePointsBuilder, PointsIdsList, ScrollPointsBuilder,
-};
 use qdrant_client::Qdrant;
+use qdrant_client::qdrant::{
+    CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance, PointStruct,
+    PointsIdsList, ScrollPointsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -12,9 +12,16 @@ use uuid::Uuid;
 use crate::config::MindConfig;
 use crate::embedder;
 
-const VECTOR_SIZE: u64 = 384;
 const MEMORIES_PREFIX: &str = "mem_";
 pub const FACTS_COLLECTION: &str = "_kg_facts";
+
+/// Fixed namespace for deterministic content IDs (audit #15).
+/// UUIDv5(namespace, library + content) → identical content yields the same
+/// point ID, so re-adding is an idempotent upsert (no duplicates, no TOCTOU race).
+const MGI_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6d69_6e64_0000_000000000001);
+
+/// How many points to pull per scroll page (export/history pagination, audit #10).
+const SCROLL_PAGE: u32 = 256;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -22,14 +29,18 @@ pub struct SearchResult {
     pub library: String,
     pub content: String,
     pub source: Option<String>,
+    pub created_at: Option<String>,
     pub score: f32,
 }
 
 pub async fn get_client(config: &MindConfig) -> Result<Qdrant> {
     let url = format!("http://localhost:{}", config.qdrant_port);
-    let client = Qdrant::from_url(&url)
-        .build()
-        .context("Failed to connect to Qdrant")?;
+    let mut builder = Qdrant::from_url(&url);
+    // Authenticate when an API key is configured (audit #7).
+    if let Some(key) = &config.qdrant_api_key {
+        builder = builder.api_key(key.clone());
+    }
+    let client = builder.build().context("Failed to connect to Qdrant")?;
     Ok(client)
 }
 
@@ -37,13 +48,22 @@ fn collection_name(library: &str) -> String {
     format!("{MEMORIES_PREFIX}{library}")
 }
 
+fn deterministic_id(library: &str, content: &str) -> String {
+    let key = format!("{library}\u{0}{content}");
+    Uuid::new_v5(&MGI_NAMESPACE, key.as_bytes()).to_string()
+}
+
 fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{truncated}...")
+        return s.to_string();
     }
+    let truncated: String = s.chars().take(max_chars).collect();
+    // Break at the last word boundary instead of slicing mid-token (audit #24).
+    let cut = match truncated.rfind(char::is_whitespace) {
+        Some(i) if i >= max_chars / 2 => i,
+        _ => truncated.len(),
+    };
+    format!("{}...", truncated[..cut].trim_end())
 }
 
 fn format_point_id(pid: &qdrant_client::qdrant::PointId) -> String {
@@ -55,11 +75,17 @@ fn format_point_id(pid: &qdrant_client::qdrant::PointId) -> String {
     }
 }
 
-pub fn extract_string_pub(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<String> {
+pub fn extract_string_pub(
+    payload: &HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<String> {
     extract_string(payload, key)
 }
 
-fn extract_string(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<String> {
+fn extract_string(
+    payload: &HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<String> {
     payload.get(key).and_then(|v| {
         if let Some(qdrant_client::qdrant::value::Kind::StringValue(s)) = &v.kind {
             Some(s.clone())
@@ -69,20 +95,20 @@ fn extract_string(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: 
     })
 }
 
+async fn create_vector_collection(client: &Qdrant, name: &str, dim: u64) -> Result<()> {
+    client
+        .create_collection(
+            CreateCollectionBuilder::new(name)
+                .vectors_config(VectorParamsBuilder::new(dim, Distance::Cosine)),
+        )
+        .await
+        .with_context(|| format!("Failed to create collection {name}"))?;
+    Ok(())
+}
+
 pub async fn init(config: &MindConfig) -> Result<()> {
     let client = get_client(config).await?;
-
-    let exists = client.collection_exists(FACTS_COLLECTION).await.unwrap_or(false);
-    if !exists {
-        client
-            .create_collection(
-                CreateCollectionBuilder::new(FACTS_COLLECTION)
-                    .vectors_config(VectorParamsBuilder::new(VECTOR_SIZE, Distance::Cosine)),
-            )
-            .await
-            .context("Failed to create facts collection")?;
-    }
-
+    ensure_facts_collection(&client, config.vector_size).await?;
     Ok(())
 }
 
@@ -90,19 +116,14 @@ pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
     let client = get_client(config).await?;
     let col = collection_name(name);
 
-    let exists = client.collection_exists(&col).await.unwrap_or(false);
-    if exists {
-        anyhow::bail!("{}", crate::error::MindError::LibraryExists(name.to_string()));
+    if client.collection_exists(&col).await.unwrap_or(false) {
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryExists(name.to_string())
+        );
     }
 
-    client
-        .create_collection(
-            CreateCollectionBuilder::new(&col)
-                .vectors_config(VectorParamsBuilder::new(VECTOR_SIZE, Distance::Cosine)),
-        )
-        .await
-        .context("Failed to create library collection")?;
-
+    create_vector_collection(&client, &col, config.vector_size).await?;
     Ok(())
 }
 
@@ -125,26 +146,33 @@ pub async fn list_libraries(config: &MindConfig) -> Result<Vec<String>> {
     let libraries: Vec<String> = collections
         .collections
         .iter()
-        .filter_map(|c| {
-            c.name
-                .strip_prefix(MEMORIES_PREFIX)
-                .map(|s| s.to_string())
-        })
+        .filter_map(|c| c.name.strip_prefix(MEMORIES_PREFIX).map(|s| s.to_string()))
         .collect();
 
     Ok(libraries)
 }
 
-pub async fn ensure_facts_collection(client: &Qdrant) -> Result<()> {
-    let exists = client.collection_exists(FACTS_COLLECTION).await.unwrap_or(false);
-    if !exists {
-        client
-            .create_collection(
-                CreateCollectionBuilder::new(FACTS_COLLECTION)
-                    .vectors_config(VectorParamsBuilder::new(VECTOR_SIZE, Distance::Cosine)),
-            )
-            .await
-            .context("Failed to create facts collection")?;
+pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
+    if !client
+        .collection_exists(FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        create_vector_collection(client, FACTS_COLLECTION, dim).await?;
+    }
+    Ok(())
+}
+
+/// Validate that an embedding matches the configured dimension (audit #11).
+fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
+    if embedding.len() as u64 != config.vector_size {
+        anyhow::bail!(
+            "Embedding dimension {} does not match configured vector_size {} \
+             (model '{}' may have changed — run a reindex)",
+            embedding.len(),
+            config.vector_size,
+            config.model_name
+        );
     }
     Ok(())
 }
@@ -159,33 +187,19 @@ pub async fn add_memory(
     let col = collection_name(library);
 
     if !client.collection_exists(&col).await.unwrap_or(false) {
-        anyhow::bail!("{}", crate::error::MindError::LibraryNotFound(library.to_string()));
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryNotFound(library.to_string())
+        );
     }
 
-    // Deduplication: check if content hash already exists
-    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let embedding = embedder::embed(config, content).await?;
+    check_dim(&embedding, config)?;
 
-    // Search for near-exact match by embedding (score > 0.99 = duplicate)
-    let dup_check = client
-        .search_points(
-            SearchPointsBuilder::new(&col, embedding.clone(), 1).with_payload(true),
-        )
-        .await;
-
-    if let Ok(response) = dup_check {
-        if let Some(point) = response.result.first() {
-            if point.score > 0.99 {
-                let existing_hash = extract_string(&point.payload, "hash").unwrap_or_default();
-                if existing_hash == hash {
-                    let existing_id = point.id.as_ref().map(|id| format!("{id:?}")).unwrap_or_default();
-                    anyhow::bail!("Duplicate content already exists [id: {existing_id}]");
-                }
-            }
-        }
-    }
-
-    let id = Uuid::new_v4().to_string();
+    // Deterministic ID → idempotent upsert. Identical content overwrites the same
+    // point instead of creating a duplicate, with no read-before-write race (audit #8, #15).
+    let id = deterministic_id(library, content);
+    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
@@ -216,6 +230,7 @@ pub async fn search(
 ) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     let embedding = embedder::embed(config, query).await?;
+    check_dim(&embedding, config)?;
 
     let collections: Vec<String> = if let Some(lib) = library {
         vec![collection_name(lib)]
@@ -245,6 +260,7 @@ pub async fn search(
 
                 let content = extract_string(payload, "content").unwrap_or_default();
                 let source = extract_string(payload, "source");
+                let created_at = extract_string(payload, "created_at");
 
                 let display_content = match tier {
                     1 => truncate_str(&content, 100),
@@ -262,13 +278,18 @@ pub async fn search(
                     library: lib_name.to_string(),
                     content: display_content,
                     source,
+                    created_at,
                     score: point.score,
                 });
             }
         }
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(limit);
 
     Ok(results)
@@ -279,7 +300,10 @@ pub async fn delete_memory(config: &MindConfig, library: &str, id: &str) -> Resu
     let col = collection_name(library);
 
     if !client.collection_exists(&col).await.unwrap_or(false) {
-        anyhow::bail!("{}", crate::error::MindError::LibraryNotFound(library.to_string()));
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryNotFound(library.to_string())
+        );
     }
 
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
@@ -298,6 +322,34 @@ pub async fn delete_memory(config: &MindConfig, library: &str, id: &str) -> Resu
     Ok(())
 }
 
+/// Scroll an entire collection, following pagination to the end (audit #10).
+pub async fn scroll_all(
+    client: &Qdrant,
+    collection: &str,
+) -> Result<Vec<qdrant_client::qdrant::RetrievedPoint>> {
+    let mut out = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+
+    loop {
+        let mut builder = ScrollPointsBuilder::new(collection)
+            .limit(SCROLL_PAGE)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+
+        let response = client.scroll(builder).await?;
+        out.extend(response.result);
+
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    Ok(out)
+}
+
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     let collections = client.list_collections().await?;
@@ -306,41 +358,41 @@ pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResu
 
     for col in &collections.collections {
         if let Some(lib_name) = col.name.strip_prefix(MEMORIES_PREFIX) {
-            let scroll = client
-                .scroll(ScrollPointsBuilder::new(&col.name).limit(limit as u32).with_payload(true))
-                .await;
+            let points = scroll_all(&client, &col.name).await.unwrap_or_default();
+            for point in points {
+                let payload = &point.payload;
+                let content = extract_string(payload, "content").unwrap_or_default();
+                let source = extract_string(payload, "source");
+                let created_at = extract_string(payload, "created_at");
 
-            if let Ok(response) = scroll {
-                for point in response.result {
-                    let payload = &point.payload;
-                    let content = extract_string(payload, "content").unwrap_or_default();
-                    let source = extract_string(payload, "source");
-                    let _created = extract_string(payload, "created_at").unwrap_or_default();
+                let id = match &point.id {
+                    Some(pid) => format_point_id(pid),
+                    None => "unknown".to_string(),
+                };
 
-                    let id = match &point.id {
-                        Some(pid) => format_point_id(pid),
-                        None => "unknown".to_string(),
-                    };
-
-                    all_results.push(SearchResult {
-                        id,
-                        library: lib_name.to_string(),
-                        content: truncate_str(&content, 200),
-                        source,
-                        score: 0.0, // no score for scroll
-                    });
-                }
+                all_results.push(SearchResult {
+                    id,
+                    library: lib_name.to_string(),
+                    content: truncate_str(&content, 200),
+                    source,
+                    created_at,
+                    score: 0.0,
+                });
             }
         }
     }
 
-    // Sort by newest first (entries have created_at in payload but we truncated it)
-    // For now just take last N
+    // Newest first. RFC3339 timestamps sort chronologically as strings (audit #9).
+    all_results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     all_results.truncate(limit);
     Ok(all_results)
 }
 
 pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> Result<usize> {
+    if format != "json" && format != "md" {
+        anyhow::bail!("Unsupported format: {format}. Use json or md");
+    }
+
     let client = get_client(config).await?;
     let collections = client.list_collections().await?;
 
@@ -351,53 +403,50 @@ pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> 
     for col in &collections.collections {
         let lib_name = col.name.strip_prefix(MEMORIES_PREFIX).unwrap_or(&col.name);
 
-        let scroll = client
-            .scroll(ScrollPointsBuilder::new(&col.name).limit(10000).with_payload(true))
-            .await;
+        // Full pagination — no silent 10k cap (audit #10).
+        let points = scroll_all(&client, &col.name).await.unwrap_or_default();
 
-        if let Ok(response) = scroll {
-            let entries: Vec<serde_json::Value> = response
-                .result
-                .iter()
-                .filter_map(|point| {
-                    let payload = &point.payload;
-                    let content = extract_string(payload, "content")?;
-                    let source = extract_string(payload, "source");
-                    let created = extract_string(payload, "created_at");
-                    let id = point.id.as_ref().map(format_point_id);
+        let entries: Vec<serde_json::Value> = points
+            .iter()
+            .filter_map(|point| {
+                let payload = &point.payload;
+                let content = extract_string(payload, "content")?;
+                let source = extract_string(payload, "source");
+                let created = extract_string(payload, "created_at");
+                let id = point.id.as_ref().map(format_point_id);
 
-                    Some(serde_json::json!({
-                        "id": id,
-                        "content": content,
-                        "source": source,
-                        "created_at": created,
-                    }))
-                })
-                .collect();
+                Some(serde_json::json!({
+                    "id": id,
+                    "content": content,
+                    "source": source,
+                    "created_at": created,
+                }))
+            })
+            .collect();
 
-            total += entries.len();
+        total += entries.len();
 
-            let file_path = format!("{output_dir}/{lib_name}.{format}");
+        let file_path = format!("{output_dir}/{lib_name}.{format}");
+        let path = std::path::Path::new(&file_path);
 
-            match format {
-                "json" => {
-                    let json = serde_json::to_string_pretty(&entries)?;
-                    std::fs::write(&file_path, json)?;
-                }
-                "md" => {
-                    let mut md = format!("# {lib_name}\n\n");
-                    for entry in &entries {
-                        if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
-                            md.push_str(&format!("---\n\n{content}\n\n"));
-                            if let Some(src) = entry.get("source").and_then(|v| v.as_str()) {
-                                md.push_str(&format!("*source: {src}*\n\n"));
-                            }
+        match format {
+            "json" => {
+                let json = serde_json::to_string_pretty(&entries)?;
+                crate::util::atomic_write_str(path, &json)?;
+            }
+            "md" => {
+                let mut md = format!("# {lib_name}\n\n");
+                for entry in &entries {
+                    if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
+                        md.push_str(&format!("---\n\n{content}\n\n"));
+                        if let Some(src) = entry.get("source").and_then(|v| v.as_str()) {
+                            md.push_str(&format!("*source: {src}*\n\n"));
                         }
                     }
-                    std::fs::write(&file_path, md)?;
                 }
-                _ => anyhow::bail!("Unsupported format: {format}. Use json or md"),
+                crate::util::atomic_write_str(path, &md)?;
             }
+            _ => unreachable!(),
         }
     }
 
@@ -427,33 +476,64 @@ pub async fn stats(config: &MindConfig) -> Result<(Vec<(String, u64)>, u64)> {
     Ok((libraries, facts_count))
 }
 
+/// Native gzip+tar backup of the data dir — no `tar` shellout (audit #19).
 pub fn backup(output: &str) -> Result<()> {
     let home = crate::config::mind_home();
-
-    let status = std::process::Command::new("tar")
-        .args(["-czf", output, "-C", &home.to_string_lossy(), "."])
-        .status()
-        .context("Failed to run tar for backup")?;
-
-    if !status.success() {
-        anyhow::bail!("Backup failed with exit code: {:?}", status.code());
-    }
-
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("Failed to create backup file {output}"))?;
+    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(enc);
+    tar.append_dir_all(".", &home)
+        .context("Failed to archive data directory")?;
+    tar.into_inner()?.finish()?;
     Ok(())
 }
 
+/// Native gzip+tar restore — no `tar` shellout (audit #19).
 pub fn restore(input: &str) -> Result<()> {
     let home = crate::config::mind_home();
     std::fs::create_dir_all(&home)?;
+    let file = std::fs::File::open(input)
+        .with_context(|| format!("Failed to open backup file {input}"))?;
+    let dec = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(dec);
+    archive.unpack(&home).context("Failed to extract backup")?;
+    Ok(())
+}
 
-    let status = std::process::Command::new("tar")
-        .args(["-xzf", input, "-C", &home.to_string_lossy()])
-        .status()
-        .context("Failed to run tar for restore")?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    if !status.success() {
-        anyhow::bail!("Restore failed with exit code: {:?}", status.code());
+    #[test]
+    fn deterministic_id_is_stable_and_content_addressed() {
+        let a = deterministic_id("lib", "hello world");
+        let b = deterministic_id("lib", "hello world");
+        let c = deterministic_id("lib", "different");
+        let d = deterministic_id("other", "hello world");
+        assert_eq!(
+            a, b,
+            "same library+content must yield the same id (idempotent upsert)"
+        );
+        assert_ne!(a, c, "different content must differ");
+        assert_ne!(a, d, "different library must differ");
+        // valid UUID string
+        assert!(uuid::Uuid::parse_str(&a).is_ok());
     }
 
-    Ok(())
+    #[test]
+    fn truncate_breaks_on_word_boundary() {
+        let s = "alpha beta gamma delta epsilon";
+        let t = super::truncate_str(s, 12);
+        assert!(t.ends_with("..."));
+        // must not cut mid-word: the part before "..." ends at a full word
+        let body = t.trim_end_matches('.');
+        assert!(s.starts_with(body.trim_end()));
+        assert!(!body.ends_with("gam"));
+    }
+
+    #[test]
+    fn truncate_noop_when_short() {
+        assert_eq!(super::truncate_str("short", 100), "short");
+    }
 }

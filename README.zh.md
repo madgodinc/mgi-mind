@@ -13,6 +13,11 @@ AI原生第二大脑。自托管、令牌优化的AI助手记忆系统。
 -> 部署服务器 10.0.0.5:8080 (score: 0.72)
 ```
 
+> **v0.2.0** — 根据完整代码审计重建了数据与安全层：原子写入、内容寻址 ID（幂等 upsert）、
+> 隐藏并清零的保险库主密码、下载 SHA-256 校验、Qdrant 仅绑定 127.0.0.1、按 agent 的会话、
+> 原生 HTTP/归档处理、测试 + CI。完整核对见 [`AUDIT_STATUS.md`](AUDIT_STATUS.md)，
+> 变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
 完整文档和代码示例请参阅[英文README](README.md)。
 
 ---

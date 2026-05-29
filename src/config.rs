@@ -2,12 +2,23 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn default_vector_size() -> u64 {
+    384
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MindConfig {
     pub version: String,
     pub data_dir: PathBuf,
     pub model_name: String,
     pub qdrant_port: u16,
+    /// Embedding dimension. Stored so a model swap can be detected (audit #11).
+    #[serde(default = "default_vector_size")]
+    pub vector_size: u64,
+    /// Optional Qdrant API key. When set, the bundled server is started with it
+    /// and the client authenticates (audit #7). `None` = local-only, no auth.
+    #[serde(default)]
+    pub qdrant_api_key: Option<String>,
 }
 
 impl Default for MindConfig {
@@ -17,6 +28,8 @@ impl Default for MindConfig {
             data_dir: mind_home(),
             model_name: "all-MiniLM-L6-v2".to_string(),
             qdrant_port: 6334,
+            vector_size: default_vector_size(),
+            qdrant_api_key: None,
         }
     }
 }
@@ -35,12 +48,8 @@ impl MindConfig {
 
     pub fn save(&self) -> Result<()> {
         let path = config_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-        Ok(())
+        crate::util::atomic_write_str(&path, &content)
     }
 }
 
@@ -64,4 +73,27 @@ pub fn models_dir() -> PathBuf {
 
 pub fn is_initialized() -> bool {
     config_path().exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MindConfig;
+
+    #[test]
+    fn old_config_without_vector_size_defaults_to_384() {
+        // A v0.1 config has no vector_size / qdrant_api_key fields.
+        let json = r#"{"version":"0.1.0","data_dir":"/tmp/x","model_name":"all-MiniLM-L6-v2","qdrant_port":6334}"#;
+        let cfg: MindConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.vector_size, 384);
+        assert!(cfg.qdrant_api_key.is_none());
+    }
+
+    #[test]
+    fn config_roundtrips() {
+        let cfg = MindConfig::default();
+        let s = serde_json::to_string(&cfg).unwrap();
+        let back: MindConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.vector_size, cfg.vector_size);
+        assert_eq!(back.model_name, cfg.model_name);
+    }
 }

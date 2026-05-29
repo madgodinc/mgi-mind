@@ -52,7 +52,7 @@ async function run(args) {
 
 const server = new McpServer({
   name: "mgi-mind",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // --- Tools ---
@@ -103,15 +103,21 @@ server.tool("mind_session_start", "Start a new session", {
   return { content: [{ type: "text", text: result }] };
 });
 
-server.tool("mind_session_last", "Get last session summary", {}, async () => {
-  const result = await run(["session", "last"]);
+server.tool("mind_session_last", "Get last session summary", {
+  agent: z.string().optional().describe("Only consider this agent's sessions"),
+}, async ({ agent }) => {
+  const args = ["session", "last"];
+  if (agent) args.push("--agent", agent);
+  const result = await run(args);
   return { content: [{ type: "text", text: result }] };
 });
 
-server.tool("mind_session_end", "End current session", {
+server.tool("mind_session_end", "End the active session for an agent", {
+  agent: z.string().default("unknown").describe("Same agent name used in mind_session_start"),
   summary: z.string().describe("Session summary"),
-}, async ({ summary }) => {
-  const result = await run(["session", "end", "--summary", summary]);
+}, async ({ agent, summary }) => {
+  // Pass the agent so concurrent agents don't end each other's session (audit #14).
+  const result = await run(["session", "end", "--agent", agent, "--summary", summary]);
   return { content: [{ type: "text", text: result }] };
 });
 
@@ -198,13 +204,22 @@ server.tool("mind_vault_store", "Store a secret (password, SSH key, API token)",
   return { content: [{ type: "text", text: result }] };
 });
 
-server.tool("mind_vault_get", "Retrieve a secret (REQUIRES user confirmation in terminal)", {
+server.tool("mind_vault_get", "Explain how to retrieve a secret (never returns plaintext over MCP)", {
   key: z.string().describe("Key name"),
 }, async ({ key }) => {
-  // NOTE: This uses --yes because MCP can't do interactive prompts.
-  // The AI should warn the user before calling this.
-  const result = await run(["vault", "get", key, "--yes"]);
-  return { content: [{ type: "text", text: result }] };
+  // Audit #2: the master password and the decrypted secret must NOT flow through
+  // the MCP/LLM channel. The vault is terminal-only — instruct the user instead
+  // of returning plaintext (and never with an empty/blank master password).
+  return {
+    content: [{
+      type: "text",
+      text:
+        `For security, secrets are never returned over this channel.\n` +
+        `Retrieve "${key}" yourself in a terminal:\n\n` +
+        `    mgimind vault get ${key}\n\n` +
+        `You'll be prompted for the master password (hidden) and a confirmation.`,
+    }],
+  };
 });
 
 server.tool("mind_vault_list", "List stored secret keys (values hidden)", {}, async () => {

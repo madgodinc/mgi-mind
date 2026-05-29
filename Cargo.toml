@@ -1,6 +1,6 @@
 [package]
 name = "mgi-mind"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Mad God Inc"]
 description = "AI-native second brain. Self-hosted, token-optimized memory for AI assistants."
@@ -31,8 +31,8 @@ ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 # Tokenizer for embedding models
 tokenizers = "0.21"
 
-# UUID generation
-uuid = { version = "1", features = ["v4"] }
+# UUID generation (v5 = deterministic IDs from content hash)
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # Timestamps
 chrono = { version = "0.4", features = ["serde"] }
@@ -61,3 +61,26 @@ base64 = "0.22"
 aes-gcm = "0.10"
 argon2 = "0.5"
 rand = "0.8"
+
+# Hidden password input (no echo) — audit #3
+rpassword = "7"
+
+# Atomic file writes (temp + rename) — audit #4
+tempfile = "3"
+
+# Integrity verification of downloads — audit #6
+sha2 = "0.10"
+hex = "0.4"
+
+# Native HTTP + archive extraction (replaces curl/tar/unzip shellouts) — audit #19
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+futures-util = "0.3"
+
+# Zeroize password buffers after key derivation — audit #3
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
