@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.4 - retrieval test is now a real CI gate
+
+The 0.7.3 `add -> search` integration test only ran locally, because CI did not
+provide the embedding model, so it could not catch regressions on its own. CI now
+downloads the models once (cached, keyed on `integrity.rs`), runs `doctor --fix`, and
+passes `MGIMIND_IT_MODELS` + `ORT_DYLIB_PATH` to the integration job. The full
+retrieval path (add -> embed -> hybrid search) is now exercised automatically against
+the Qdrant service container, not just the library lifecycle.
+
 ## 0.7.3 - MCP fact-invalidate + a real retrieval integration test
 
 Follow-up to the 0.7.2 review.

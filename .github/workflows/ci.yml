@@ -62,10 +62,30 @@ jobs:
           echo "Qdrant did not become ready" >&2
           exit 1
 
-      - name: Integration tests against Qdrant
+      # Cache the downloaded models so the retrieval test is a real CI gate without
+      # re-downloading ~550 MB on every run. Keyed on integrity.rs (the pins), so the
+      # cache busts when a model changes.
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/mgimind/models
+          key: mgimind-models-${{ hashFiles('src/integrity.rs') }}
+
+      - name: Build binary and fetch models
+        run: |
+          cargo build --release
+          ./target/release/mgimind init
+          # Downloads ONNX Runtime + the e5 and reranker models (skips what is cached).
+          # The Qdrant service is already up, so we do not need the bundled qdrant.
+          ./target/release/mgimind doctor --fix
+
+      - name: Integration tests against Qdrant (lifecycle + real add->search)
         env:
           MGIMIND_IT_QDRANT: "6334"
-        run: cargo test --test cli_integration -- --nocapture
+          ORT_DYLIB_PATH: ${{ github.workspace }}/target/release/libonnxruntime.so
+        run: |
+          export MGIMIND_IT_MODELS="$HOME/mgimind/models"
+          cargo test --test cli_integration -- --nocapture
 
   audit:
     name: cargo-audit (vulnerabilities)
