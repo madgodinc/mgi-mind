@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0 — Hybrid search: dense + sparse + RRF (audit #23)
+
+Dense (semantic) retrieval misses exact rare terms; lexical (BM25) retrieval
+misses paraphrases. The memories collection now carries **both** and fuses them.
+
+### Changed
+- **Named vectors** on the memories collection: `dense` (e5, cosine) + `sparse`
+  (BM25-style, with Qdrant's **IDF modifier** applied server-side). `add_memory`
+  and `migrate` write both.
+- **`search` is hybrid**: a Qdrant Query API call with two prefetches (dense NN +
+  sparse NN) fused by **Reciprocal Rank Fusion (RRF)**, then cross-encoder reranked
+  (#22). A library filter applies to both arms.
+- Sparse vectors are unicode-aware term-frequency (lowercased, split on
+  non-alphanumeric — handles Cyrillic; tokens hashed to u32 indices).
+
+### Validated
+- Runtime-tested end-to-end: exact rare terms (`fossilize_replay`, `gamemoderun`)
+  surface via the lexical arm, while semantic queries ("как стим компилирует
+  шейдеры") still hit via dense — fused and reranked correctly.
+
+### Audit complete
+- 22 of 27 issues fully fixed, 5 partial (non-blocking polish), 0 deferred.
+- **Operational (not audit):** live cutover — deploy v0.7.0, `doctor --fix`
+  (fetch e5 + reranker), `migrate` (re-embed at the new dense+sparse 768-dim
+  schema) — plus daemon autostart.
+
 ## 0.6.0 — Cross-encoder reranker (audit #22)
 
 Dense retrieval is fast but coarse. A cross-encoder now re-orders the top-K by

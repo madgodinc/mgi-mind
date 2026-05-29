@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
-    DeleteCollectionBuilder, DeletePointsBuilder, Direction, Distance, FieldType, Filter,
-    GetPointsBuilder, OrderBy, PointStruct, PointsIdsList, ScrollPointsBuilder,
-    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    DeleteCollectionBuilder, DeletePointsBuilder, Direction, Distance, FieldType, Filter, Fusion,
+    GetPointsBuilder, Modifier, NamedVectors, OrderBy, PointStruct, PointsIdsList,
+    PrefetchQueryBuilder, Query, QueryPointsBuilder, ScrollPointsBuilder,
+    SparseVectorParamsBuilder, SparseVectorsConfigBuilder, UpsertPointsBuilder, Vector,
+    VectorInput, VectorParamsBuilder, VectorsConfigBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,6 +33,33 @@ const MGI_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6d69_6e64_0000_0000000000
 
 /// How many points to pull per scroll page (export/migrate pagination, audit #10).
 const SCROLL_PAGE: u32 = 256;
+
+/// Named vectors on the memories collection (audit #23 hybrid): a dense vector
+/// (e5 semantic) and a sparse vector (BM25-style lexical).
+const DENSE_VEC: &str = "dense";
+const SPARSE_VEC: &str = "sparse";
+
+/// Stable token id for a sparse term. Hash the term to a u32 index; with Qdrant's
+/// IDF modifier on the sparse vector, term frequencies become BM25-ish scores.
+fn token_id(token: &str) -> u32 {
+    let h = blake3::hash(token.as_bytes());
+    let b = h.as_bytes();
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Build a BM25-style sparse vector (term-frequency) from text. Unicode-aware:
+/// splits on non-alphanumeric (handles Cyrillic), lowercases, drops 1-char tokens.
+/// IDF is applied server-side via the collection's IDF modifier (audit #23).
+fn sparse_vector(text: &str) -> (Vec<u32>, Vec<f32>) {
+    let mut counts: HashMap<u32, f32> = HashMap::new();
+    for token in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if token.chars().take(2).count() < 2 {
+            continue;
+        }
+        *counts.entry(token_id(token)).or_insert(0.0) += 1.0;
+    }
+    counts.into_iter().unzip()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -178,13 +207,37 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         .await;
 }
 
+/// Create the memories collection with named vectors (audit #23 hybrid): a dense
+/// vector (`dense`, cosine) for semantic search and a sparse vector (`sparse`,
+/// IDF modifier) for BM25-style lexical search, fused at query time via RRF.
+async fn create_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
+    let mut dense = VectorsConfigBuilder::default();
+    dense.add_named_vector_params(DENSE_VEC, VectorParamsBuilder::new(dim, Distance::Cosine));
+
+    let mut sparse = SparseVectorsConfigBuilder::default();
+    sparse.add_named_vector_params(
+        SPARSE_VEC,
+        SparseVectorParamsBuilder::default().modifier(Modifier::Idf as i32),
+    );
+
+    client
+        .create_collection(
+            CreateCollectionBuilder::new(MEMORIES_COLLECTION)
+                .vectors_config(dense)
+                .sparse_vectors_config(sparse),
+        )
+        .await
+        .context("Failed to create memories collection")?;
+    Ok(())
+}
+
 pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
     if !client
         .collection_exists(MEMORIES_COLLECTION)
         .await
         .unwrap_or(false)
     {
-        create_vector_collection(client, MEMORIES_COLLECTION, dim).await?;
+        create_memories_collection(client, dim).await?;
     }
     ensure_payload_indexes(client, MEMORIES_COLLECTION).await;
     Ok(())
@@ -355,9 +408,14 @@ pub async fn add_memory(
         .await
         .unwrap_or_else(|| now.clone());
 
+    // Named dense (semantic) + sparse (BM25-style lexical) vectors for hybrid (#23).
+    let (s_idx, s_val) = sparse_vector(content);
+    let vectors = NamedVectors::default()
+        .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+        .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
     let point = PointStruct::new(
         id.clone(),
-        embedding,
+        vectors,
         build_payload(content, &hash, &created_at, &now, library, source),
     );
 
@@ -407,24 +465,41 @@ pub async fn search(
 
     let embedding = embedder::embed_query(config, query).await?;
     check_dim(&embedding, config)?;
+    let (s_idx, s_val) = sparse_vector(query);
 
-    // When reranking, fetch a wider candidate set by dense similarity, then let
-    // the cross-encoder re-order it (audit #18 single query + #22 rerank).
+    // Fetch a wider candidate set so the reranker has room to re-order (#22).
     let fetch_k = if config.rerank_enabled {
         config.rerank_top_k.max(limit)
     } else {
         limit
-    };
-    let mut builder =
-        SearchPointsBuilder::new(MEMORIES_COLLECTION, embedding, fetch_k as u64).with_payload(true);
+    } as u64;
+
+    // Hybrid retrieval (audit #23): dense (semantic) + sparse (BM25) prefetches
+    // fused with Reciprocal Rank Fusion. A library filter applies to both arms.
+    let mut dense_pf = PrefetchQueryBuilder::default()
+        .query(Query::new_nearest(VectorInput::new_dense(embedding)))
+        .using(DENSE_VEC)
+        .limit(fetch_k);
+    let mut sparse_pf = PrefetchQueryBuilder::default()
+        .query(Query::new_nearest(VectorInput::new_sparse(s_idx, s_val)))
+        .using(SPARSE_VEC)
+        .limit(fetch_k);
     if let Some(lib) = library {
-        builder = builder.filter(library_filter(lib));
+        dense_pf = dense_pf.filter(library_filter(lib));
+        sparse_pf = sparse_pf.filter(library_filter(lib));
     }
 
     let response = client
-        .search_points(builder)
+        .query(
+            QueryPointsBuilder::new(MEMORIES_COLLECTION)
+                .add_prefetch(dense_pf)
+                .add_prefetch(sparse_pf)
+                .query(Query::new_fusion(Fusion::Rrf))
+                .limit(fetch_k)
+                .with_payload(true),
+        )
         .await
-        .context("Search failed")?;
+        .context("Hybrid search failed")?;
 
     // Keep the FULL content for the reranker; tier truncation is display-only and
     // applied after the final ordering.
@@ -710,12 +785,16 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, Vec<Str
             let id = deterministic_id(lib, &content);
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
             let payload = build_payload(&content, &hash, &created_at, &now, lib, source.as_deref());
+            let (s_idx, s_val) = sparse_vector(&content);
+            let vectors = NamedVectors::default()
+                .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+                .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
 
             client
                 .upsert_points(
                     UpsertPointsBuilder::new(
                         MEMORIES_COLLECTION,
-                        vec![PointStruct::new(id, embedding, payload)],
+                        vec![PointStruct::new(id, vectors, payload)],
                     )
                     .wait(true),
                 )
