@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// Atomically write bytes to `path`: write a temp file in the same directory,
 /// fsync it, then rename over the target. A crash/power-loss mid-write leaves
-/// either the old file or the new one intact — never a truncated/corrupt file.
+/// either the old file or the new one intact - never a truncated/corrupt file.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()

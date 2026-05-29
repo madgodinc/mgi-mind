@@ -10,7 +10,7 @@ use crate::config::MindConfig;
 use crate::embedder;
 use crate::storage;
 
-/// Namespace for deterministic fact IDs — dedup by (subject, predicate, object) (audit #13).
+/// Namespace for deterministic fact IDs - dedup by (subject, predicate, object) (audit #13).
 const FACT_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6661_6374_0000_000000000001);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub async fn add_fact(
     Ok(id)
 }
 
-/// Query facts by matching the term against subject, predicate, OR object —
+/// Query facts by matching the term against subject, predicate, OR object -
 /// via a full scroll + filter, so nothing is silently dropped outside a vector
 /// top-K window (audit #12). Only valid (non-invalidated) facts are returned.
 pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> {

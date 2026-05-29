@@ -151,7 +151,7 @@ pub enum Commands {
     Stop,
 
     /// Run the long-lived daemon (keeps the embedding model warm; serves the
-    /// MCP client over a Unix socket to avoid per-call model reloads — audit #16)
+    /// MCP client over a Unix socket to avoid per-call model reloads - audit #16)
     Daemon,
 
     /// Migrate legacy per-library collections into the single `memories`
@@ -313,7 +313,7 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
     );
     let (moved, skipped, libs) = crate::storage::migrate(&config, purge).await?;
     if libs.is_empty() {
-        println!("No legacy collections found — nothing to migrate.");
+        println!("No legacy collections found - nothing to migrate.");
     } else {
         println!(
             "Migrated {moved} entries from libraries: {}",
@@ -473,7 +473,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
             }
         }
 
-        // Reranker model (audit #22) — only when reranking is enabled.
+        // Reranker model (audit #22) - only when reranking is enabled.
         if cfg.rerank_enabled {
             if crate::reranker::is_model_downloaded(&cfg) {
                 println!("[OK]   Reranker model");
@@ -580,7 +580,7 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     // 3. Libraries overview
     let (libraries, facts_count) = crate::storage::stats(config).await?;
 
-    // 4. Vault status (no plaintext count on disk — audit #26)
+    // 4. Vault status (no plaintext count on disk - audit #26)
     let vault_summary = crate::vault::summary();
 
     let mut out = String::new();
@@ -977,7 +977,7 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
         })
         .unwrap_or(0);
 
-    // Vault status (no plaintext count on disk — audit #26)
+    // Vault status (no plaintext count on disk - audit #26)
     let vault_summary = crate::vault::summary();
 
     let mut out = String::new();
@@ -1114,7 +1114,7 @@ pub async fn download_qdrant() -> Result<()> {
     let archive_path = tmp_dir.join(format!("qdrant.{archive_ext}"));
 
     if expected.is_none() {
-        println!("  [warn] no pinned checksum for this platform's Qdrant — integrity not verified");
+        println!("  [warn] no pinned checksum for this platform's Qdrant - integrity not verified");
     }
     println!("  Downloading Qdrant v{QDRANT_VERSION}...");
     crate::util::download_file(&url, &archive_path, expected).await?;
@@ -1170,7 +1170,7 @@ async fn cmd_serve() -> Result<()> {
             data_dir.join("storage").to_string_lossy().to_string(),
         )
         .env("QDRANT__LOG_LEVEL", "WARN")
-        // Bind to loopback only — never expose Qdrant on all interfaces (audit #7).
+        // Bind to loopback only - never expose Qdrant on all interfaces (audit #7).
         .env("QDRANT__SERVICE__HOST", "127.0.0.1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1201,10 +1201,10 @@ async fn cmd_serve() -> Result<()> {
 }
 
 /// On startup, surface any collection whose vector dimension disagrees with the
-/// configured `vector_size` (model changed without a reindex — audit #11). This
+/// configured `vector_size` (model changed without a reindex - audit #11). This
 /// is the cheap once-per-serve check that complements the per-embedding guard,
 /// so a mismatch is reported up front instead of as a raw Qdrant error on the
-/// first add. Never fails serve — memory must still come up.
+/// first add. Never fails serve - memory must still come up.
 async fn warn_on_dimension_mismatch() {
     let Ok(cfg) = crate::config::MindConfig::load() else {
         return;
@@ -1212,7 +1212,7 @@ async fn warn_on_dimension_mismatch() {
     if let Ok(mismatches) = crate::storage::dimension_mismatches(&cfg).await
         && !mismatches.is_empty()
     {
-        eprintln!("[WARN] vector dimension mismatch — embedding model changed without a reindex?");
+        eprintln!("[WARN] vector dimension mismatch - embedding model changed without a reindex?");
         for (name, dim) in &mismatches {
             eprintln!(
                 "       collection '{name}' is dim {dim}, but config vector_size = {}",

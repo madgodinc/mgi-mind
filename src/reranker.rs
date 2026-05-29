@@ -4,7 +4,7 @@
 //! `bge-reranker-base` (XLM-R, multilingual incl. RU; quantized ONNX, CPU-ok).
 //!
 //! Best-effort: any failure (model missing, tokenize/inference error) returns an
-//! error that `search` swallows, leaving the dense order untouched — reranking is
+//! error that `search` swallows, leaving the dense order untouched - reranking is
 //! a quality boost, never a hard dependency.
 
 use anyhow::{Result, anyhow};
@@ -58,7 +58,7 @@ fn get_tokenizer(config: &MindConfig) -> Result<&'static tokenizers::Tokenizer> 
     })
 }
 
-/// Relevance score for each (query, passage) pair — higher = more relevant.
+/// Relevance score for each (query, passage) pair - higher = more relevant.
 /// All pairs run in a single padded batch (one ONNX pass) so reranking K
 /// candidates stays cheap on CPU.
 pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Result<Vec<f32>> {
@@ -121,7 +121,7 @@ pub async fn scores(config: &MindConfig, query: &str, passages: &[String]) -> Re
         .try_extract_tensor::<f32>()
         .map_err(|e| anyhow!("rerank output: {e}"))?;
 
-    // Output is [n, labels] (bge-reranker: labels=1) — one relevance logit per pair.
+    // Output is [n, labels] (bge-reranker: labels=1) - one relevance logit per pair.
     let labels = if shape.len() == 2 {
         (shape[1] as usize).max(1)
     } else {

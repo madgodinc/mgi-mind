@@ -60,7 +60,7 @@ const SOCKET_PATH =
 
 // Send one newline-delimited JSON request to the daemon and resolve its rendered
 // text. Returns null on any connection/parse failure so the caller can fall back
-// to spawning the CLI — i.e. the daemon is a pure optimization, never required.
+// to spawning the CLI - i.e. the daemon is a pure optimization, never required.
 function daemonRequest(req, timeoutMs = 60000) {
   return new Promise((resolvePromise) => {
     let settled = false;
@@ -279,7 +279,7 @@ server.tool("mind_vault_get", "Explain how to retrieve a secret (never returns p
   key: z.string().describe("Key name"),
 }, async ({ key }) => {
   // Audit #2: the master password and the decrypted secret must NOT flow through
-  // the MCP/LLM channel. The vault is terminal-only — instruct the user instead
+  // the MCP/LLM channel. The vault is terminal-only - instruct the user instead
   // of returning plaintext (and never with an empty/blank master password).
   return {
     content: [{

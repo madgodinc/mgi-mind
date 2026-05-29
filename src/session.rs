@@ -13,7 +13,7 @@ fn current_pointer(agent: &str) -> PathBuf {
 }
 
 /// Injective filesystem-safe encoding of an agent name. Every byte outside
-/// `[A-Za-z0-9-]` — including the escape byte `_` itself — becomes `_HH`, so
+/// `[A-Za-z0-9-]` - including the escape byte `_` itself - becomes `_HH`, so
 /// distinct names can never collapse onto the same `.current.<agent>` pointer.
 /// (The old `_`-for-everything mapping reintroduced audit #14: `team a`,
 /// `team/a`, `team.a` all shared one pointer and clobbered each other.)

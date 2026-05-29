@@ -44,7 +44,7 @@ pub struct MindConfig {
     /// "passage: "; MiniLM uses "". Audit #21.
     #[serde(default)]
     pub passage_prefix: String,
-    /// Enable cross-encoder reranking (audit #22). ON by default — `bge-reranker-base`
+    /// Enable cross-encoder reranking (audit #22). ON by default - `bge-reranker-base`
     /// is strong on English (the target audience) and improves precision there.
     /// (It does degrade Russian ranking; if RU mattered, use a stronger multilingual
     /// reranker or turn this off.)

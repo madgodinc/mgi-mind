@@ -1,322 +1,161 @@
 # MGI-Mind - AI Instructions
 
-You are connecting to MGI-Mind, an AI-native second brain.
-Read this file completely before proceeding.
+You are connected to MGI-Mind, a self-hosted long-term memory system. All data stays
+on the user's machine. You are the interface to it. Read this file fully before you
+start.
 
-## What is MGI-Mind
+For install and architecture details, see [`README.md`](README.md). This file is the
+operating protocol for you, the assistant.
 
-A self-hosted, token-optimized memory system for AI assistants.
-All data stays on the user's machine. You are the interface.
+## What you get
 
-## Installation
+A local memory the user owns. You write to it as you work and read from it by meaning.
+Retrieval is hybrid (dense e5 + sparse BM25, fused with RRF) and reranked by a
+cross-encoder, so a search returns results by semantic relevance and exact-term match
+at once. You do not manage any of that; you just call the tools below.
 
-### Platform Detection
-Detect the user's platform first:
-- **Windows**: `uname -s` returns MINGW*/MSYS*/CYGWIN* or check for `C:\`
-- **macOS**: `uname -s` returns Darwin
-- **Linux**: `uname -s` returns Linux
+If a warm daemon is running (`mgimind daemon`), the MCP server uses it and lookups are
+fast. If not, it falls back to spawning the CLI. Either way the commands are the same.
 
-### Prerequisites
-- Rust toolchain (install via https://rustup.rs if missing)
-- Qdrant vector database (see Qdrant Setup below)
-- ONNX Runtime library (downloaded automatically by `mgimind doctor --fix`)
+## Your protocol (mandatory)
 
-### Install from source
-```bash
-git clone https://github.com/madgodinc/mgi-mind.git
-cd mgi-mind
-cargo build --release
-```
+### On session start
+1. `mgimind session last` to read the previous session summary.
+2. `mgimind session start --agent <your-name>` to begin logging.
+3. Greet the user with context from the last session.
 
-Binary location by platform:
-- **Windows**: `target/release/mgimind.exe`
-- **macOS/Linux**: `target/release/mgimind`
+Always use the SAME `--agent <your-name>` for `start` and `end`. Sessions are
+per-agent, so concurrent agents never overwrite each other's session.
 
-### Qdrant Setup
+### During the session
+- Before answering about past events, projects, or preferences: `mgimind search "<query>"`.
+- When the user shares something worth keeping: `mgimind add <library> "<content>"`.
+- When the user states a fact: `mgimind fact add "<subject>" "<predicate>" "<object>"`.
+- When the user asks what you know about something: `mgimind fact query "<term>"`.
+- Do not guess from memory. Search first, answer second.
 
-#### Option A: Docker (all platforms)
-```bash
-docker run -d -p 6333:6333 -p 6334:6334 \
-  -v ~/mgimind/qdrant:/qdrant/storage \
-  --name mgimind-qdrant \
-  qdrant/qdrant
-```
+### On session end
+- `mgimind session end --agent <your-name> --summary "<what was done, what is next>"`.
+- Keep the summary under about 200 words.
 
-#### Option B: Binary (no Docker)
-
-Download from https://github.com/qdrant/qdrant/releases/latest
-
-| Platform | File |
-|----------|------|
-| Windows | `qdrant-x86_64-pc-windows-msvc.zip` |
-| macOS (Intel) | `qdrant-x86_64-apple-darwin.tar.gz` |
-| macOS (Apple Silicon) | `qdrant-aarch64-apple-darwin.tar.gz` |
-| Linux | `qdrant-x86_64-unknown-linux-gnu.tar.gz` |
-
-Extract and run:
-```bash
-./qdrant  # Starts on port 6333/6334 by default
-```
-
-### ONNX Runtime Setup
-
-`mgimind doctor --fix` downloads this automatically. If manual install needed:
-
-Download from https://github.com/microsoft/onnxruntime/releases/tag/v1.24.2
-
-| Platform | File |
-|----------|------|
-| Windows | `onnxruntime-win-x64-1.24.2.zip` -> extract `onnxruntime.dll` next to `mgimind.exe` |
-| macOS (Intel) | `onnxruntime-osx-x86_64-1.24.2.tgz` -> extract `libonnxruntime.dylib` |
-| macOS (Apple Silicon) | `onnxruntime-osx-arm64-1.24.2.tgz` -> extract `libonnxruntime.dylib` |
-| Linux | `onnxruntime-linux-x64-1.24.2.tgz` -> extract `libonnxruntime.so` |
-
-Set environment variable:
-```bash
-# Windows
-set ORT_DYLIB_PATH=C:\path\to\onnxruntime.dll
-
-# macOS/Linux
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so  # or .dylib
-```
-
-### First-time setup
-```bash
-mgimind init          # Creates ~/mgimind/ with config, sessions, models dirs
-mgimind doctor --fix  # Downloads embedding model, ONNX runtime, fixes issues
-```
-
-### Server deployment (Linux)
-
-For running on a server (VPS/dedicated):
-```bash
-# 1. Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# 2. Clone and build
-git clone https://github.com/madgodinc/mgi-mind.git
-cd mgi-mind && cargo build --release
-
-# 3. Start Qdrant (systemd or docker)
-docker run -d --restart=always -p 6333:6333 -p 6334:6334 \
-  -v /data/mgimind/qdrant:/qdrant/storage \
-  --name mgimind-qdrant qdrant/qdrant
-
-# 4. Initialize
-./target/release/mgimind init
-./target/release/mgimind doctor --fix
-
-# 5. (Optional) Create systemd service for MCP server
-```
-
-## Your Protocol (MANDATORY)
-
-### On Session Start
-1. Run `mgimind session last` to read the previous session summary
-2. Run `mgimind session start --agent <your-name>` to begin logging
-3. Greet the user with context from the last session
-
-> Always use the SAME `--agent <your-name>` for `start` and `end`. Sessions are
-> per-agent, so concurrent agents never clobber each other's session (audit #14).
-
-### During Session
-- Before answering about past events, projects, or preferences: `mgimind search "<query>"`
-- When user shares new information: `mgimind add <library> "<content>"`
-- When user states a fact: `mgimind fact add "<subject>" "<predicate>" "<object>"`
-- When user asks what you know: `mgimind fact query "<subject>"`
-- Never guess - always check memory first
-
-### Self-Configuration Protocol
-
-MGI-Mind has a 4-tier memory hierarchy. Use the right tier for each type of information:
+## Where to put information
 
 ```
-Tier 0: AI config file    -> permanent rules, identity, workflow    -> 0 tokens per query
-Tier 1: KG facts          -> structured facts (user->prefers->Rust)   -> 10-50 tokens
-Tier 2: Memories           -> details, context, notes               -> 100-500 tokens
-Tier 3: Vault             -> secrets, passwords, keys               -> only on request
+AI config file (CLAUDE.md, etc.)  permanent rules, identity, workflow   0 lookup cost
+KG facts (fact add)               structured facts: subject-predicate-object
+memories (add)                    details, notes, context
+vault (vault store)               secrets: passwords, keys, SSH         terminal only
 ```
 
-When the user establishes a PERMANENT rule or preference (examples: "always use Rust",
-"never auto-commit", "I prefer dark themes", "my name is X"), do BOTH:
+When the user sets a PERMANENT rule or preference (for example "always use Rust",
+"never auto-commit", "my name is X"):
+1. Store it: `mgimind fact add "<subject>" "<predicate>" "<value>"`.
+2. Suggest adding it to the AI config file so every future session has it in the
+   system prompt at zero lookup cost. Show exactly what you would add and ask first.
 
-1. Store in MGI-Mind: `mgimind fact add "<subject>" "<rule>" "<value>"`
-2. Suggest adding to the AI's own config file:
+Config file by tool: Claude Code uses `CLAUDE.md` (project root or `~/.claude/`),
+Cursor uses `.cursorrules`, Cline uses `.clinerules`. Never remove existing config,
+only append, and always ask before writing.
 
-```
-I've saved this to memory. I also recommend adding it to your AI config
-file so every AI session knows this from the start:
+## Commands
 
-  File: CLAUDE.md (or .cursorrules, .clinerules - depends on your AI tool)
-  Add:  "Priority language: Rust for all new projects"
-
-This way it's in the system prompt - zero lookup cost, always active.
-Want me to add it? [y/N]
-```
-
-Config file locations by AI tool:
-- Claude Code: `CLAUDE.md` in project root or `~/.claude/CLAUDE.md` globally
-- Cursor: `.cursorrules` in project root
-- Cline: `.clinerules` in project root
-- Custom agents: wherever the system prompt is configured
-
-Rules for self-configuration:
-- ALWAYS ask permission before modifying config files
-- Only suggest for PERMANENT preferences, not temporary context
-- Show exactly what will be added before writing
-- Never remove existing config - only append
-- If unsure whether something is permanent, ask: "Should this be a permanent rule?"
-
-### On Session End
-- Run `mgimind session end --agent <your-name> --summary "<what was done, what's planned next>"`
-- Keep summaries concise (under 200 words)
-
-## Commands Reference
-
-### Library Management
-```bash
-mgimind create <name>       # Create a new library (topic/project)
-mgimind drop <name>         # Delete a library
-mgimind list                # List all libraries
-```
-
-### Memory Operations
+### Memory
 ```bash
 mgimind add <library> "<content>" [--source "<tag>"]
-mgimind search "<query>" [--library <name>] [--limit 5] [--tier 2]
+mgimind search "<query>" [--library <name>] [--limit 5] [--tier 1|2|3]
+mgimind history [--limit 10]
+mgimind delete <library> <id>
+mgimind context
 ```
 
-### Tiered Retrieval (Token Optimization)
-- `--tier 1`: Facts only, ~100 chars max. Use for quick lookups.
-- `--tier 2`: Summaries, ~500 chars. Default. Good balance.
-- `--tier 3`: Full content. Use only when detail is needed.
+Tier controls how much text comes back, not which results:
+- `--tier 1`: about 100 chars per hit. Quick lookups.
+- `--tier 2`: about 500 chars. Default.
+- `--tier 3`: full content. Use only when you need the detail.
 
-Always start with tier 1 or 2. Only escalate to tier 3 if needed.
+Start at tier 1 or 2; escalate to tier 3 only if needed.
 
-### Knowledge Graph
+### Libraries and stats
+```bash
+mgimind create <name>
+mgimind list
+mgimind drop <name>          # destructive: confirm with the user first
+mgimind stats
+```
+
+### Knowledge graph
 ```bash
 mgimind fact add "<subject>" "<predicate>" "<object>"
-mgimind fact query "<subject>"
-mgimind fact invalidate "<id>"
+mgimind fact query "<term>"
+mgimind fact invalidate "<id>"   # soft delete: kept, marked invalid
 ```
 
-### Session Management
+### Sessions
 ```bash
 mgimind session start --agent <name>
 mgimind session last [--agent <name>]
 mgimind session end --agent <name> --summary "<text>"
 ```
 
-### Secure Vault (passwords, SSH, API keys)
+### Vault (terminal only)
 ```bash
 mgimind vault store <key> <value> --category ssh --desc "My server"
-mgimind vault get <key>           # TERMINAL ONLY: prompts for master password (hidden) + confirm
-mgimind vault list                # Shows keys only, never values
+mgimind vault get <key>     # prompts for the master password in a terminal
+mgimind vault list          # keys only, never values
 mgimind vault delete <key>
 ```
 
-IMPORTANT: Vault is separate from regular memory. Secrets never appear in search results.
-When user asks to store a password/key/token, use vault, NOT add.
-The vault is **terminal-only**: the master password and decrypted secrets are NEVER
-passed through MCP/the model channel. Do not try to read a secret yourself — tell the
-user to run `mgimind vault get <key>` in their terminal (the `mind_vault_get` MCP tool
-returns these instructions, not the secret).
+The vault is separate from regular memory and secrets never appear in search results.
+The master password and decrypted secrets NEVER cross the MCP channel. Do not try to
+read a secret yourself. Tell the user to run `mgimind vault get <key>` in their
+terminal. The `mind_vault_get` MCP tool returns these instructions, not the secret.
+When the user wants to store a password, key, or token, use the vault, not `add`.
 
-### Qdrant Management
+### Service and data
 ```bash
-mgimind serve       # Start bundled Qdrant server
-mgimind stop        # Stop Qdrant server
-```
-
-### Statistics
-```bash
-mgimind stats       # Show counts: memories, facts, sessions, vault entries
-```
-
-### Maintenance
-```bash
-mgimind doctor [--fix]      # Health check, auto-download dependencies
-mgimind backup <file>       # Backup all data
-mgimind restore <file>      # Restore from backup
-mgimind export --format json [--output <dir>]
-```
-
-## Safe Disconnection
-
-1. Call `mgimind session end --summary "..."` with a final summary
-2. Remove the MCP configuration entry pointing to mgimind
-3. Data remains safe on disk
-
-## Bundled Tools
-
-MGI-Mind ships with integrated tools. These are separate MCP servers that work alongside mgimind.
-
-### CRW - Web Reader (Rust)
-
-Read any web page and convert it to clean Markdown for AI consumption.
-Bypasses most bot protection (Cloudflare, etc.) automatically.
-
-Install: `cargo install crw-mcp crw-cli`
-
-MCP config (add alongside mgi-mind):
-```json
-{
-  "mcpServers": {
-    "crw": {
-      "command": "crw-mcp"
-    }
-  }
-}
-```
-
-CLI usage:
-```bash
-crw "https://example.com"            # Returns clean Markdown
-crw "https://example.com" --json     # Returns structured JSON
-```
-
-Use CRW when:
-- User asks to read a webpage, docs, or article
-- You need to check current information online
-- Building context from external sources
-- Importing web content into MGI-Mind memory
-
-Workflow: read page with CRW -> save relevant parts with `mgimind add`
-
-### Import from Obsidian / Markdown
-
-```bash
+mgimind serve / mgimind stop      # bundled Qdrant
+mgimind daemon                    # warm daemon (keeps models loaded)
+mgimind migrate [--purge]         # import legacy per-library collections, re-embeds
+mgimind doctor [--fix]            # health check; --fix downloads what is missing
+mgimind backup <file> / mgimind restore <file>
+mgimind export [--format json|md] [--output <dir>]
 mgimind import obsidian /path/to/vault --library notes
-mgimind import markdown /path/to/folder --library docs
 ```
 
-Scans .md files recursively, chunks into ~500 char segments, embeds and stores.
-Skips hidden directories (.obsidian, .trash). Deduplicates automatically.
+`migrate` is for upgrading old data: it re-embeds entries from the previous
+per-library layout into the single collection. It is idempotent, so it is safe to
+re-run. Use it after a model change too (it re-embeds from stored text).
 
-## Data Location
+## Reading web pages (optional)
+
+If the `crw` tool is installed, `mgimind web <url>` reads a page as clean Markdown.
+Use it instead of guessing a page's content from its URL. After reading, offer to save
+the useful parts with `mgimind add`.
+
+## Data location
 
 ```
 ~/mgimind/
-  config.json          # Configuration
-  vault.enc            # AES-256-GCM encrypted secrets
-  vault.salt           # Argon2 salt for key derivation
-  sessions/            # Session logs
-  models/              # Embedding model files (ONNX)
-  qdrant/              # Vector database storage
+  config.json          configuration
+  vault.enc            encrypted secrets
+  vault.salt           Argon2 salt
+  libraries.json       registered library names
+  sessions/            session logs
+  models/              ONNX models (embedder, reranker)
+  qdrant/              vector database storage
 ```
 
-User owns all data. User can move, backup, delete at any time.
+The user owns all of this and can move, back up, or delete it at any time.
 
-## Important Rules
+## Rules
 
-1. NEVER store secrets in regular memory - use `vault store` instead
-2. ALWAYS confirm before dropping a library (destructive)
-3. PREFER tier 1-2 searches to minimize token usage
-4. LOG every session - continuity depends on it
-5. VERIFY facts before stating them - search first, answer second
-6. NEVER read vault secrets yourself — direct the user to `mgimind vault get` in a terminal (secrets don't cross the MCP channel)
-7. Use CRW to read web pages - do NOT hallucinate content from URLs
-8. After reading a web page, offer to save key info to MGI-Mind memory
+1. Never store secrets in regular memory. Use the vault.
+2. Confirm before dropping a library; it is destructive.
+3. Prefer tier 1 or 2 searches; escalate only when needed.
+4. Log every session. Continuity depends on it.
+5. Verify before stating. Search first, answer second.
+6. Never read vault secrets yourself. Direct the user to `mgimind vault get` in a terminal.
+7. Do not hallucinate web content. Read the page first if `crw` is available.
 
 ---
-MGI-Mind v0.2.0 | Apache 2.0 | Mad God Inc
+MGI-Mind v0.7.x | Apache-2.0 | Mad God Inc
