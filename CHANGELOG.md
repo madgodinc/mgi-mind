@@ -41,6 +41,21 @@ Windows build compiles, and drops the Node/npm dependency entirely. Net change: 
   (`mcp-server/`). Their job - keeping models warm and bridging the assistant - is now
   done by the single `mgimind mcp` process.
 
+### Testing
+- **The retrieval tests now run on every OS, including Windows (the main target).**
+  `setup_model_home` previously symlinked the model (`std::os::unix::fs::symlink`),
+  which forced `add_then_search` and the MCP round-trip to be `#[cfg(unix)]` - so the
+  add -> search path had no automated coverage on Windows. The helper now copies the
+  model dir recursively (portable) and the tests are no longer gated to Unix.
+- **`MGIMIND_HOME` env override** for the data dir. `dirs::home_dir()` ignores `$HOME`
+  on Windows, so a `$HOME` override could not isolate the data dir there; `MGIMIND_HOME`
+  works on all three OSes. Tests use it to isolate; power users can relocate the data
+  dir with it. Test `config.json` is now built with `serde_json` so Windows paths
+  (`C:\...`) are escaped correctly instead of producing invalid JSON.
+- **Windows integration job** in CI. Linux runners use a Qdrant service container;
+  Windows runners cannot, so the job starts the binary's own bundled Qdrant (`serve`)
+  and runs the same lifecycle + add -> search tests against it.
+
 ### Distribution
 - Release workflow builds Linux/macOS/Windows binaries on a tag and publishes them to
   GitHub Releases, so users download instead of building.

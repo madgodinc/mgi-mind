@@ -110,6 +110,13 @@ impl MindConfig {
 }
 
 pub fn mind_home() -> PathBuf {
+    // An explicit override lets power users relocate the data dir and lets tests
+    // isolate it on every OS. This is the only portable way: on Windows
+    // `dirs::home_dir()` resolves the real user profile and ignores $HOME, so a
+    // $HOME override (which works on Unix) cannot redirect the data dir there.
+    if let Some(dir) = std::env::var_os("MGIMIND_HOME") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .expect("Could not determine home directory")
         .join("mgimind")
