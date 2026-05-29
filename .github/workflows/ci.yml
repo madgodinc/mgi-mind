@@ -87,6 +87,49 @@ jobs:
           export MGIMIND_IT_MODELS="$HOME/mgimind/models"
           cargo test --test cli_integration -- --nocapture
 
+  integration-windows:
+    name: integration (windows, bundled Qdrant)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Windows runners cannot run Linux service containers, so there is no Qdrant
+      # `services:` here. Instead we use the binary's own bundled Qdrant: `doctor
+      # --fix` downloads qdrant.exe + the ONNX Runtime DLL + the models, and
+      # `serve` starts Qdrant detached on 6333/6334. This covers the add->search
+      # retrieval path on the main target OS.
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/mgimind/models
+          key: mgimind-models-win-${{ hashFiles('src/integrity.rs') }}
+
+      - name: Build, fetch runtime + models, start bundled Qdrant
+        shell: pwsh
+        run: |
+          cargo build --release
+          ./target/release/mgimind.exe init
+          ./target/release/mgimind.exe doctor --fix
+          ./target/release/mgimind.exe serve
+          # Wait for the bundled Qdrant to accept on the REST port before testing.
+          $ready = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://localhost:6333/readyz | Out-Null; $ready = $true; break }
+            catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ready) { Write-Error "Qdrant did not become ready"; exit 1 }
+
+      - name: Integration tests against bundled Qdrant (lifecycle + real add->search)
+        shell: pwsh
+        env:
+          MGIMIND_IT_QDRANT: "6334"
+          ORT_DYLIB_PATH: ${{ github.workspace }}/target/release/onnxruntime.dll
+        run: |
+          $env:MGIMIND_IT_MODELS = "$HOME/mgimind/models"
+          cargo test --test cli_integration -- --nocapture
+
   audit:
     name: cargo-audit (vulnerabilities)
     runs-on: ubuntu-latest

@@ -4,39 +4,77 @@
 //! exactly the parts unit tests cannot reach.
 //!
 //! They are gated on `MGIMIND_IT_QDRANT=<grpc port>` so a plain `cargo test`
-//! without a Qdrant just skips them. CI starts a Qdrant service and sets it.
-//! The library-lifecycle test writes no points (only collection/registry
-//! operations), so it is safe to point at any Qdrant.
+//! without a Qdrant just skips them. CI starts a Qdrant (a service container on
+//! Linux, the bundled binary on Windows) and sets it. Isolation is via
+//! `MGIMIND_HOME` (a per-test tempdir), which works on every OS - unlike a $HOME
+//! override, which Windows ignores. The library-lifecycle test writes no points
+//! (only collection/registry operations), so it is safe to point at any Qdrant.
 
+use std::path::Path;
 use std::process::Command;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_mgimind")
 }
 
-/// Write a tempdir `config.json` for `multilingual-e5-base` pointed at `port`,
-/// symlink in the model, and return the fake HOME. Shared by the search tests.
-#[cfg(unix)]
-fn setup_model_home(port: &str, model_src: &std::path::Path) -> tempfile::TempDir {
-    let home = tempfile::tempdir().expect("tempdir");
-    let mind = home.path().join("mgimind");
-    std::fs::create_dir_all(mind.join("models")).unwrap();
-    std::os::unix::fs::symlink(model_src, mind.join("models/multilingual-e5-base")).unwrap();
-    std::fs::write(
-        mind.join("config.json"),
-        format!(
-            r#"{{"version":"it","data_dir":"{}","model_name":"multilingual-e5-base","qdrant_port":{},"vector_size":768,"pooling":"mean","uses_token_type_ids":false,"query_prefix":"query: ","passage_prefix":"passage: ","rerank_enabled":false}}"#,
-            mind.display(),
-            port
-        ),
-    )
-    .unwrap();
-    home
-}
-
 /// Returns the test Qdrant gRPC port, or None to skip.
 fn qdrant_port() -> Option<String> {
     std::env::var("MGIMIND_IT_QDRANT").ok()
+}
+
+/// Recursively copy a directory tree. Used to place the model dir inside the
+/// test's isolated `MGIMIND_HOME` on every OS - a symlink would be unix-only and
+/// would force the search tests to be `#[cfg(unix)]`, leaving Windows (the main
+/// target OS) with no automated coverage of the add->search path.
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `config.json` for `multilingual-e5-base` into `mind`, pointed at `port`.
+/// Built with serde_json so paths are escaped correctly - a `format!` with a raw
+/// Windows path (`C:\...`) would emit invalid JSON.
+fn write_e5_config(mind: &Path, port: &str) {
+    let cfg = serde_json::json!({
+        "version": "it",
+        "data_dir": mind,
+        "model_name": "multilingual-e5-base",
+        "qdrant_port": port.parse::<u16>().expect("MGIMIND_IT_QDRANT must be a port number"),
+        "vector_size": 768,
+        "pooling": "mean",
+        "uses_token_type_ids": false,
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+        "rerank_enabled": false,
+    });
+    std::fs::write(
+        mind.join("config.json"),
+        serde_json::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Build a tempdir `MGIMIND_HOME` with an e5 `config.json` and a copy of the
+/// model, and return `(tempdir guard, mind_home path)`. Shared by the search
+/// tests. Cross-platform: copies the model rather than symlinking it.
+fn setup_model_home(port: &str, model_src: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(mind.join("models")).unwrap();
+    copy_dir(model_src, &mind.join("models/multilingual-e5-base"))
+        .expect("copy model into MGIMIND_HOME");
+    write_e5_config(&mind, port);
+    (home, mind)
 }
 
 #[test]
@@ -49,20 +87,12 @@ fn library_lifecycle_against_real_qdrant() {
     let home = tempfile::tempdir().expect("tempdir");
     let mind = home.path().join("mgimind");
     std::fs::create_dir_all(&mind).unwrap();
-    std::fs::write(
-        mind.join("config.json"),
-        format!(
-            r#"{{"version":"it","data_dir":"{}","model_name":"multilingual-e5-base","qdrant_port":{},"vector_size":768,"pooling":"mean","uses_token_type_ids":false}}"#,
-            mind.display(),
-            port
-        ),
-    )
-    .unwrap();
+    write_e5_config(&mind, &port);
 
     let run = |args: &[&str]| -> String {
         let out = Command::new(bin())
             .args(args)
-            .env("HOME", home.path())
+            .env("MGIMIND_HOME", &mind)
             .output()
             .expect("spawn mgimind");
         assert!(
@@ -101,12 +131,6 @@ fn library_lifecycle_against_real_qdrant() {
 /// holding `multilingual-e5-base/`) and `ORT_DYLIB_PATH`. CI without the model skips
 /// it; run it locally with a downloaded model. Reranking is off here so the test
 /// stays deterministic and does not also require the reranker model.
-///
-/// Unix-only: it symlinks the model dir into the tempdir HOME (via
-/// `setup_model_home`), which uses `std::os::unix::fs::symlink`. On Windows CI it
-/// skips on the env gate anyway, so gating the whole test keeps the Windows build
-/// clean instead of referencing a `#[cfg(unix)]` helper that isn't compiled there.
-#[cfg(unix)]
 #[test]
 fn add_then_search_finds_the_memory() {
     let (Some(port), Ok(models), Ok(ort)) = (
@@ -123,12 +147,12 @@ fn add_then_search_finds_the_memory() {
         return;
     }
 
-    let home = setup_model_home(&port, &model_src);
+    let (_home, mind) = setup_model_home(&port, &model_src);
     let lib = format!("itsearch_{}", std::process::id());
     let run = |args: &[&str]| -> (bool, String, String) {
         let out = Command::new(bin())
             .args(args)
-            .env("HOME", home.path())
+            .env("MGIMIND_HOME", &mind)
             .env("ORT_DYLIB_PATH", &ort)
             .output()
             .expect("spawn mgimind");
@@ -169,7 +193,6 @@ fn add_then_search_finds_the_memory() {
 /// assert the `mind_search` response retrieves what `mind_add` stored. Proves the
 /// hand-rolled protocol, the warm in-process path, and the round-trip together.
 /// Also asserts stdout is pure JSON-RPC (every non-empty line parses as JSON).
-#[cfg(unix)]
 #[test]
 fn mcp_add_then_search_roundtrip() {
     use std::io::Write;
@@ -188,7 +211,7 @@ fn mcp_add_then_search_roundtrip() {
         return;
     }
 
-    let home = setup_model_home(&port, &model_src);
+    let (_home, mind) = setup_model_home(&port, &model_src);
     let lib = format!("itmcp_{}", std::process::id());
 
     // id 1 init, 2 create, 3 add, 4 search. Sequential handling guarantees the
@@ -209,7 +232,7 @@ fn mcp_add_then_search_roundtrip() {
 
     let mut child = Command::new(bin())
         .arg("mcp")
-        .env("HOME", home.path())
+        .env("MGIMIND_HOME", &mind)
         .env("ORT_DYLIB_PATH", &ort)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -229,7 +252,7 @@ fn mcp_add_then_search_roundtrip() {
 
     let _ = Command::new(bin())
         .args(["drop", &lib])
-        .env("HOME", home.path())
+        .env("MGIMIND_HOME", &mind)
         .env("ORT_DYLIB_PATH", &ort)
         .output(); // cleanup regardless of assertions
 
