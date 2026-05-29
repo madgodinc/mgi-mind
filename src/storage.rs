@@ -35,21 +35,67 @@ const MGI_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6d69_6e64_0000_0000000000
 const SCROLL_PAGE: u32 = 256;
 
 /// Named vectors on the memories collection (audit #23 hybrid): a dense vector
-/// (e5 semantic) and a sparse vector (BM25-style lexical).
+/// (e5 semantic) and a sparse vector (lexical, TF with server-side IDF).
 const DENSE_VEC: &str = "dense";
 const SPARSE_VEC: &str = "sparse";
 
-/// Stable token id for a sparse term. Hash the term to a u32 index; with Qdrant's
-/// IDF modifier on the sparse vector, term frequencies become BM25-ish scores.
+/// Target chunk size in characters for `add_memory` (audit #3/#20). Kept well under
+/// the 512-token model cap so a chunk never gets silently truncated at embed time.
+const CHUNK_CHARS: usize = 500;
+
+/// Split text into chunks of about `max_chars`, with a small overlap between
+/// consecutive chunks and a hard split of any single line longer than `max_chars`.
+pub(crate) fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+    let overlap = (max_chars / 8).max(32);
+    let mut units: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.chars().count() <= max_chars {
+            units.push(line.to_string());
+        } else {
+            let chars: Vec<char> = line.chars().collect();
+            for piece in chars.chunks(max_chars) {
+                units.push(piece.iter().collect());
+            }
+        }
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for unit in &units {
+        if !current.is_empty() && current.chars().count() + unit.chars().count() + 1 > max_chars {
+            chunks.push(current.clone());
+            let count = current.chars().count();
+            current = current
+                .chars()
+                .skip(count.saturating_sub(overlap))
+                .collect();
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(unit);
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Stable token id for a sparse term. Hash the term to a u32 index (collisions
+/// only become likely past ~65k distinct tokens; fine at personal scale). Qdrant's
+/// IDF modifier weights the term frequencies server-side.
 fn token_id(token: &str) -> u32 {
     let h = blake3::hash(token.as_bytes());
     let b = h.as_bytes();
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Build a BM25-style sparse vector (term-frequency) from text. Unicode-aware:
+/// Build a lexical sparse vector (raw term frequencies) from text. Unicode-aware:
 /// splits on non-alphanumeric (handles Cyrillic), lowercases, drops 1-char tokens.
-/// IDF is applied server-side via the collection's IDF modifier (audit #23).
+/// IDF is applied server-side via the collection's IDF modifier (audit #23). This
+/// is TF + IDF, not full BM25 (no k1 saturation or length normalization).
 fn sparse_vector(text: &str) -> (Vec<u32>, Vec<f32>) {
     let mut counts: HashMap<u32, f32> = HashMap::new();
     for token in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
@@ -251,6 +297,15 @@ pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
     {
         create_vector_collection(client, FACTS_COLLECTION, dim).await?;
     }
+    // created_at datetime index so the context briefing can show the newest facts
+    // via order_by instead of an arbitrary page (idempotent).
+    let _ = client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            FACTS_COLLECTION,
+            "created_at",
+            FieldType::Datetime,
+        ))
+        .await;
     Ok(())
 }
 
@@ -377,12 +432,15 @@ pub(crate) async fn existing_payload_string(
 
 // --- Core memory operations -------------------------------------------------
 
+/// Store a memory. Long content is split into chunks so nothing is silently lost
+/// to the embedder's 512-token cap (audit #3/#20): the main write path no longer
+/// drops the tail of a long note. Returns the number of chunks stored.
 pub async fn add_memory(
     config: &MindConfig,
     library: &str,
     content: &str,
     source: Option<&str>,
-) -> Result<String> {
+) -> Result<usize> {
     if !is_registered(library) {
         anyhow::bail!(
             "{}",
@@ -393,28 +451,43 @@ pub async fn add_memory(
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
+    let mut stored = 0usize;
+    for chunk in chunk_text(content, CHUNK_CHARS) {
+        if chunk.trim().chars().count() < 3 {
+            continue;
+        }
+        upsert_chunk(&client, config, library, &chunk, source).await?;
+        stored += 1;
+    }
+    Ok(stored)
+}
+
+/// Upsert one chunk as a single point (dense + sparse vectors). Deterministic ID
+/// makes it an idempotent overwrite; `created_at` is preserved across re-adds.
+async fn upsert_chunk(
+    client: &Qdrant,
+    config: &MindConfig,
+    library: &str,
+    content: &str,
+    source: Option<&str>,
+) -> Result<()> {
     let embedding = embedder::embed_passage(config, content).await?;
     check_dim(&embedding, config)?;
 
-    // Deterministic ID → idempotent upsert. Identical content overwrites the same
-    // point instead of creating a duplicate, with no read-before-write race (audit #8, #15).
     let id = deterministic_id(library, content);
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    // Preserve the original first-seen timestamp on re-add; only `updated_at`
-    // moves. Otherwise re-adding identical content would reset created_at=now
-    // and the entry would jump to the top of chronological history.
-    let created_at = existing_payload_string(&client, MEMORIES_COLLECTION, &id, "created_at")
+    let created_at = existing_payload_string(client, MEMORIES_COLLECTION, &id, "created_at")
         .await
         .unwrap_or_else(|| now.clone());
 
-    // Named dense (semantic) + sparse (BM25-style lexical) vectors for hybrid (#23).
+    // Named dense (semantic) + sparse (lexical) vectors for hybrid search (#23).
     let (s_idx, s_val) = sparse_vector(content);
     let vectors = NamedVectors::default()
         .add_vector(DENSE_VEC, Vector::new_dense(embedding))
         .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
     let point = PointStruct::new(
-        id.clone(),
+        id,
         vectors,
         build_payload(content, &hash, &created_at, &now, library, source),
     );
@@ -423,8 +496,7 @@ pub async fn add_memory(
         .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to add memory")?;
-
-    Ok(id)
+    Ok(())
 }
 
 fn build_payload(
@@ -526,8 +598,10 @@ pub async fn search(
         if let Ok(scores) = crate::reranker::scores(config, query, &texts).await
             && scores.len() == cands.len()
         {
+            // Map the cross-encoder logit through a sigmoid to 0..1 so the `score`
+            // field stays a consistent relevance scale whether or not reranking ran.
             for (c, s) in cands.iter_mut().zip(scores) {
-                c.score = s;
+                c.score = 1.0 / (1.0 + (-s).exp());
             }
             cands.sort_by(|a, b| {
                 b.score
@@ -891,5 +965,39 @@ mod tests {
     #[test]
     fn truncate_noop_when_short() {
         assert_eq!(super::truncate_str("short", 100), "short");
+    }
+
+    #[test]
+    fn chunk_short_text_is_single_chunk() {
+        assert_eq!(chunk_text("hello", 100), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn chunk_long_text_is_bounded() {
+        let line = "word ".repeat(400);
+        let chunks = chunk_text(&line, 200);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(c.chars().count() <= 200 + 64);
+        }
+    }
+
+    #[test]
+    fn chunk_overlong_single_line_is_hard_split() {
+        let giant = "x".repeat(1000);
+        let chunks = chunk_text(&giant, 200);
+        assert!(chunks.len() >= 5);
+        for c in &chunks {
+            assert!(c.chars().count() <= 200 + 64);
+        }
+    }
+
+    #[test]
+    fn sparse_vector_is_unicode_and_dedups_terms() {
+        // Cyrillic tokenizes; repeated term accumulates frequency.
+        let (idx, val) = sparse_vector("Aurora aurora ИИ");
+        assert_eq!(idx.len(), val.len());
+        // "aurora" (lowercased) appears twice -> one index with value 2.
+        assert!(val.iter().any(|&v| (v - 2.0).abs() < 1e-6));
     }
 }

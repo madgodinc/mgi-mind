@@ -10,8 +10,12 @@ env:
 
 jobs:
   check:
-    name: fmt · clippy · test
-    runs-on: ubuntu-latest
+    name: fmt, clippy, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +35,37 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit tests
+        # Integration tests skip unless MGIMIND_IT_QDRANT is set (see the
+        # integration job), so this runs the pure unit suite on every platform.
         run: cargo test --all
+
+  integration:
+    name: integration (real Qdrant)
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.1
+        ports:
+          - 6333:6333
+          - 6334:6334
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:6333/readyz >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "Qdrant did not become ready" >&2
+          exit 1
+
+      - name: Integration tests against Qdrant
+        env:
+          MGIMIND_IT_QDRANT: "6334"
+        run: cargo test --test cli_integration -- --nocapture
 
   audit:
     name: cargo-audit (vulnerabilities)

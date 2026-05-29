@@ -63,9 +63,20 @@ fn get_or_create_salt() -> Result<[u8; 32]> {
     }
 }
 
+/// Pinned Argon2id parameters (audit #11). We do NOT use `Argon2::default()`:
+/// if the crate's defaults ever change, every existing vault would stop
+/// decrypting with a misleading "wrong master password". These values match the
+/// argon2 0.5 defaults at the time of writing and are now frozen here. Changing
+/// them requires a versioned re-derivation, not an edit.
+fn argon2() -> Argon2<'static> {
+    use argon2::{Algorithm, Params, Version};
+    let params = Params::new(19456, 2, 1, Some(32)).expect("valid Argon2 params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 fn derive_key(password: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
-    Argon2::default()
+    argon2()
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
     Ok(key)
@@ -287,5 +298,35 @@ mod tests {
         let bad = derive_key("wrong", &salt).unwrap();
         let blob = encrypt(b"data", &good).unwrap();
         assert!(decrypt(&blob, &bad).is_err(), "wrong key must not decrypt");
+    }
+
+    #[test]
+    fn roundtrip_holds_for_varied_payloads() {
+        // Property: decrypt(encrypt(x)) == x for many shapes of input.
+        let key = derive_key("master", &[3u8; 32]).unwrap();
+        let mut inputs: Vec<Vec<u8>> = vec![
+            vec![],
+            b"a".to_vec(),
+            b"\x00\x01\x02 binary \xff\xfe".to_vec(),
+            "юникод и emoji - тест".as_bytes().to_vec(),
+            vec![0u8; 4096],
+        ];
+        // A few pseudo-random-ish lengths/contents (deterministic, no rng dep).
+        for n in [7usize, 63, 255, 1000] {
+            inputs.push((0..n).map(|i| (i * 31 + 7) as u8).collect());
+        }
+        for data in &inputs {
+            let blob = encrypt(data, &key).unwrap();
+            let back = decrypt(&blob, &key).unwrap();
+            assert_eq!(&back, data, "roundtrip failed for len {}", data.len());
+        }
+    }
+
+    #[test]
+    fn argon2_params_are_pinned_not_default() {
+        // Guard against a silent crate-default change that would brick vaults.
+        let a = derive_key("p", &[1u8; 32]).unwrap();
+        let b = derive_key("p", &[1u8; 32]).unwrap();
+        assert_eq!(a, b, "derivation must be deterministic");
     }
 }

@@ -555,11 +555,18 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
 
     let mut facts_summary = String::new();
     if facts_exist {
+        // Newest facts first, not an arbitrary 20 (same fix as history).
+        let order = qdrant_client::qdrant::OrderBy {
+            key: "created_at".to_string(),
+            direction: Some(qdrant_client::qdrant::Direction::Desc as i32),
+            start_from: None,
+        };
         let scroll = client
             .scroll(
                 qdrant_client::qdrant::ScrollPointsBuilder::new(crate::storage::FACTS_COLLECTION)
                     .limit(20)
-                    .with_payload(true),
+                    .with_payload(true)
+                    .order_by(order),
             )
             .await;
 
@@ -663,24 +670,9 @@ async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
 
     if let Some(library) = save_to {
         let config = crate::config::MindConfig::load()?;
-
-        // Chunk and save
-        let chunks = chunk_text(markdown.trim(), 500);
-        let mut saved = 0;
-        for chunk in &chunks {
-            if chunk.trim().len() < 10 {
-                continue;
-            }
-            match crate::storage::add_memory(&config, library, chunk, Some(url)).await {
-                Ok(_) => saved += 1,
-                Err(e) => {
-                    if !e.to_string().contains("Duplicate") {
-                        eprintln!("Error: {e}");
-                    }
-                }
-            }
-        }
-        println!("Saved {saved} chunks from {url} to '{library}'");
+        // add_memory chunks long content itself (audit #3).
+        let n = crate::storage::add_memory(&config, library, markdown.trim(), Some(url)).await?;
+        println!("Saved {n} chunk(s) from {url} to '{library}'");
     } else {
         // Just print
         println!("{markdown}");
@@ -691,8 +683,8 @@ async fn cmd_web(url: &str, save_to: Option<&str>) -> Result<()> {
 
 async fn cmd_add(library: &str, content: &str, source: Option<&str>) -> Result<()> {
     let config = crate::config::MindConfig::load()?;
-    let id = crate::storage::add_memory(&config, library, content, source).await?;
-    println!("Added to '{library}' [id: {id}]");
+    let n = crate::storage::add_memory(&config, library, content, source).await?;
+    println!("Added {n} chunk(s) to '{library}'");
     Ok(())
 }
 
@@ -864,24 +856,12 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        // Split long files into chunks (~500 chars per chunk)
-        let chunks = chunk_text(trimmed, 500);
-
-        for chunk in &chunks {
-            if chunk.trim().len() < 10 {
-                continue;
-            }
-            match crate::storage::add_memory(&config, library, chunk, Some(&filename)).await {
-                Ok(_) => imported += 1,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("Duplicate") {
-                        skipped += 1;
-                    } else {
-                        eprintln!("  Error importing {filename}: {e}");
-                        skipped += 1;
-                    }
-                }
+        // add_memory chunks the file itself (audit #3).
+        match crate::storage::add_memory(&config, library, trimmed, Some(&filename)).await {
+            Ok(n) => imported += n,
+            Err(e) => {
+                eprintln!("  Error importing {filename}: {e}");
+                skipped += 1;
             }
         }
 
@@ -909,56 +889,6 @@ fn scan_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> 
         }
     }
     Ok(())
-}
-
-/// Split text into ~`max_chars` chunks with a small overlap between consecutive
-/// chunks, and hard-split any single line longer than `max_chars` so it never
-/// becomes a giant chunk that the embedder would silently truncate (audit #20).
-/// (Token-aware / AST-aware chunking is planned for v0.3.)
-fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
-    if text.chars().count() <= max_chars {
-        return vec![text.to_string()];
-    }
-
-    let overlap = (max_chars / 8).max(32);
-
-    // Break into line units, hard-splitting overlong lines first.
-    let mut units: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if line.chars().count() <= max_chars {
-            units.push(line.to_string());
-        } else {
-            let chars: Vec<char> = line.chars().collect();
-            for piece in chars.chunks(max_chars) {
-                units.push(piece.iter().collect());
-            }
-        }
-    }
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for unit in &units {
-        if !current.is_empty() && current.chars().count() + unit.chars().count() + 1 > max_chars {
-            chunks.push(current.clone());
-            // Seed the next chunk with the tail of this one for context continuity.
-            let count = current.chars().count();
-            current = current
-                .chars()
-                .skip(count.saturating_sub(overlap))
-                .collect();
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(unit);
-    }
-
-    if !current.trim().is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
 
 // --- Stats ---
@@ -1246,43 +1176,4 @@ async fn cmd_stop() -> Result<()> {
     std::fs::remove_file(&pid_path)?;
     println!("Qdrant stopped.");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::chunk_text;
-
-    #[test]
-    fn short_text_is_single_chunk() {
-        assert_eq!(chunk_text("hello", 100), vec!["hello".to_string()]);
-    }
-
-    #[test]
-    fn long_text_splits_with_bounded_chunks() {
-        let line = "word ".repeat(400); // ~2000 chars, multiple lines worth
-        let chunks = chunk_text(&line, 200);
-        assert!(chunks.len() > 1, "should split into multiple chunks");
-        // No chunk should be wildly over the limit (overlap adds a little).
-        for c in &chunks {
-            assert!(
-                c.chars().count() <= 200 + 64,
-                "chunk too large: {}",
-                c.chars().count()
-            );
-        }
-    }
-
-    #[test]
-    fn overlong_single_line_is_hard_split() {
-        let giant = "x".repeat(1000); // one line, no whitespace
-        let chunks = chunk_text(&giant, 200);
-        assert!(
-            chunks.len() >= 5,
-            "overlong line must be hard-split, got {}",
-            chunks.len()
-        );
-        for c in &chunks {
-            assert!(c.chars().count() <= 200 + 64);
-        }
-    }
 }
