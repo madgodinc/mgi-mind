@@ -101,6 +101,12 @@ fn library_lifecycle_against_real_qdrant() {
 /// holding `multilingual-e5-base/`) and `ORT_DYLIB_PATH`. CI without the model skips
 /// it; run it locally with a downloaded model. Reranking is off here so the test
 /// stays deterministic and does not also require the reranker model.
+///
+/// Unix-only: it symlinks the model dir into the tempdir HOME (via
+/// `setup_model_home`), which uses `std::os::unix::fs::symlink`. On Windows CI it
+/// skips on the env gate anyway, so gating the whole test keeps the Windows build
+/// clean instead of referencing a `#[cfg(unix)]` helper that isn't compiled there.
+#[cfg(unix)]
 #[test]
 fn add_then_search_finds_the_memory() {
     let (Some(port), Ok(models), Ok(ort)) = (
