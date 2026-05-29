@@ -116,7 +116,7 @@ async function runVia(req, args) {
 
 const server = new McpServer({
   name: "mgi-mind",
-  version: "0.5.0",
+  version: "0.6.0",
 });
 
 // --- Tools ---

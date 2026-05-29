@@ -408,10 +408,15 @@ pub async fn search(
     let embedding = embedder::embed_query(config, query).await?;
     check_dim(&embedding, config)?;
 
-    // One query over the single collection → true global top-k. An optional
-    // library filter narrows it without a separate per-collection scan (audit #18).
+    // When reranking, fetch a wider candidate set by dense similarity, then let
+    // the cross-encoder re-order it (audit #18 single query + #22 rerank).
+    let fetch_k = if config.rerank_enabled {
+        config.rerank_top_k.max(limit)
+    } else {
+        limit
+    };
     let mut builder =
-        SearchPointsBuilder::new(MEMORIES_COLLECTION, embedding, limit as u64).with_payload(true);
+        SearchPointsBuilder::new(MEMORIES_COLLECTION, embedding, fetch_k as u64).with_payload(true);
     if let Some(lib) = library {
         builder = builder.filter(library_filter(lib));
     }
@@ -421,21 +426,17 @@ pub async fn search(
         .await
         .context("Search failed")?;
 
-    let results = response
+    // Keep the FULL content for the reranker; tier truncation is display-only and
+    // applied after the final ordering.
+    let mut cands: Vec<SearchResult> = response
         .result
         .into_iter()
         .map(|point| {
             let payload = &point.payload;
-            let content = extract_string(payload, "content").unwrap_or_default();
-            let display_content = match tier {
-                1 => truncate_str(&content, 100),
-                2 => truncate_str(&content, 500),
-                _ => content,
-            };
             SearchResult {
                 id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
                 library: extract_string(payload, "library").unwrap_or_default(),
-                content: display_content,
+                content: extract_string(payload, "content").unwrap_or_default(),
                 source: extract_string(payload, "source"),
                 created_at: extract_string(payload, "created_at"),
                 score: point.score,
@@ -443,7 +444,34 @@ pub async fn search(
         })
         .collect();
 
-    Ok(results)
+    // Cross-encoder rerank (audit #22). Best-effort: on any reranker failure the
+    // dense order is kept (reranking is a quality boost, not a dependency).
+    if config.rerank_enabled && cands.len() > 1 {
+        let texts: Vec<String> = cands.iter().map(|c| c.content.clone()).collect();
+        if let Ok(scores) = crate::reranker::scores(config, query, &texts).await
+            && scores.len() == cands.len()
+        {
+            for (c, s) in cands.iter_mut().zip(scores) {
+                c.score = s;
+            }
+            cands.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    cands.truncate(limit);
+    for c in &mut cands {
+        c.content = match tier {
+            1 => truncate_str(&c.content, 100),
+            2 => truncate_str(&c.content, 500),
+            _ => std::mem::take(&mut c.content),
+        };
+    }
+
+    Ok(cands)
 }
 
 pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {

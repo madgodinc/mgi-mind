@@ -47,7 +47,7 @@ Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continue
 | # | Issue | Status | What changed |
 |---|-------|--------|--------------|
 | 21 | Weak/old embedder for code | ✅ (0.5.0) | Default model is now **multilingual-e5-base** (768-dim) — a big RU/EN upgrade over English-only MiniLM, CPU-practical (quantized ONNX, 266 MB). Embedder made architecture-flexible (mean/cls pooling, optional token_type_ids, query/passage prefixes; pooling unit-tested). Owner chose e5-base over bge-m3 (bge-m3 ONNX is 6.8 GB, too heavy GPU-less). **Runtime-validated on an isolated instance with the real model**: RU queries returned the correct top result every time (e.g. «искусственный интеллект для трансляций» → Aurora 0.79; «что приготовить на обед» → борщ 0.82, not the tech entries). **Operational step remaining:** live cutover (`doctor --fix` + `migrate` to re-embed existing memories at 768-dim). |
-| 22 | No reranker | 🔜 v0.3 | Cross-encoder rerank over top-k — ships with the code-embedder work. |
+| 22 | No reranker | ✅ (0.6.0) | `src/reranker.rs`: cross-encoder **bge-reranker-base** (XLM-R, multilingual incl. RU; quantized ONNX 279 MB) scores each (query, passage) pair jointly in one padded batch, re-ordering the dense top-K. `search` fetches `rerank_top_k` (default 20) by dense, reranks, returns `limit`. Best-effort: any reranker failure leaves the dense order untouched. Runtime-validated: it sharply separates relevance (scores 1.07 / 0.83 / −0.66 where dense was a flat 0.86 / 0.84 / 0.82). Config: `rerank_enabled`/`rerank_model`/`rerank_top_k`; `doctor --fix` fetches the model. |
 | 23 | No hybrid (keyword/BM25) search | 🔜 v0.3 | Needs sparse vectors / full-text payload index + RRF fusion; pairs with the single-collection redesign (#18). |
 | 24 | Tiers blind-truncate by chars | 🟡 | Truncation now stops on a word boundary (no mid-token cuts). Precomputed summaries are a v0.3 item. |
 
@@ -75,15 +75,16 @@ core; planned as a sibling project.
 
 ---
 
-**Summary (counted per issue):** of the 27 audited issues, **20 are fully fixed**
-(#1–5, 7–10, 12–19, 21, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 — mechanism
-shipped, hardening/deploy continues), and **2 are deferred** (#22 cross-encoder
-reranker, #23 hybrid/BM25 search). 0.3.0 closed the daemon (#16); 0.4.0 closed the
+**Summary (counted per issue):** of the 27 audited issues, **21 are fully fixed**
+(#1–5, 7–10, 12–19, 21, 22, 26, 27), **5 are partial** (#6, #11, #20, #24, #25 —
+mechanism shipped, hardening/deploy continues), and **1 is deferred** (#23
+hybrid/BM25 search). 0.3.0 closed the daemon (#16); 0.4.0 closed the
 single-collection redesign (#18); 0.5.0 closed the multilingual embedder (#21,
-e5-base, runtime-validated — only the live cutover/re-embed remains operationally).
-What remains is the reranker (#22) and hybrid search (#23); since e5 is dense-only,
-#23 needs a separate sparse path (where bge-m3 would have given sparse for free —
-traded away for CPU practicality).
+e5-base); 0.6.0 closed the cross-encoder reranker (#22) — both runtime-validated.
+What remains is hybrid search (#23); since e5 is dense-only, #23 needs a separate
+sparse path (where bge-m3 would have given sparse for free — traded away for CPU
+practicality). Operationally, the live cutover (re-embed at 768-dim + fetch reranker)
+is still pending.
 
 A post-0.2.0 code review (recorded separately) confirmed the ✅ rows hold up in the
 source, and surfaced regressions introduced by the fixes themselves — a `sanitize`

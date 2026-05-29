@@ -5,6 +5,7 @@ mod embedder;
 mod error;
 mod integrity;
 mod knowledge;
+mod reranker;
 mod session;
 mod storage;
 mod util;

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0 — Cross-encoder reranker (audit #22)
+
+Dense retrieval is fast but coarse. A cross-encoder now re-orders the top-K by
+scoring each (query, passage) pair jointly — a big precision win.
+
+### Added
+- **`src/reranker.rs`**: `bge-reranker-base` (XLM-R, multilingual incl. RU;
+  quantized ONNX, ~279 MB, CPU-ok). All candidate pairs run in a single padded
+  batch (one ONNX pass). `search` fetches `rerank_top_k` (default 20) candidates by
+  dense similarity, reranks, and returns `limit`. Reranking scores the **full**
+  content; tier truncation is display-only, applied after ordering.
+- Config: `rerank_enabled` (default true), `rerank_model` (`bge-reranker-base`),
+  `rerank_top_k` (20). `doctor --fix` fetches the reranker model.
+- **Best-effort**: any reranker failure (missing model, inference error) leaves the
+  dense order untouched — reranking is a quality boost, never a hard dependency.
+
+### Validated
+- Runtime-tested: for «почему в доте мало фпс хотя видеокарта мощная» the reranker
+  sharply separated relevance (1.07 / 0.83 / −0.66) where dense was a flat
+  0.86 / 0.84 / 0.82.
+
+### Still open
+- #23 hybrid/BM25 search (e5 is dense-only → needs a separate sparse path).
+  Operational: daemon autostart + live cutover (re-embed at 768-dim + reranker).
+
 ## 0.5.0 — Multilingual embedder support: e5-base (audit #21)
 
 The English-only MiniLM is replaced as the default by **multilingual-e5-base** —

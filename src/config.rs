@@ -44,6 +44,24 @@ pub struct MindConfig {
     /// "passage: "; MiniLM uses "". Audit #21.
     #[serde(default)]
     pub passage_prefix: String,
+    /// Enable cross-encoder reranking of dense results (audit #22). Best-effort:
+    /// if the reranker model is missing/errors, search falls back to dense order.
+    #[serde(default = "default_true")]
+    pub rerank_enabled: bool,
+    /// Reranker model name (dir under models/). Audit #22.
+    #[serde(default = "default_rerank_model")]
+    pub rerank_model: String,
+    /// How many dense candidates to fetch and rerank before returning `limit`.
+    #[serde(default = "default_rerank_top_k")]
+    pub rerank_top_k: usize,
+}
+
+fn default_rerank_model() -> String {
+    "bge-reranker-base".to_string()
+}
+
+fn default_rerank_top_k() -> usize {
+    20
 }
 
 impl Default for MindConfig {
@@ -63,6 +81,9 @@ impl Default for MindConfig {
             uses_token_type_ids: false,
             query_prefix: "query: ".to_string(),
             passage_prefix: "passage: ".to_string(),
+            rerank_enabled: true,
+            rerank_model: default_rerank_model(),
+            rerank_top_k: default_rerank_top_k(),
         }
     }
 }
