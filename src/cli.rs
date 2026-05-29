@@ -469,6 +469,22 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
                 issues += 1;
             }
         }
+
+        // Reranker model (audit #22) — only when reranking is enabled.
+        if cfg.rerank_enabled {
+            if crate::reranker::is_model_downloaded(&cfg) {
+                println!("[OK]   Reranker model");
+            } else {
+                println!("[FAIL] Reranker model not downloaded");
+                if fix {
+                    println!("       Downloading reranker...");
+                    crate::reranker::download_model(&cfg).await?;
+                    fixed += 1;
+                } else {
+                    issues += 1;
+                }
+            }
+        }
     }
 
     if issues == 0 && fixed == 0 {
