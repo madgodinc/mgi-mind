@@ -12,6 +12,10 @@ static SESSION: OnceCell<Mutex<Session>> = OnceCell::new();
 // Tokenizer loaded once and reused, instead of re-read from disk on every embed (audit #17).
 static TOKENIZER: OnceCell<tokenizers::Tokenizer> = OnceCell::new();
 
+/// Max sequence length (MiniLM and XLM-R/e5 both cap at 512 positions). Longer
+/// inputs overflow the position-embedding table → ONNX "invalid expand shape".
+const MAX_SEQ_LEN: usize = 512;
+
 fn get_model_path(config: &MindConfig) -> std::path::PathBuf {
     crate::config::models_dir()
         .join(&config.model_name)
@@ -86,12 +90,18 @@ pub async fn embed(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
         .encode(text, true)
         .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
 
-    let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-    let attention_mask: Vec<i64> = encoding
+    // Cap to the model's max sequence length (512 for MiniLM/XLM-R). Longer inputs
+    // overflow the position-embedding table → ONNX "invalid expand shape" crash.
+    let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
+    let mut attention_mask: Vec<i64> = encoding
         .get_attention_mask()
         .iter()
         .map(|&m| m as i64)
         .collect();
+    if input_ids.len() > MAX_SEQ_LEN {
+        input_ids.truncate(MAX_SEQ_LEN);
+        attention_mask.truncate(MAX_SEQ_LEN);
+    }
 
     let seq_len = input_ids.len();
 
@@ -108,7 +118,12 @@ pub async fn embed(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
     // BERT-family models (MiniLM) take token_type_ids; XLM-R models (bge-m3) do
     // not — passing it to a model that doesn't expect it is a hard error (#21).
     if config.uses_token_type_ids {
-        let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&t| t as i64).collect();
+        let token_type_ids: Vec<i64> = encoding
+            .get_type_ids()
+            .iter()
+            .take(seq_len)
+            .map(|&t| t as i64)
+            .collect();
         let type_value = Value::from_array(([1usize, seq_len], token_type_ids))
             .map_err(|e| anyhow::anyhow!("Failed to create token_type_ids tensor: {e}"))?;
         inputs.push((std::borrow::Cow::from("token_type_ids"), type_value.into()));

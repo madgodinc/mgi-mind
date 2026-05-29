@@ -44,8 +44,10 @@ pub struct MindConfig {
     /// "passage: "; MiniLM uses "". Audit #21.
     #[serde(default)]
     pub passage_prefix: String,
-    /// Enable cross-encoder reranking of dense results (audit #22). Best-effort:
-    /// if the reranker model is missing/errors, search falls back to dense order.
+    /// Enable cross-encoder reranking (audit #22). ON by default — `bge-reranker-base`
+    /// is strong on English (the target audience) and improves precision there.
+    /// (It does degrade Russian ranking; if RU mattered, use a stronger multilingual
+    /// reranker or turn this off.)
     #[serde(default = "default_true")]
     pub rerank_enabled: bool,
     /// Reranker model name (dir under models/). Audit #22.

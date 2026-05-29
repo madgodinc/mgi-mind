@@ -311,7 +311,7 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
         "Migrating legacy per-library collections into '{}'...",
         crate::storage::MEMORIES_COLLECTION
     );
-    let (moved, libs) = crate::storage::migrate(&config, purge).await?;
+    let (moved, skipped, libs) = crate::storage::migrate(&config, purge).await?;
     if libs.is_empty() {
         println!("No legacy collections found — nothing to migrate.");
     } else {
@@ -319,6 +319,9 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
             "Migrated {moved} entries from libraries: {}",
             libs.join(", ")
         );
+        if skipped > 0 {
+            println!("Skipped {skipped} entries that failed (see warnings above).");
+        }
         if purge {
             println!("Old per-library collections were purged.");
         } else {
