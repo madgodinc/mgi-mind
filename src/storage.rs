@@ -48,9 +48,7 @@ const SPARSE_VEC: &str = "sparse";
 /// keyword-indexed `type` lets a query scope to one kind. `"memory"` is a plain
 /// note; `"procedure"` is a procedural-memory record (phase Д6).
 pub const TYPE_MEMORY: &str = "memory";
-// Written by procedural memory (PR4); defined here with the index so the schema
-// is in place from this foundation PR.
-#[allow(dead_code)]
+/// Written by procedural memory (PR4); consolidation already skips it.
 pub const TYPE_PROCEDURE: &str = "procedure";
 
 /// Target chunk size in characters for `add_memory` (audit #3/#20). Kept well under
@@ -902,6 +900,104 @@ pub async fn nearest_score(
 
     let response = client.query(q).await.context("near-dup query failed")?;
     Ok(response.result.into_iter().next().map(|p| p.score))
+}
+
+/// Nearest neighbors of an EXISTING point, found by its stored dense vector (no
+/// re-embedding) - the engine for consolidation's near-dup detection (phase Д2).
+/// Returns `(id, cosine_score)` for up to `limit` neighbors, excluding the point
+/// itself, optionally scoped to one library. Querying by `VectorInput::new_id`
+/// reuses the on-disk vector, so a full-store dedup pass costs one ANN lookup per
+/// point instead of one embedding inference per point.
+pub async fn near_neighbors_by_id(
+    config: &MindConfig,
+    id: &str,
+    library: Option<&str>,
+    limit: u64,
+) -> Result<Vec<(String, f32)>> {
+    let client = get_client(config).await?;
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let mut q = QueryPointsBuilder::new(MEMORIES_COLLECTION)
+        .query(Query::new_nearest(VectorInput::new_id(pid)))
+        .using(DENSE_VEC)
+        // +1 because the point itself comes back as the top hit; we drop it below.
+        .limit(limit + 1);
+    if let Some(lib) = library {
+        q = q.filter(library_filter(lib));
+    }
+    let response = client
+        .query(q)
+        .await
+        .context("near-neighbor query failed")?;
+    Ok(response
+        .result
+        .into_iter()
+        .filter_map(|p| {
+            let nid = p.id.as_ref().map(format_point_id)?;
+            (nid != id).then_some((nid, p.score))
+        })
+        .take(limit as usize)
+        .collect())
+}
+
+/// Batch-delete memories by id (consolidation merge step). IDs are globally
+/// unique, so this is unambiguous across libraries. No-op on an empty list.
+pub async fn delete_memories(config: &MindConfig, ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let client = get_client(config).await?;
+    let pids: Vec<qdrant_client::qdrant::PointId> = ids.iter().map(|i| i.clone().into()).collect();
+    client
+        .delete_points(
+            DeletePointsBuilder::new(MEMORIES_COLLECTION)
+                .points(PointsIdsList { ids: pids })
+                .wait(true),
+        )
+        .await
+        .context("Failed to delete memories during consolidation")?;
+    Ok(())
+}
+
+/// Lightweight metadata for one memory point, for consolidation (phase Д2). Keeps
+/// raw Qdrant types inside this module; the consolidator works with plain data.
+pub struct MemoryMeta {
+    pub id: String,
+    pub library: String,
+    pub content: String,
+    pub created_at: Option<String>,
+    pub hash: Option<String>,
+}
+
+/// Scroll every `memory`-typed point's metadata (no vectors) for consolidation.
+/// Procedures (`type = procedure`) are skipped - they are not deduped/decayed by
+/// this pass. Points predating the `type` field (no `type` payload) are treated
+/// as ordinary memories.
+pub async fn scroll_memory_meta(config: &MindConfig) -> Result<Vec<MemoryMeta>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let points = scroll_all(&client, MEMORIES_COLLECTION).await?;
+    Ok(points
+        .into_iter()
+        .filter_map(|p| {
+            let id = p.id.as_ref().map(format_point_id)?;
+            if extract_string(&p.payload, "type").as_deref() == Some(TYPE_PROCEDURE) {
+                return None;
+            }
+            Some(MemoryMeta {
+                id,
+                library: extract_string(&p.payload, "library").unwrap_or_default(),
+                content: extract_string(&p.payload, "content").unwrap_or_default(),
+                created_at: extract_string(&p.payload, "created_at"),
+                hash: extract_string(&p.payload, "hash"),
+            })
+        })
+        .collect())
 }
 
 pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {

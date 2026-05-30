@@ -101,9 +101,6 @@ pub fn flush() {
 
 /// Read the merged access journal (on-disk + in-process). Used by consolidation
 /// to decide what to decay. Does not mutate anything.
-// Consumed by the consolidation pass (PR2); the counter-recording half ships in
-// this foundation PR so usage data accrues before decay logic exists.
-#[allow(dead_code)]
 pub fn snapshot() -> HashMap<String, AccessStat> {
     let mut merged = load_from_disk();
     if let Ok(map) = log().lock() {

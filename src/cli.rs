@@ -161,6 +161,26 @@ pub enum Commands {
         #[arg(long)]
         purge: bool,
     },
+
+    /// Consolidate memory: merge duplicates / near-duplicates and report cold
+    /// (old, unused) entries (phase Д2). Dry-run unless --apply.
+    Consolidate {
+        /// Actually mutate the store (delete merged duplicates). Without it, only reports.
+        #[arg(long)]
+        apply: bool,
+        /// Scope to one library (default: all)
+        #[arg(long)]
+        library: Option<String>,
+        /// Cosine threshold for "near-duplicate" (0..1, default 0.97)
+        #[arg(long, default_value = "0.97")]
+        near_dup_threshold: f32,
+        /// A memory older than this many days with zero accesses is "cold" (default 180)
+        #[arg(long, default_value = "180")]
+        decay_days: i64,
+        /// Also DELETE cold memories (requires --apply; off by default)
+        #[arg(long)]
+        prune_cold: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -297,7 +317,53 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
+        Commands::Consolidate {
+            apply,
+            library,
+            near_dup_threshold,
+            decay_days,
+            prune_cold,
+        } => {
+            cmd_consolidate(crate::consolidate::Options {
+                apply,
+                library,
+                near_dup_threshold,
+                decay_days,
+                prune_cold,
+            })
+            .await
+        }
     }
+}
+
+async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let apply = opts.apply;
+    let prune_cold = opts.prune_cold;
+    if !apply {
+        println!("Consolidation DRY-RUN (no changes). Re-run with --apply to act.\n");
+    }
+    let r = crate::consolidate::run(&config, opts).await?;
+    println!("Scanned:              {}", r.scanned);
+    println!("Exact duplicates:     {}", r.exact_dups_removed);
+    println!("Near-duplicates:      {}", r.near_dups_removed);
+    println!("Cold (old + unused):  {}", r.cold_candidates);
+    if apply {
+        let removed = r.exact_dups_removed + r.near_dups_removed + r.cold_pruned;
+        println!("\nApplied: removed {removed} memories.");
+        if r.cold_candidates > 0 && !prune_cold {
+            println!(
+                "Kept {} cold entries (pass --prune-cold to delete them too).",
+                r.cold_candidates
+            );
+        }
+    } else if r.exact_dups_removed + r.near_dups_removed > 0 {
+        println!(
+            "\nWould remove {} duplicate(s) with --apply.",
+            r.exact_dups_removed + r.near_dups_removed
+        );
+    }
+    Ok(())
 }
 
 async fn cmd_migrate(purge: bool) -> Result<()> {
