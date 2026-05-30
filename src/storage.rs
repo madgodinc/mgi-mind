@@ -165,6 +165,26 @@ fn library_filter(library: &str) -> Filter {
     Filter::must([Condition::matches("library", library.to_string())])
 }
 
+/// Filter for ordinary-memory queries (phase Д6): exclude procedures so they
+/// never pollute a normal `mind_search`, optionally scoping to a library. Uses
+/// `must_not type=procedure` (NOT `must type=memory`) so the 12k legacy points
+/// that predate the `type` field are still included.
+fn memory_query_filter(library: Option<&str>) -> Filter {
+    let mut f = Filter {
+        must_not: vec![Condition::matches("type", TYPE_PROCEDURE.to_string())],
+        ..Default::default()
+    };
+    if let Some(lib) = library {
+        f.must.push(Condition::matches("library", lib.to_string()));
+    }
+    f
+}
+
+/// Filter that selects only procedures (phase Д6 recall).
+fn procedure_filter() -> Filter {
+    Filter::must([Condition::matches("type", TYPE_PROCEDURE.to_string())])
+}
+
 fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -778,19 +798,19 @@ pub async fn search(
     } as u64;
 
     // Hybrid retrieval (audit #23): dense (semantic) + sparse (BM25) prefetches
-    // fused with Reciprocal Rank Fusion. A library filter applies to both arms.
-    let mut dense_pf = PrefetchQueryBuilder::default()
+    // fused with Reciprocal Rank Fusion. Both arms exclude procedures and apply
+    // the optional library scope (phase Д6).
+    let mf = memory_query_filter(library);
+    let dense_pf = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(VectorInput::new_dense(embedding)))
         .using(DENSE_VEC)
+        .filter(mf.clone())
         .limit(fetch_k);
-    let mut sparse_pf = PrefetchQueryBuilder::default()
+    let sparse_pf = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(VectorInput::new_sparse(s_idx, s_val)))
         .using(SPARSE_VEC)
+        .filter(mf)
         .limit(fetch_k);
-    if let Some(lib) = library {
-        dense_pf = dense_pf.filter(library_filter(lib));
-        sparse_pf = sparse_pf.filter(library_filter(lib));
-    }
 
     let response = client
         .query(
@@ -914,14 +934,13 @@ pub async fn near_neighbors_by_id(
 ) -> Result<Vec<(String, f32)>> {
     let client = get_client(config).await?;
     let pid: qdrant_client::qdrant::PointId = id.to_string().into();
-    let mut q = QueryPointsBuilder::new(MEMORIES_COLLECTION)
+    let q = QueryPointsBuilder::new(MEMORIES_COLLECTION)
         .query(Query::new_nearest(VectorInput::new_id(pid)))
         .using(DENSE_VEC)
+        // Exclude procedures so consolidation never merges a playbook into a note.
+        .filter(memory_query_filter(library))
         // +1 because the point itself comes back as the top hit; we drop it below.
         .limit(limit + 1);
-    if let Some(lib) = library {
-        q = q.filter(library_filter(lib));
-    }
     let response = client
         .query(q)
         .await
@@ -996,6 +1015,240 @@ pub async fn scroll_memory_meta(config: &MindConfig) -> Result<Vec<MemoryMeta>> 
             })
         })
         .collect())
+}
+
+// --- Procedural memory (phase Д6) -------------------------------------------
+// Procedures live in the memories collection as `type = procedure` points, so
+// they reuse the hybrid dense+sparse index: the DENSE vector embeds the task
+// context (semantic "similar task" match) and the SPARSE vector indexes the
+// normalized error signature (lexical match on exact error codes/identifiers,
+// nearly free given the existing sparse branch). Normal search excludes them via
+// `memory_query_filter`; recall selects them via `procedure_filter`.
+
+/// Namespace for deterministic procedure IDs: one per (normalized error, fix), so
+/// re-learning the same fix dedups, while a different fix for the same error is a
+/// separate playbook (multiple candidate fixes can be ranked).
+const PROC_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_7072_6f63_0000_000000000001);
+/// Library tag for procedures (namespaced; not a user library, never registered).
+const PROCEDURE_LIBRARY: &str = "_procedures";
+
+fn procedure_id(norm_error: &str, fix: &str) -> String {
+    let key = format!("{norm_error}\u{0}{fix}");
+    Uuid::new_v5(&PROC_NAMESPACE, key.as_bytes()).to_string()
+}
+
+fn extract_int(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<i64> {
+    payload.get(key).and_then(|v| {
+        if let Some(qdrant_client::qdrant::value::Kind::IntegerValue(i)) = &v.kind {
+            Some(*i)
+        } else {
+            None
+        }
+    })
+}
+
+/// One recalled procedure with its ranking signals.
+pub struct ProcedureHit {
+    pub id: String,
+    pub trigger_error: String,
+    pub trigger_context: String,
+    pub fix: String,
+    pub provenance: Option<String>,
+    pub verified: bool,
+    pub success_count: i64,
+    pub fail_count: i64,
+    pub score: f32,
+}
+
+/// Fetch an existing procedure's preserved fields (counts, created_at, verified)
+/// so a re-learn keeps history instead of resetting it.
+async fn existing_procedure(client: &Qdrant, id: &str) -> (Option<String>, i64, i64, bool) {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let Ok(resp) = client
+        .get_points(GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid]).with_payload(true))
+        .await
+    else {
+        return (None, 0, 0, false);
+    };
+    let Some(point) = resp.result.into_iter().next() else {
+        return (None, 0, 0, false);
+    };
+    (
+        extract_string(&point.payload, "created_at"),
+        extract_int(&point.payload, "success_count").unwrap_or(0),
+        extract_int(&point.payload, "fail_count").unwrap_or(0),
+        extract_string(&point.payload, "verified").as_deref() == Some("true"),
+    )
+}
+
+/// Store (or update) a procedure. `norm_error` is the already-normalized error
+/// signature; `verified` is only ever set true by a caller holding a real truth
+/// signal (test green / exit 0) - manual `mind_learn` passes false. Preserves
+/// counts and created_at on re-learn; `verified` latches true once set.
+pub async fn add_procedure(
+    config: &MindConfig,
+    norm_error: &str,
+    context: &str,
+    fix: &str,
+    provenance: Option<&str>,
+    verified: bool,
+) -> Result<String> {
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    let id = procedure_id(norm_error, fix);
+    let (existing_created, succ, fail, was_verified) = existing_procedure(&client, &id).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let created_at = existing_created.unwrap_or_else(|| now.clone());
+
+    // Dense = task context (semantic similar-task match); fall back to the error
+    // signature if no context was given. Sparse = normalized error signature.
+    let dense_text = if context.trim().is_empty() {
+        norm_error
+    } else {
+        context
+    };
+    let embedding = embedder::embed_passage(config, dense_text).await?;
+    check_dim(&embedding, config)?;
+    let (s_idx, s_val) = sparse_vector(norm_error);
+    let vectors = NamedVectors::default()
+        .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+        .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("type".into(), TYPE_PROCEDURE.into());
+    payload.insert("library".into(), PROCEDURE_LIBRARY.into());
+    payload.insert("trigger_error".into(), norm_error.into());
+    payload.insert("trigger_context".into(), context.into());
+    payload.insert("fix".into(), fix.into());
+    if let Some(p) = provenance {
+        payload.insert("provenance".into(), p.into());
+    }
+    // verified latches: once true (a real signal), a manual re-learn won't unset it.
+    let verified = verified || was_verified;
+    payload.insert(
+        "verified".into(),
+        if verified { "true" } else { "false" }.into(),
+    );
+    payload.insert("success_count".into(), succ.into());
+    payload.insert("fail_count".into(), fail.into());
+    payload.insert("created_at".into(), created_at.into());
+    payload.insert("updated_at".into(), now.into());
+
+    client
+        .upsert_points(
+            UpsertPointsBuilder::new(
+                MEMORIES_COLLECTION,
+                vec![PointStruct::new(id.clone(), vectors, payload)],
+            )
+            .wait(true),
+        )
+        .await
+        .context("Failed to store procedure")?;
+    Ok(id)
+}
+
+/// Recall procedures matching an error signature and/or a task context. `norm_error`
+/// (already normalized) drives the sparse/lexical arm; `context` drives the dense/
+/// semantic arm. Returns raw hits with ranking signals; the caller orders them
+/// (verified first, then by success vs fail). Pure retrieval - no mutation.
+pub async fn recall_procedures(
+    config: &MindConfig,
+    norm_error: Option<&str>,
+    context: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ProcedureHit>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    // Dense over context (preferred) or the error signature as a fallback.
+    let dense_text = context.or(norm_error).unwrap_or("");
+    let embedding = embedder::embed_query(config, dense_text).await?;
+    check_dim(&embedding, config)?;
+
+    let mut qb = QueryPointsBuilder::new(MEMORIES_COLLECTION).add_prefetch(
+        PrefetchQueryBuilder::default()
+            .query(Query::new_nearest(VectorInput::new_dense(embedding)))
+            .using(DENSE_VEC)
+            .filter(procedure_filter())
+            .limit(limit as u64 * 2),
+    );
+    // Add the lexical arm only when an error signature is provided.
+    if let Some(err) = norm_error.filter(|e| !e.trim().is_empty()) {
+        let (s_idx, s_val) = sparse_vector(err);
+        qb = qb.add_prefetch(
+            PrefetchQueryBuilder::default()
+                .query(Query::new_nearest(VectorInput::new_sparse(s_idx, s_val)))
+                .using(SPARSE_VEC)
+                .filter(procedure_filter())
+                .limit(limit as u64 * 2),
+        );
+    }
+
+    let response = client
+        .query(
+            qb.query(Query::new_fusion(Fusion::Rrf))
+                .limit(limit as u64 * 2)
+                .with_payload(true),
+        )
+        .await
+        .context("Procedure recall failed")?;
+
+    Ok(response
+        .result
+        .into_iter()
+        .map(|point| {
+            let p = &point.payload;
+            ProcedureHit {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                trigger_error: extract_string(p, "trigger_error").unwrap_or_default(),
+                trigger_context: extract_string(p, "trigger_context").unwrap_or_default(),
+                fix: extract_string(p, "fix").unwrap_or_default(),
+                provenance: extract_string(p, "provenance"),
+                verified: extract_string(p, "verified").as_deref() == Some("true"),
+                success_count: extract_int(p, "success_count").unwrap_or(0),
+                fail_count: extract_int(p, "fail_count").unwrap_or(0),
+                score: point.score,
+            }
+        })
+        .collect())
+}
+
+/// Record the outcome of reusing a procedure: bump success or fail count and
+/// stamp `last_used`. A failure (`worked = false`) raises fail_count so recall
+/// can demote a fix that stopped working - the store self-corrects instead of
+/// ossifying on a bad playbook. Manual success does NOT set `verified` (that
+/// needs a deterministic signal, not a human "seems fine").
+pub async fn procedure_outcome(config: &MindConfig, id: &str, worked: bool) -> Result<()> {
+    use qdrant_client::qdrant::SetPayloadPointsBuilder;
+    let client = get_client(config).await?;
+    let (_, succ, fail, _) = existing_procedure(&client, id).await;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    if worked {
+        payload.insert("success_count".into(), (succ + 1).into());
+    } else {
+        payload.insert("fail_count".into(), (fail + 1).into());
+    }
+    payload.insert("last_used".into(), now.into());
+
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
+                .points_selector(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await
+        .context("Failed to record procedure outcome")?;
+    Ok(())
 }
 
 pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {

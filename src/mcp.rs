@@ -223,7 +223,7 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     }
 }
 
-/// Map a tool name + arguments to its rendered text. All 22 tools are wired:
+/// Map a tool name + arguments to its rendered text. All 25 tools are wired:
 /// - 7 "warm" embed-path tools reuse the existing `render_*`/`build_*` helpers
 ///   + storage/knowledge functions, using the pre-loaded warm config;
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
@@ -314,6 +314,37 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             Ok(crate::cli::render_facts(subject, &facts))
         }
 
+        // ---- Procedural memory (Д6): learn / recall / outcome ----
+        "mind_learn" => {
+            let cfg = warm(true)?;
+            let error = arg_str(args, "error")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'error'"))?;
+            let fix = arg_str(args, "fix")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'fix'"))?;
+            let context = arg_str(args, "context").unwrap_or("");
+            let provenance = arg_str(args, "provenance");
+            // verified defaults false: a manual lesson has no deterministic signal.
+            let verified = arg_bool(args, "verified", false);
+            crate::procedure::learn(cfg, error, fix, context, provenance, verified).await
+        }
+        "mind_recall" => {
+            let cfg = warm(true)?;
+            let error = arg_str(args, "error");
+            let context = arg_str(args, "context");
+            if error.is_none() && context.is_none() {
+                anyhow::bail!("mind_recall needs an 'error' and/or a 'context'");
+            }
+            let limit = arg_u64(args, "limit", 3) as usize;
+            crate::procedure::recall(cfg, error, context, limit).await
+        }
+        "mind_procedure_outcome" => {
+            let cfg = warm(true)?;
+            let id = arg_str(args, "id")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
+            let worked = arg_bool(args, "worked", false);
+            crate::procedure::outcome(cfg, id, worked).await
+        }
+
         // ---- Terminal-only 3 (vault; never touch secrets over MCP) ----
         "mind_vault_store" => {
             let key = arg_str(args, "key").unwrap_or("<key>");
@@ -402,7 +433,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
     }
 }
 
-/// The 22 tool definitions advertised by `tools/list`. Schemas are hand-written
+/// The 25 tool definitions advertised by `tools/list`. Schemas are hand-written
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
@@ -549,6 +580,45 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_learn",
+            "description": "Record a procedural-memory lesson (error -> fix). Stored unverified by default (a manual lesson has no truth signal); surfaced with low weight until confirmed. Pass verified=true ONLY with a deterministic signal (test green / exit 0).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "error": { "type": "string", "description": "Error message / signature (will be normalized: paths, line numbers, addresses stripped)" },
+                    "fix": { "type": "string", "description": "What resolved it" },
+                    "context": { "type": "string", "description": "Short task description (drives semantic recall)" },
+                    "provenance": { "type": "string", "description": "Project / file where this applied" },
+                    "verified": { "type": "boolean", "default": false, "description": "True ONLY if a deterministic check confirmed the fix" }
+                },
+                "required": ["error", "fix"]
+            }
+        }),
+        json!({
+            "name": "mind_recall",
+            "description": "Recall error->fix playbooks for an error and/or a task context. Verified procedures rank first; fixes that have failed before are demoted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "error": { "type": "string", "description": "Error signature to match (lexical)" },
+                    "context": { "type": "string", "description": "Task description to match (semantic)" },
+                    "limit": { "type": "number", "default": 3, "description": "Max playbooks" }
+                }
+            }
+        }),
+        json!({
+            "name": "mind_procedure_outcome",
+            "description": "Record whether a recalled procedure worked when reused. worked=false raises its fail count and demotes it, so the store self-corrects instead of ossifying on a bad fix.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Procedure id from mind_recall" },
+                    "worked": { "type": "boolean", "default": false, "description": "Did the fix work this time" }
+                },
+                "required": ["id", "worked"]
+            }
+        }),
+        json!({
             "name": "mind_history",
             "description": "Show recent additions chronologically",
             "inputSchema": {
@@ -628,12 +698,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_22_tools() {
+    fn exposes_all_25_tools() {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            22,
-            "tools/list must advertise exactly 22 tools"
+            25,
+            "tools/list must advertise exactly 25 tools"
         );
     }
 
@@ -671,10 +741,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_22() {
+    async fn tools_list_returns_25() {
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 22);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 25);
     }
 
     #[tokio::test]

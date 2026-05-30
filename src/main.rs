@@ -8,6 +8,7 @@ mod ingest;
 mod integrity;
 mod knowledge;
 mod mcp;
+mod procedure;
 mod reranker;
 mod secrets;
 mod session;
