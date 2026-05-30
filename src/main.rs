@@ -1,6 +1,7 @@
 mod access;
 mod cli;
 mod config;
+mod consolidate;
 mod embedder;
 mod error;
 mod integrity;
