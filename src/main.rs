@@ -1,3 +1,4 @@
+mod access;
 mod cli;
 mod config;
 mod embedder;
@@ -6,6 +7,7 @@ mod integrity;
 mod knowledge;
 mod mcp;
 mod reranker;
+mod secrets;
 mod session;
 mod storage;
 mod util;
