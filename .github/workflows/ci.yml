@@ -42,6 +42,9 @@ jobs:
   integration:
     name: integration (real Qdrant)
     runs-on: ubuntu-latest
+    # Fail fast on a hang instead of burning the full 6h runner budget. The tests
+    # themselves finish in seconds; anything longer means something is stuck.
+    timeout-minutes: 25
     services:
       qdrant:
         image: qdrant/qdrant:v1.18.1
@@ -90,6 +93,8 @@ jobs:
   integration-windows:
     name: integration (windows, bundled Qdrant)
     runs-on: windows-latest
+    # Fail fast on a hang instead of burning the full 6h runner budget.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
