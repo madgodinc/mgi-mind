@@ -869,10 +869,8 @@ pub async fn search(
 /// (PR3) and consolidation (PR2) use it to spot a near-dup of new content before
 /// writing it. Returns `None` when there is nothing to compare against (empty or
 /// missing collection). Score is cosine in 0..1 (Qdrant cosine similarity);
-/// callers compare it against a threshold.
-// Consumed by auto-ingest (PR3) and consolidation (PR2); lands here so the
-// near-dup primitive (the missing audit #8) is reviewed on its own.
-#[allow(dead_code)]
+/// callers compare it against a threshold. The near-dup primitive the original
+/// audit listed as the still-missing #8; used by auto-ingest (PR3).
 pub async fn nearest_score(
     config: &MindConfig,
     library: Option<&str>,
