@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use once_cell::sync::OnceCell;
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CountPointsBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
@@ -10,6 +11,9 @@ use qdrant_client::qdrant::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 use crate::config::MindConfig;
@@ -117,15 +121,30 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-pub async fn get_client(config: &MindConfig) -> Result<Qdrant> {
-    let url = format!("http://localhost:{}", config.qdrant_port);
-    let mut builder = Qdrant::from_url(&url);
-    // Authenticate when an API key is configured (audit #7).
-    if let Some(key) = &config.qdrant_api_key {
-        builder = builder.api_key(key.clone());
-    }
-    let client = builder.build().context("Failed to connect to Qdrant")?;
-    Ok(client)
+/// Process-global Qdrant client (audit: single-process). Building a client sets
+/// up a gRPC channel; in the old "spawn a CLI per call" model the process died
+/// after one op, so caching was pointless. Now `mgimind mcp` lives for the whole
+/// session, so we build the client once and reuse the warm channel for every
+/// operation - the cheapest per-call win, mirroring the embedder's `OnceCell`.
+static CLIENT: OnceCell<Arc<Qdrant>> = OnceCell::new();
+
+pub async fn get_client(config: &MindConfig) -> Result<Arc<Qdrant>> {
+    // Building the client is synchronous and does not open a connection (the gRPC
+    // channel connects lazily), so memoizing on first use is safe even before
+    // Qdrant is up. Callers keep using `&client` - `&Arc<Qdrant>` derefs to
+    // `&Qdrant`, so no call site changes.
+    CLIENT
+        .get_or_try_init(|| {
+            let url = format!("http://localhost:{}", config.qdrant_port);
+            let mut builder = Qdrant::from_url(&url);
+            // Authenticate when an API key is configured (audit #7).
+            if let Some(key) = &config.qdrant_api_key {
+                builder = builder.api_key(key.clone());
+            }
+            let client = builder.build().context("Failed to connect to Qdrant")?;
+            Ok::<_, anyhow::Error>(Arc::new(client))
+        })
+        .cloned()
 }
 
 fn deterministic_id(library: &str, content: &str) -> String {
@@ -189,45 +208,66 @@ fn libraries_path() -> std::path::PathBuf {
     crate::config::mind_home().join("libraries.json")
 }
 
-fn registered_libraries() -> Vec<String> {
+/// In-memory cache of the library registry (audit: single-process). `is_registered`
+/// runs on every `add`; re-reading and re-parsing `libraries.json` from disk each
+/// time is wasted work in the long-lived MCP process. All mutations go through
+/// `register_library`/`unregister_library`, which update both disk and this
+/// cache, so it stays authoritative for this process's own writes.
+static LIB_CACHE: OnceCell<Mutex<Vec<String>>> = OnceCell::new();
+
+fn load_libraries_from_disk() -> Vec<String> {
     std::fs::read_to_string(libraries_path())
         .ok()
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default()
 }
 
+fn lib_cache() -> &'static Mutex<Vec<String>> {
+    LIB_CACHE.get_or_init(|| Mutex::new(load_libraries_from_disk()))
+}
+
+fn registered_libraries() -> Vec<String> {
+    lib_cache()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| load_libraries_from_disk())
+}
+
 fn is_registered(name: &str) -> bool {
-    registered_libraries().iter().any(|l| l == name)
+    lib_cache()
+        .lock()
+        .map(|g| g.iter().any(|l| l == name))
+        .unwrap_or(false)
 }
 
 fn register_library(name: &str) -> Result<()> {
-    let mut libs = registered_libraries();
+    let mut libs = lib_cache().lock().expect("library cache mutex poisoned");
     if !libs.iter().any(|l| l == name) {
         libs.push(name.to_string());
         libs.sort();
-        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&libs)?)?;
+        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&*libs)?)?;
     }
     Ok(())
 }
 
 fn unregister_library(name: &str) -> Result<()> {
-    let mut libs = registered_libraries();
+    let mut libs = lib_cache().lock().expect("library cache mutex poisoned");
     let before = libs.len();
     libs.retain(|l| l != name);
     if libs.len() != before {
-        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&libs)?)?;
+        crate::util::atomic_write_str(&libraries_path(), &serde_json::to_string_pretty(&*libs)?)?;
     }
     Ok(())
 }
 
 // --- Collection setup -------------------------------------------------------
 
-async fn create_vector_collection(client: &Qdrant, name: &str, dim: u64) -> Result<()> {
+/// Create a payload-only (vectorless) collection (audit #6). Qdrant supports
+/// collections with no vector config - points are pure payload. Used for facts,
+/// which are looked up by exact/lexical payload match, never by vector.
+async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
     client
-        .create_collection(
-            CreateCollectionBuilder::new(name)
-                .vectors_config(VectorParamsBuilder::new(dim, Distance::Cosine)),
-        )
+        .create_collection(CreateCollectionBuilder::new(name))
         .await
         .with_context(|| format!("Failed to create collection {name}"))?;
     Ok(())
@@ -277,7 +317,17 @@ async fn create_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
     Ok(())
 }
 
+/// "Collection is ready" flags (audit: single-process memoization). On every
+/// `add`/`search` we used to call `collection_exists` (a round-trip) and re-issue
+/// idempotent `create_field_index` calls. The schema can't change under us within
+/// a session, so once we've ensured a collection + its indexes, we skip all of it.
+static MEMORIES_READY: AtomicBool = AtomicBool::new(false);
+static FACTS_READY: AtomicBool = AtomicBool::new(false);
+
 pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
+    if MEMORIES_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
     if !client
         .collection_exists(MEMORIES_COLLECTION)
         .await
@@ -286,19 +336,32 @@ pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()>
         create_memories_collection(client, dim).await?;
     }
     ensure_payload_indexes(client, MEMORIES_COLLECTION).await;
+    MEMORIES_READY.store(true, Ordering::Release);
     Ok(())
 }
 
-pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
-    if !client
-        .collection_exists(FACTS_COLLECTION)
-        .await
-        .unwrap_or(false)
-    {
-        create_vector_collection(client, FACTS_COLLECTION, dim).await?;
+/// Payload indexes for the vectorless facts collection (audit #6): full-text on
+/// subject/predicate/object so `query_facts` filters server-side instead of
+/// scrolling everything into RAM; keyword on `valid` for the validity filter;
+/// datetime on `created_at` so the context briefing can `order_by` newest. All
+/// idempotent.
+async fn ensure_facts_indexes(client: &Qdrant) {
+    for field in ["subject", "predicate", "object"] {
+        let _ = client
+            .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                FACTS_COLLECTION,
+                field,
+                FieldType::Text,
+            ))
+            .await;
     }
-    // created_at datetime index so the context briefing can show the newest facts
-    // via order_by instead of an arbitrary page (idempotent).
+    let _ = client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            FACTS_COLLECTION,
+            "valid",
+            FieldType::Keyword,
+        ))
+        .await;
     let _ = client
         .create_field_index(CreateFieldIndexCollectionBuilder::new(
             FACTS_COLLECTION,
@@ -306,13 +369,90 @@ pub async fn ensure_facts_collection(client: &Qdrant, dim: u64) -> Result<()> {
             FieldType::Datetime,
         ))
         .await;
+}
+
+/// Does the existing facts collection carry a (legacy, unused) vector config?
+/// True for the old layout that embedded every fact; false once it's vectorless.
+async fn facts_collection_has_vectors(client: &Qdrant) -> bool {
+    use qdrant_client::qdrant::vectors_config::Config;
+    let Ok(info) = client.collection_info(FACTS_COLLECTION).await else {
+        return false;
+    };
+    let cfg = info
+        .result
+        .and_then(|r| r.config)
+        .and_then(|c| c.params)
+        .and_then(|p| p.vectors_config);
+    match cfg.and_then(|c| c.config) {
+        Some(Config::Params(_)) => true,
+        Some(Config::ParamsMap(m)) => !m.map.is_empty(),
+        None => false,
+    }
+}
+
+/// Migrate a legacy vector-bearing facts collection to vectorless in place
+/// (audit #6). The fact vector was always dead weight (never queried), so we drop
+/// it: read every fact's payload, recreate the collection without vectors, and
+/// re-insert the payloads under their original IDs. Facts are few, so a single
+/// in-memory pass is fine.
+async fn migrate_facts_to_vectorless(client: &Qdrant) -> Result<()> {
+    let points = scroll_all(client, FACTS_COLLECTION)
+        .await
+        .unwrap_or_default();
+    let count = points.len();
+
+    client
+        .delete_collection(DeleteCollectionBuilder::new(FACTS_COLLECTION))
+        .await
+        .context("Failed to drop legacy facts collection during migration")?;
+    create_vectorless_collection(client, FACTS_COLLECTION).await?;
+
+    let new_points: Vec<PointStruct> = points
+        .into_iter()
+        .filter_map(|p| {
+            let id = p.id?;
+            // No vector: payload-only point (NamedVectors::default() is empty).
+            Some(PointStruct::new(id, NamedVectors::default(), p.payload))
+        })
+        .collect();
+
+    for batch in new_points.chunks(SCROLL_PAGE as usize) {
+        client
+            .upsert_points(UpsertPointsBuilder::new(FACTS_COLLECTION, batch.to_vec()).wait(true))
+            .await
+            .context("Failed to re-insert facts during vectorless migration")?;
+    }
+
+    eprintln!("mgimind: migrated facts collection to vectorless ({count} facts)");
+    Ok(())
+}
+
+pub async fn ensure_facts_collection(client: &Qdrant) -> Result<()> {
+    if FACTS_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if client
+        .collection_exists(FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        // Auto-migrate an old vector-bearing facts collection so vectorless
+        // upserts succeed (the cutover is transparent; facts are few).
+        if facts_collection_has_vectors(client).await {
+            migrate_facts_to_vectorless(client).await?;
+        }
+    } else {
+        create_vectorless_collection(client, FACTS_COLLECTION).await?;
+    }
+    ensure_facts_indexes(client).await;
+    FACTS_READY.store(true, Ordering::Release);
     Ok(())
 }
 
 pub async fn init(config: &MindConfig) -> Result<()> {
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
-    ensure_facts_collection(&client, config.vector_size).await?;
+    ensure_facts_collection(&client).await?;
     Ok(())
 }
 
@@ -432,9 +572,42 @@ pub(crate) async fn existing_payload_string(
 
 // --- Core memory operations -------------------------------------------------
 
+/// Batch GET the `created_at` payload of existing points by id (audit #4). One
+/// round-trip for all chunk IDs, instead of a per-chunk read-before-write. Used
+/// to preserve the original `created_at` across idempotent re-upserts of
+/// content-addressed points. Missing ids (new content) are simply absent.
+async fn existing_created_at_map(
+    client: &Qdrant,
+    collection: &str,
+    ids: &[String],
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    let pids: Vec<qdrant_client::qdrant::PointId> =
+        ids.iter().map(|id| id.clone().into()).collect();
+    let Ok(resp) = client
+        .get_points(GetPointsBuilder::new(collection, pids).with_payload(true))
+        .await
+    else {
+        return out;
+    };
+    for point in resp.result {
+        let id = point.id.as_ref().map(format_point_id).unwrap_or_default();
+        if let Some(ca) = extract_string(&point.payload, "created_at") {
+            out.insert(id, ca);
+        }
+    }
+    out
+}
+
 /// Store a memory. Long content is split into chunks so nothing is silently lost
 /// to the embedder's 512-token cap (audit #3/#20): the main write path no longer
-/// drops the tail of a long note. Returns the number of chunks stored.
+/// drops the tail of a long note. All chunks are embedded in ONE ONNX pass
+/// (audit #2) and written with a SINGLE batch upsert after a SINGLE batch GET for
+/// existing `created_at` (audit #4) - no per-chunk model run or round-trip.
+/// Returns the number of chunks stored.
 pub async fn add_memory(
     config: &MindConfig,
     library: &str,
@@ -451,52 +624,52 @@ pub async fn add_memory(
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
-    let mut stored = 0usize;
-    for chunk in chunk_text(content, CHUNK_CHARS) {
-        if chunk.trim().chars().count() < 3 {
-            continue;
-        }
-        upsert_chunk(&client, config, library, &chunk, source).await?;
-        stored += 1;
+    // Chunk, dropping trivially short fragments.
+    let chunks: Vec<String> = chunk_text(content, CHUNK_CHARS)
+        .into_iter()
+        .filter(|c| c.trim().chars().count() >= 3)
+        .collect();
+    if chunks.is_empty() {
+        return Ok(0);
     }
-    Ok(stored)
-}
 
-/// Upsert one chunk as a single point (dense + sparse vectors). Deterministic ID
-/// makes it an idempotent overwrite; `created_at` is preserved across re-adds.
-async fn upsert_chunk(
-    client: &Qdrant,
-    config: &MindConfig,
-    library: &str,
-    content: &str,
-    source: Option<&str>,
-) -> Result<()> {
-    let embedding = embedder::embed_passage(config, content).await?;
-    check_dim(&embedding, config)?;
+    // Embed every chunk in a single batched pass (audit #2).
+    let embeddings = embedder::embed_passages(config, &chunks).await?;
+    for e in &embeddings {
+        check_dim(e, config)?;
+    }
 
-    let id = deterministic_id(library, content);
-    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    // One batch GET for existing created_at across all chunk IDs (audit #4).
+    let ids: Vec<String> = chunks
+        .iter()
+        .map(|c| deterministic_id(library, c))
+        .collect();
+    let existing = existing_created_at_map(&client, MEMORIES_COLLECTION, &ids).await;
+
     let now = chrono::Utc::now().to_rfc3339();
-    let created_at = existing_payload_string(client, MEMORIES_COLLECTION, &id, "created_at")
-        .await
-        .unwrap_or_else(|| now.clone());
+    let mut points = Vec::with_capacity(chunks.len());
+    for ((chunk, id), embedding) in chunks.iter().zip(ids.iter()).zip(embeddings) {
+        let hash = blake3::hash(chunk.as_bytes()).to_hex().to_string();
+        let created_at = existing.get(id).cloned().unwrap_or_else(|| now.clone());
 
-    // Named dense (semantic) + sparse (lexical) vectors for hybrid search (#23).
-    let (s_idx, s_val) = sparse_vector(content);
-    let vectors = NamedVectors::default()
-        .add_vector(DENSE_VEC, Vector::new_dense(embedding))
-        .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
-    let point = PointStruct::new(
-        id,
-        vectors,
-        build_payload(content, &hash, &created_at, &now, library, source),
-    );
+        // Named dense (semantic) + sparse (lexical) vectors for hybrid search (#23).
+        let (s_idx, s_val) = sparse_vector(chunk);
+        let vectors = NamedVectors::default()
+            .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+            .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+        points.push(PointStruct::new(
+            id.clone(),
+            vectors,
+            build_payload(chunk, &hash, &created_at, &now, library, source),
+        ));
+    }
 
+    let stored = points.len();
     client
-        .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, vec![point]).wait(true))
+        .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, points).wait(true))
         .await
         .context("Failed to add memory")?;
-    Ok(())
+    Ok(stored)
 }
 
 fn build_payload(
