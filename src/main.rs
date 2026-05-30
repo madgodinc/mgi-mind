@@ -4,6 +4,7 @@ mod config;
 mod consolidate;
 mod embedder;
 mod error;
+mod ingest;
 mod integrity;
 mod knowledge;
 mod mcp;

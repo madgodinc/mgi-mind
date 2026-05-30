@@ -223,7 +223,7 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     }
 }
 
-/// Map a tool name + arguments to its rendered text. All 21 tools are wired:
+/// Map a tool name + arguments to its rendered text. All 22 tools are wired:
 /// - 7 "warm" embed-path tools reuse the existing `render_*`/`build_*` helpers
 ///   + storage/knowledge functions, using the pre-loaded warm config;
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
@@ -263,6 +263,25 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
         "mind_context" => {
             let cfg = warm(true)?;
             crate::cli::build_context(cfg).await
+        }
+        "mind_ingest" => {
+            let cfg = warm(true)?;
+            let raw = arg_str(args, "raw");
+            let library = arg_str(args, "library").unwrap_or("projects");
+            // Agent-driven (primary): a tagged-JSON candidates array. Backstop:
+            // omit candidates and pass `raw` for the heuristic extractor.
+            let candidates = match args.get("candidates") {
+                Some(v) if !v.is_null() => {
+                    serde_json::from_value::<Vec<crate::ingest::Candidate>>(v.clone())
+                        .map_err(|e| anyhow::anyhow!("invalid 'candidates': {e}"))?
+                }
+                _ => Vec::new(),
+            };
+            if raw.is_none() && candidates.is_empty() {
+                anyhow::bail!("mind_ingest needs either 'raw' text or a 'candidates' array");
+            }
+            let report = crate::ingest::run_ingest(cfg, raw, candidates, library).await?;
+            Ok(report.render())
         }
         "mind_history" => {
             let cfg = warm(true)?;
@@ -383,7 +402,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
     }
 }
 
-/// The 21 tool definitions advertised by `tools/list`. Schemas are hand-written
+/// The 22 tool definitions advertised by `tools/list`. Schemas are hand-written
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
@@ -514,6 +533,22 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
+            "name": "mind_ingest",
+            "description": "Auto-ingest memory. PRIMARY: pass a `candidates` array of already-extracted items you judged worth keeping. BACKSTOP: omit candidates and pass `raw` text for marker-based heuristic extraction. Each candidate is secret-scrubbed and near-dup-checked before writing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "candidates": {
+                        "type": "array",
+                        "description": "Extracted items. Each is one of: {\"type\":\"memory\",\"content\":\"...\"} | {\"type\":\"fact\",\"subject\":\"...\",\"predicate\":\"...\",\"object\":\"...\"} | {\"type\":\"procedure\",\"trigger_error\":\"...\",\"fix\":\"...\"}",
+                        "items": { "type": "object" }
+                    },
+                    "raw": { "type": "string", "description": "Raw text for heuristic extraction (used only when candidates is omitted)" },
+                    "library": { "type": "string", "default": "projects", "description": "Target library for memory candidates" }
+                }
+            }
+        }),
+        json!({
             "name": "mind_history",
             "description": "Show recent additions chronologically",
             "inputSchema": {
@@ -593,12 +628,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_21_tools() {
+    fn exposes_all_22_tools() {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            21,
-            "tools/list must advertise exactly 21 tools"
+            22,
+            "tools/list must advertise exactly 22 tools"
         );
     }
 
@@ -636,10 +671,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_21() {
+    async fn tools_list_returns_22() {
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 21);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 22);
     }
 
     #[tokio::test]
