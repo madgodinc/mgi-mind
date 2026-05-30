@@ -14,8 +14,8 @@
 //!
 //! Pipeline: capture -> extract -> secret-scrub -> dedup (near-dup) -> write.
 //! Consolidation (PR2) is the separate, mandatory companion that controls bloat.
-//! Procedures are handled by the procedural-memory module (PR4); a `procedure`
-//! candidate here is reported as deferred until that lands.
+//! Memory/fact candidates are written here; procedure candidates are routed to
+//! the procedural-memory module (Д6), learned unverified.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -40,13 +40,14 @@ pub enum Candidate {
         predicate: String,
         object: String,
     },
-    /// An error->fix playbook. Captured here but WRITTEN by the procedural module
-    /// (PR4); until then it is counted as deferred, never silently dropped.
+    /// An error->fix playbook, written via the procedural-memory module (Д6).
     Procedure {
         #[serde(default)]
         trigger_error: String,
         #[serde(default)]
         fix: String,
+        #[serde(default)]
+        context: String,
     },
 }
 
@@ -57,7 +58,7 @@ pub struct IngestReport {
     pub stored_facts: usize,
     pub skipped_dup: usize,
     pub skipped_secret: usize,
-    pub deferred_procedures: usize,
+    pub stored_procedures: usize,
 }
 
 impl IngestReport {
@@ -78,10 +79,10 @@ impl IngestReport {
                 self.skipped_secret
             ));
         }
-        if self.deferred_procedures > 0 {
+        if self.stored_procedures > 0 {
             s.push_str(&format!(
-                "\nDeferred {} procedure(s) (procedural memory lands in PR4; use mind_learn).",
-                self.deferred_procedures
+                "\nLearned {} procedure(s).",
+                self.stored_procedures
             ));
         }
         s
@@ -209,9 +210,19 @@ pub async fn run_ingest(
                 crate::knowledge::add_fact(config, &subject, &predicate, &object).await?;
                 report.stored_facts += 1;
             }
-            Candidate::Procedure { .. } => {
-                // Procedural memory write lands in PR4 (mind_learn). Count, never drop.
-                report.deferred_procedures += 1;
+            Candidate::Procedure {
+                trigger_error,
+                fix,
+                context,
+            } => {
+                if trigger_error.trim().is_empty() || fix.trim().is_empty() {
+                    continue;
+                }
+                // Learned unverified (no truth signal at ingest time); surfaced
+                // with low weight until a real signal confirms it (Д6).
+                crate::procedure::learn(config, &trigger_error, &fix, &context, None, false)
+                    .await?;
+                report.stored_procedures += 1;
             }
         }
     }
