@@ -128,15 +128,15 @@ mgimind. Therefore:
 
 ## Build order (updated for post-phase-0)
 
-| PR | Contents | Notes |
-|----|----------|-------|
-| — | **Concurrency** | Already removed by phase 0 (single-process). |
-| **PR1** | near-dup helper (top-1 cosine, missing #8) + `type` field & index + decay decision (in-process counters + journal) + **secret scrub** | Foundation. Secret scrub wired into `add_memory` immediately. |
-| **PR2** | Consolidation (dedup/merge/decay) via `mgimind consolidate` CLI | **Before** any auto-write (invariant 1). |
-| **PR3** | Auto-ingest MVP — agent-driven primary, heuristics backstop, `mind_ingest`, dedup. No LLM. | |
-| **PR4** | Procedural memory — `procedure` record + error-sig retrieval, manual `mind_learn` first. | |
-| later | Auto error→fix — hook on verification signal (external dependency). | Invariant 2. |
-| later | Opt-in BYO-LLM extractor. | |
+| PR | Contents | Status |
+|----|----------|--------|
+| — | **Concurrency** | Removed by phase 0 (single-process). |
+| **PR1** | near-dup helper (top-1 cosine, missing #8) + `type` field & index + decay foundation (in-process counters + journal) + **secret scrub** wired into `add_memory` | ✅ done |
+| **PR2** | Consolidation (exact/near-dup merge + cold report) via `mgimind consolidate` CLI — dry-run by default | ✅ done (before any auto-write, invariant 1) |
+| **PR3** | Auto-ingest MVP — `mind_ingest`, agent-driven primary + heuristic backstop, secret-scrub + near-dup dedup. No LLM. | ✅ done |
+| **PR4** | Procedural memory — `mind_learn` / `mind_recall` / `mind_procedure_outcome`, normalized error-sig retrieval, verified-first ranking + self-correction | ✅ done |
+| later | Auto error→fix — hook on an external verification signal sets `verified` | deferred (invariant 2) |
+| later | Opt-in BYO-LLM extractor | deferred |
 
 ## Two places where "unfinished" = "worse than before" (not "fewer features")
 

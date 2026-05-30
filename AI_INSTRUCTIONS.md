@@ -30,9 +30,12 @@ per-agent so two assistants never overwrite each other's log.
 
 **During the session:**
 - Past/preferences/projects question -> `mind_search` first.
-- The user shares something worth keeping -> `mind_add`.
+- The user shares something worth keeping -> `mind_add` (or batch several via
+  `mind_ingest`, see below).
 - The user states a durable fact -> `mind_fact_add`.
 - The user asks what you know about X -> `mind_fact_query`.
+- You hit an error you have seen before / start a task that tends to fail ->
+  `mind_recall` for a known fix before trying from scratch.
 
 **At the end:**
 - `mind_session_end` with the same agent name and a `summary` of what was done and
@@ -44,7 +47,8 @@ per-agent so two assistants never overwrite each other's log.
 |---|---|---|
 | Permanent rule / identity / workflow | the AI config file (CLAUDE.md, etc.) | "Always use Rust for new projects" |
 | Durable structured fact | `mind_fact_add` | user -> prefers -> Rust |
-| Details, notes, context | `mind_add` | "The staging DB is Postgres 16 on db-staging:5432" |
+| Details, notes, context | `mind_add` (or `mind_ingest`) | "The staging DB is Postgres 16 on db-staging:5432" |
+| A solved error / how-to-fix | `mind_learn` | error -> fix, recalled by `mind_recall` |
 | A secret (password, key, token) | the vault, in the user's terminal | never through MCP |
 
 When the user sets a **permanent rule or preference** ("always use X", "my name is
@@ -94,15 +98,47 @@ land in the process command line).
 - The user wants a secret -> tell them to run: `mgimind vault get <key>`
 - Never store a secret with `mind_add`. Never try to read or echo a secret yourself.
 
+## Auto-ingest: you are the judgment (`mind_ingest`)
+
+You are the memory's extractor. As you work, when a few things accrue that are worth
+keeping, send them in one `mind_ingest` call with a `candidates` array - you already
+judged they matter, so YOU are the significance gate. Each candidate is one of:
+`{"type":"memory","content":"..."}`, `{"type":"fact","subject":"...","predicate":"...","object":"..."}`,
+or `{"type":"procedure","trigger_error":"...","fix":"...","context":"..."}`. The server
+secret-scrubs each one and skips near-duplicates of what's already stored, so you don't
+have to dedup yourself. (A dumb client with no judgment can instead pass `raw` text for
+a weak marker-based extractor - but as a capable agent, prefer `candidates`.)
+
+This does not replace consolidation: the user runs `mgimind consolidate` (CLI/cron) to
+merge near-duplicates and report stale entries. Auto-ingest writes; consolidation keeps
+the store from bloating.
+
+## Procedural memory: learn from fixes (`mind_learn` / `mind_recall`)
+
+When you solve an error, record the lesson: `mind_learn` with the `error`, the `fix`,
+and a short `context`. The error signature is normalized (paths, line numbers,
+addresses stripped), so the same error matches later regardless of those details. Leave
+`verified` false - a manual lesson has no proof. Set `verified: true` ONLY when a
+deterministic check confirmed the fix (a test went green, a command exited 0); without
+that signal you would be teaching superstition.
+
+Before grinding on an error or a recurring task, `mind_recall` it: verified playbooks
+rank first, and fixes that have failed before are demoted. After you reuse a recalled
+fix, tell the store whether it worked with `mind_procedure_outcome` (`worked: true/false`)
+- a failure raises its fail count and demotes it, so the memory self-corrects instead of
+ossifying on a bad fix.
+
 ## Your MCP tools
 
-Memory: `mind_search`, `mind_add`, `mind_history`, `mind_delete`, `mind_context`.
+Memory: `mind_search`, `mind_add`, `mind_ingest`, `mind_history`, `mind_delete`, `mind_context`.
 Libraries: `mind_create`, `mind_list`, `mind_stats`.
 Facts: `mind_fact_add`, `mind_fact_query`, `mind_fact_invalidate`.
+Procedures: `mind_learn`, `mind_recall`, `mind_procedure_outcome`.
 Sessions: `mind_session_start`, `mind_session_last`, `mind_session_end`.
 Vault: `mind_vault_get`, `mind_vault_store` (both return terminal instructions).
 Web: `mind_web` (read a page as Markdown, if the `crw` tool is installed).
 Data: `mind_import`, `mind_export`, `mind_doctor`.
+Maintenance (CLI, the user runs it): `mgimind consolidate` (merge duplicates, report stale).
 
 Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind migrate`,
 `mgimind drop`, `mgimind backup`/`restore`. (The MCP server itself is `mgimind mcp`,
