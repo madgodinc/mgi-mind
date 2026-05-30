@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -109,6 +110,19 @@ impl MindConfig {
     }
 }
 
+/// Process-global config cache. The data dir / model / ports don't change within
+/// a session, so re-reading and re-parsing `config.json` on every `run_*` tool
+/// call is wasted disk work now that `mgimind mcp` is one long-lived process.
+static CONFIG_CACHE: OnceCell<MindConfig> = OnceCell::new();
+
+/// Load the config once per process and reuse it. Returns a cheap clone of the
+/// cached value, so call sites keep owning a `MindConfig` exactly as before -
+/// only the disk read + JSON parse is memoized. A fresh process (every CLI
+/// invocation, and a restarted MCP server) re-reads, so edits still take effect.
+pub fn load_cached() -> Result<MindConfig> {
+    CONFIG_CACHE.get_or_try_init(MindConfig::load).cloned()
+}
+
 pub fn mind_home() -> PathBuf {
     // An explicit override lets power users relocate the data dir and lets tests
     // isolate it on every OS. This is the only portable way: on Windows
@@ -117,8 +131,19 @@ pub fn mind_home() -> PathBuf {
     if let Some(dir) = std::env::var_os("MGIMIND_HOME") {
         return PathBuf::from(dir);
     }
+    // Never panic here: in the single long-lived `mgimind mcp` process an
+    // `.expect()` would unwind through the read loop and kill the whole session
+    // (a silent loss of memory access for a non-technical user). Fall back to the
+    // current directory if the home dir genuinely can't be resolved - combined
+    // with the per-tool panic isolation in `mcp::serve`, the server stays alive.
     dirs::home_dir()
-        .expect("Could not determine home directory")
+        .unwrap_or_else(|| {
+            eprintln!(
+                "mgimind: could not determine home directory; falling back to ./mgimind. \
+                 Set MGIMIND_HOME to choose the data dir explicitly."
+            );
+            PathBuf::from(".")
+        })
         .join("mgimind")
 }
 

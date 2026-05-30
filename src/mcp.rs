@@ -17,6 +17,7 @@
 //! itself broke and drop the session.
 
 use anyhow::Result;
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -38,7 +39,7 @@ pub async fn serve() -> Result<()> {
     // warmth (the embedder lives in a global OnceCell). Load once; if it fails
     // (e.g. `mgimind init` not run yet) we still answer initialize/tools/list so
     // the client can connect, and surface the problem on the first tool call.
-    let config = match MindConfig::load() {
+    let config = match crate::config::load_cached() {
         Ok(c) => Some(c),
         Err(e) => {
             eprintln!(
@@ -124,7 +125,25 @@ async fn handle_message(config: Option<&MindConfig>, msg: Value) -> Option<Value
         "tools/list" => id.map(|id| success_response(id, json!({ "tools": tool_definitions() }))),
         "tools/call" => {
             let id = id?;
-            Some(success_response(id, call_tool(config, params).await))
+            // Panic isolation (single-process risk): one `mgimind mcp` process
+            // serves the whole session, so a panic inside a tool handler - a
+            // stray `unwrap`/`expect`/overflow anywhere down the call tree - would
+            // unwind through the read loop and kill the server, silently cutting
+            // off the user's memory mid-task. Catch it here and return it as a
+            // normal `isError` result instead; the session survives.
+            let result = std::panic::AssertUnwindSafe(call_tool(config, params))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic| {
+                    tool_text(
+                        format!(
+                            "Error: internal panic in tool handler: {}",
+                            panic_message(&panic)
+                        ),
+                        true,
+                    )
+                });
+            Some(success_response(id, result))
         }
         other => is_request.then(|| {
             error_response(
@@ -160,6 +179,17 @@ fn tool_text(text: impl Into<String>, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text.into() }],
         "isError": is_error
     })
+}
+
+/// Best-effort human-readable text from a caught panic payload.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------

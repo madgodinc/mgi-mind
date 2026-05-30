@@ -36,6 +36,19 @@ pub struct VaultData {
     pub entries: HashMap<String, VaultEntry>,
 }
 
+impl VaultData {
+    /// Wipe the decrypted secret values from memory (audit #8). The key is
+    /// already zeroized after derivation, but the plaintext secrets live on in
+    /// this struct until it drops; for a vault, scrubbing them right after use is
+    /// the logical completion. Call this before dropping any `VaultData` that was
+    /// decrypted from disk.
+    fn zeroize_secrets(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.value.zeroize();
+        }
+    }
+}
+
 fn vault_path() -> PathBuf {
     crate::config::mind_home().join(VAULT_FILE)
 }
@@ -137,31 +150,38 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(answer.trim().to_string())
 }
 
-fn load_vault(password: &str) -> Result<VaultData> {
+/// Decrypt the vault with an already-derived key. Used by mutating ops that
+/// derive the key once and reuse it for both the load and the save (audit #7),
+/// instead of paying Argon2id (intentionally ~tens of ms) twice per mutation.
+fn load_vault_with_key(key: &[u8; 32]) -> Result<VaultData> {
     let path = vault_path();
     if !path.exists() {
         return Ok(VaultData::default());
     }
-
-    let salt = get_or_create_salt()?;
-    let mut key = derive_key(password, &salt)?;
     let encrypted = std::fs::read(&path).context("Failed to read vault")?;
-    let decrypted = decrypt(&encrypted, &key);
-    key.zeroize();
-    let decrypted = decrypted?;
+    let decrypted = decrypt(&encrypted, key)?;
     let vault: VaultData = serde_json::from_slice(&decrypted)?;
     Ok(vault)
 }
 
-fn save_vault(vault: &VaultData, password: &str) -> Result<()> {
-    let salt = get_or_create_salt()?;
-    let mut key = derive_key(password, &salt)?;
+/// Encrypt + atomically write the vault with an already-derived key (audit #7).
+fn save_vault_with_key(vault: &VaultData, key: &[u8; 32]) -> Result<()> {
     let json = serde_json::to_vec(vault)?;
-    let encrypted = encrypt(&json, &key);
-    key.zeroize();
-    let encrypted = encrypted?;
+    let encrypted = encrypt(&json, key)?;
     // Atomic write so a crash can't corrupt the only copy of the secrets (audit #4).
     crate::util::atomic_write(&vault_path(), &encrypted)
+}
+
+/// Decrypt the vault for a read-only caller (one Argon2 derivation).
+fn load_vault(password: &str) -> Result<VaultData> {
+    if !vault_path().exists() {
+        return Ok(VaultData::default());
+    }
+    let salt = get_or_create_salt()?;
+    let mut key = derive_key(password, &salt)?;
+    let vault = load_vault_with_key(&key);
+    key.zeroize();
+    vault
 }
 
 pub fn is_vault_initialized() -> bool {
@@ -181,7 +201,12 @@ pub fn store(key: &str, value: &str, category: &str, description: &str) -> Resul
         p
     };
 
-    let mut vault = load_vault(&password)?;
+    // Derive the key ONCE and reuse it for both the load and the save (audit #7).
+    let salt = get_or_create_salt()?;
+    let mut dkey = derive_key(&password, &salt)?;
+    password.zeroize();
+
+    let mut vault = load_vault_with_key(&dkey)?;
 
     vault.entries.insert(
         key.to_string(),
@@ -195,8 +220,9 @@ pub fn store(key: &str, value: &str, category: &str, description: &str) -> Resul
         },
     );
 
-    let result = save_vault(&vault, &password);
-    password.zeroize();
+    let result = save_vault_with_key(&vault, &dkey);
+    dkey.zeroize();
+    vault.zeroize_secrets(); // wipe plaintext secrets from memory (audit #8)
     result
 }
 
@@ -206,28 +232,41 @@ pub fn retrieve(key: &str, skip_confirm: bool) -> Result<Option<String>> {
     let mut password = prompt_password("Master password: ")?;
     let vault = load_vault(&password);
     password.zeroize();
-    let vault = vault?;
+    let mut vault = vault?;
 
-    let entry = match vault.entries.get(key) {
-        Some(e) => e,
-        None => return Ok(None),
+    // Copy out what we need, then scrub every plaintext secret from the decrypted
+    // vault before we go on (audit #8). `value` is the one secret we deliberately
+    // return to the caller; the rest never linger in memory.
+    let found = vault.entries.get(key).map(|e| {
+        (
+            e.key.clone(),
+            e.category.clone(),
+            e.description.clone(),
+            e.value.clone(),
+        )
+    });
+    vault.zeroize_secrets();
+
+    let Some((ekey, category, description, mut value)) = found else {
+        return Ok(None);
     };
 
     if !skip_confirm {
         eprintln!("=== VAULT ACCESS REQUEST ===");
-        eprintln!("Key:         {}", entry.key);
-        eprintln!("Category:    {}", entry.category);
-        eprintln!("Description: {}", entry.description);
+        eprintln!("Key:         {ekey}");
+        eprintln!("Category:    {category}");
+        eprintln!("Description: {description}");
         eprintln!("============================");
         let answer = prompt_line("Allow access? [y/N]: ")?;
 
         if !answer.eq_ignore_ascii_case("y") {
             eprintln!("Access denied by user.");
+            value.zeroize(); // don't leave the denied secret in memory (audit #8)
             return Ok(None);
         }
     }
 
-    Ok(Some(entry.value.clone()))
+    Ok(Some(value))
 }
 
 /// List all keys (values never shown).
@@ -239,13 +278,14 @@ pub fn list_keys() -> Result<Vec<(String, String, String)>> {
     let mut password = prompt_password("Master password: ")?;
     let vault = load_vault(&password);
     password.zeroize();
-    let vault = vault?;
+    let mut vault = vault?;
 
     let mut keys: Vec<(String, String, String)> = vault
         .entries
         .values()
         .map(|e| (e.key.clone(), e.category.clone(), e.description.clone()))
         .collect();
+    vault.zeroize_secrets(); // values were never read here; scrub them anyway (audit #8)
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(keys)
 }
@@ -253,13 +293,21 @@ pub fn list_keys() -> Result<Vec<(String, String, String)>> {
 /// Delete a secret.
 pub fn delete(key: &str) -> Result<bool> {
     let mut password = prompt_password("Master password: ")?;
-    let mut vault = load_vault(&password)?;
-    let removed = vault.entries.remove(key).is_some();
-    if removed {
-        save_vault(&vault, &password)?;
-    }
+    // Derive once for both load and (conditional) save (audit #7).
+    let salt = get_or_create_salt()?;
+    let mut dkey = derive_key(&password, &salt)?;
     password.zeroize();
-    Ok(removed)
+
+    let mut vault = load_vault_with_key(&dkey)?;
+    let removed = vault.entries.remove(key).is_some();
+    let result = if removed {
+        save_vault_with_key(&vault, &dkey)
+    } else {
+        Ok(())
+    };
+    dkey.zeroize();
+    vault.zeroize_secrets(); // wipe remaining plaintext secrets (audit #8)
+    result.map(|_| removed)
 }
 
 /// Lock state for display. We cannot know the secret count without the master
