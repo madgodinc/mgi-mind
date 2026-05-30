@@ -262,15 +262,29 @@ fn unregister_library(name: &str) -> Result<()> {
 
 // --- Collection setup -------------------------------------------------------
 
+/// True if a `create_collection` failure is just "collection already exists".
+/// That happens when two callers create the same collection concurrently - the
+/// `collection_exists` check passes for both, then one create wins and the other
+/// gets this error (seen as a parallel-test race against a shared Qdrant, but
+/// also possible with two concurrent CLI invocations). Treating it as success
+/// makes creation idempotent and closes the check-then-create race.
+fn is_collection_exists_error<E: std::fmt::Display>(e: &E) -> bool {
+    e.to_string().contains("already exists")
+}
+
 /// Create a payload-only (vectorless) collection (audit #6). Qdrant supports
 /// collections with no vector config - points are pure payload. Used for facts,
 /// which are looked up by exact/lexical payload match, never by vector.
+/// Idempotent: a concurrent "already exists" is treated as success.
 async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
-    client
+    match client
         .create_collection(CreateCollectionBuilder::new(name))
         .await
-        .with_context(|| format!("Failed to create collection {name}"))?;
-    Ok(())
+    {
+        Ok(_) => Ok(()),
+        Err(e) if is_collection_exists_error(&e) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Failed to create collection {name}")),
+    }
 }
 
 /// Create the payload indexes the single-collection layout relies on (audit #18):
@@ -306,15 +320,19 @@ async fn create_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
         SparseVectorParamsBuilder::default().modifier(Modifier::Idf as i32),
     );
 
-    client
+    // Idempotent: a concurrent "already exists" (check-then-create race) is success.
+    match client
         .create_collection(
             CreateCollectionBuilder::new(MEMORIES_COLLECTION)
                 .vectors_config(dense)
                 .sparse_vectors_config(sparse),
         )
         .await
-        .context("Failed to create memories collection")?;
-    Ok(())
+    {
+        Ok(_) => Ok(()),
+        Err(e) if is_collection_exists_error(&e) => Ok(()),
+        Err(e) => Err(e).context("Failed to create memories collection"),
+    }
 }
 
 /// "Collection is ready" flags (audit: single-process memoization). On every
