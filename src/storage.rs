@@ -43,6 +43,16 @@ const SCROLL_PAGE: u32 = 256;
 const DENSE_VEC: &str = "dense";
 const SPARSE_VEC: &str = "sparse";
 
+/// Values for the `type` payload field on the memories collection (phase Д2):
+/// the single collection holds both ordinary notes and error→fix playbooks, so a
+/// keyword-indexed `type` lets a query scope to one kind. `"memory"` is a plain
+/// note; `"procedure"` is a procedural-memory record (phase Д6).
+pub const TYPE_MEMORY: &str = "memory";
+// Written by procedural memory (PR4); defined here with the index so the schema
+// is in place from this foundation PR.
+#[allow(dead_code)]
+pub const TYPE_PROCEDURE: &str = "procedure";
+
 /// Target chunk size in characters for `add_memory` (audit #3/#20). Kept well under
 /// the 512-token model cap so a chunk never gets silently truncated at embed time.
 const CHUNK_CHARS: usize = 500;
@@ -303,6 +313,14 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
             collection,
             "created_at",
             FieldType::Datetime,
+        ))
+        .await;
+    // `type` (keyword) so a search can scope to memory vs procedure (phase Д2).
+    let _ = client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            collection,
+            "type",
+            FieldType::Keyword,
         ))
         .await;
 }
@@ -639,6 +657,19 @@ pub async fn add_memory(
         );
     }
 
+    // Secret scrub (phase Д2): never let a key/password/.env land in searchable
+    // memory - it would sit in plaintext and surface in future searches. Refuse
+    // the whole write and point at the terminal-only vault. Conservative detector
+    // (low false positives), so ordinary prose is unaffected.
+    if let Some(hit) = crate::secrets::scan(content) {
+        anyhow::bail!(
+            "Refusing to store: content looks like a secret ({}). Secrets never go \
+             into searchable memory.\nStore it in the terminal-only vault instead:\n    \
+             mgimind vault store <key> <value> --category <password|ssh|api-key|token>",
+            hit.reason
+        );
+    }
+
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
@@ -678,7 +709,15 @@ pub async fn add_memory(
         points.push(PointStruct::new(
             id.clone(),
             vectors,
-            build_payload(chunk, &hash, &created_at, &now, library, source),
+            build_payload(
+                chunk,
+                &hash,
+                &created_at,
+                &now,
+                library,
+                source,
+                TYPE_MEMORY,
+            ),
         ));
     }
 
@@ -697,6 +736,7 @@ fn build_payload(
     updated_at: &str,
     library: &str,
     source: Option<&str>,
+    mem_type: &str,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("content".into(), content.into());
@@ -704,6 +744,8 @@ fn build_payload(
     payload.insert("created_at".into(), created_at.into());
     payload.insert("updated_at".into(), updated_at.into());
     payload.insert("library".into(), library.into());
+    // `type` (phase Д2): defaults to "memory"; "procedure" for Д6 playbooks.
+    payload.insert("type".into(), mem_type.into());
     if let Some(src) = source {
         payload.insert("source".into(), src.into());
     }
@@ -803,6 +845,14 @@ pub async fn search(
     }
 
     cands.truncate(limit);
+
+    // Record which memories were surfaced, for decay (phase Д2/Д4). In-process
+    // only - NOT a Qdrant write on the read path (audit #5). IDs are unaffected
+    // by the display-only truncation below, so collect them first.
+    let now = chrono::Utc::now().to_rfc3339();
+    let surfaced: Vec<String> = cands.iter().map(|c| c.id.clone()).collect();
+    crate::access::record(&surfaced, &now);
+
     for c in &mut cands {
         c.content = match tier {
             1 => truncate_str(&c.content, 100),
@@ -812,6 +862,46 @@ pub async fn search(
     }
 
     Ok(cands)
+}
+
+/// Top-1 dense cosine similarity of `content` against existing memories
+/// (optionally scoped to a library). Pure read: no write, no rerank, no sparse -
+/// just the single nearest neighbor's cosine score. This is the near-duplicate
+/// check the original audit listed as the still-missing #8; auto-ingest
+/// (PR3) and consolidation (PR2) use it to spot a near-dup of new content before
+/// writing it. Returns `None` when there is nothing to compare against (empty or
+/// missing collection). Score is cosine in 0..1 (Qdrant cosine similarity);
+/// callers compare it against a threshold.
+// Consumed by auto-ingest (PR3) and consolidation (PR2); lands here so the
+// near-dup primitive (the missing audit #8) is reviewed on its own.
+#[allow(dead_code)]
+pub async fn nearest_score(
+    config: &MindConfig,
+    library: Option<&str>,
+    content: &str,
+) -> Result<Option<f32>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    let embedding = embedder::embed_passage(config, content).await?;
+    check_dim(&embedding, config)?;
+
+    let mut q = QueryPointsBuilder::new(MEMORIES_COLLECTION)
+        .query(Query::new_nearest(VectorInput::new_dense(embedding)))
+        .using(DENSE_VEC)
+        .limit(1u64);
+    if let Some(lib) = library {
+        q = q.filter(library_filter(lib));
+    }
+
+    let response = client.query(q).await.context("near-dup query failed")?;
+    Ok(response.result.into_iter().next().map(|p| p.score))
 }
 
 pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Result<()> {
@@ -1064,7 +1154,15 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, 
             };
             let id = deterministic_id(lib, &content);
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-            let payload = build_payload(&content, &hash, &created_at, &now, lib, source.as_deref());
+            let payload = build_payload(
+                &content,
+                &hash,
+                &created_at,
+                &now,
+                lib,
+                source.as_deref(),
+                TYPE_MEMORY,
+            );
             let (s_idx, s_val) = sparse_vector(&content);
             let vectors = NamedVectors::default()
                 .add_vector(DENSE_VEC, Vector::new_dense(embedding))
