@@ -373,6 +373,12 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             crate::cli::run_fact_invalidate(id).await
         }
 
+        // Test-only handler that panics, so a test can prove the panic-isolation
+        // wrapper in `tools/call` turns a handler panic into an `isError` result
+        // instead of unwinding through the read loop and killing the session.
+        #[cfg(test)]
+        "mind_test_panic" => panic!("boom (test panic)"),
+
         other => Err(anyhow::anyhow!("unknown tool: {other}")),
     }
 }
@@ -670,6 +676,42 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("mgimind init")
+        );
+    }
+
+    /// A panic inside a tool handler must NOT escape the read loop (single-process
+    /// risk): `tools/call` catches it and returns a normal JSON-RPC success
+    /// envelope carrying an `isError` tool result, so the session survives.
+    #[tokio::test]
+    async fn tool_handler_panic_is_isolated_as_iserror() {
+        // Silence the default panic hook so the caught panic doesn't print a scary
+        // backtrace during this (intentional) test.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": { "name": "mind_test_panic", "arguments": {} }
+        });
+        let resp = handle_message(None, msg)
+            .await
+            .expect("a request always gets a response");
+
+        std::panic::set_hook(prev);
+
+        // It is a `result` (not a protocol `error`), and the result is an isError
+        // tool message that surfaces the panic - exactly what keeps the client
+        // from concluding the server itself broke.
+        assert!(resp.get("error").is_none(), "must not be a protocol error");
+        let result = &resp["result"];
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("panic"), "should surface the panic: {text}");
+        assert!(
+            text.contains("boom (test panic)"),
+            "should include the panic message: {text}"
         );
     }
 }
