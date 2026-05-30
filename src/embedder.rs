@@ -64,6 +64,26 @@ pub async fn embed_passage(config: &MindConfig, text: &str) -> Result<Vec<f32>> 
     embed_prefixed(config, &config.passage_prefix, text).await
 }
 
+/// Embed many documents in ONE padded ONNX pass (audit #2). The reranker already
+/// batches `[N, seq]`; the embedder did not, so a long note of N chunks meant N
+/// sequential model runs. This runs them as a single `[N, max_len]` batch -
+/// the throughput win for `add` of long content (and bulk import). The passage
+/// prefix is applied per text, exactly like `embed_passage`.
+pub async fn embed_passages(config: &MindConfig, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let prefixed: Vec<String> = if config.passage_prefix.is_empty() {
+        texts.to_vec()
+    } else {
+        texts
+            .iter()
+            .map(|t| format!("{}{t}", config.passage_prefix))
+            .collect()
+    };
+    embed_batch(config, &prefixed).await
+}
+
 async fn embed_prefixed(config: &MindConfig, prefix: &str, text: &str) -> Result<Vec<f32>> {
     if prefix.is_empty() {
         embed(config, text).await
@@ -148,6 +168,100 @@ pub async fn embed(config: &MindConfig, text: &str) -> Result<Vec<f32>> {
     l2_normalize(&mut pooled);
 
     Ok(pooled)
+}
+
+/// Embed a batch of already-prefixed texts in a single padded ONNX pass (audit
+/// #2). Right-pads every sequence to the batch max (capped at `MAX_SEQ_LEN`),
+/// runs one `[N, max_len]` inference, then pools each row with its own mask -
+/// identical math to the single-text `embed`, just N at a time.
+async fn embed_batch(config: &MindConfig, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let session_lock = session(config)?;
+    let tokenizer = get_tokenizer(config)?;
+
+    let mut encodings = Vec::with_capacity(texts.len());
+    for t in texts {
+        let enc = tokenizer
+            .encode(t.as_str(), true)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
+        encodings.push(enc);
+    }
+
+    let n = encodings.len();
+    // Cap to the model's max sequence length, exactly like the single path.
+    let max_len = encodings
+        .iter()
+        .map(|e| e.get_ids().len())
+        .max()
+        .unwrap_or(1)
+        .clamp(1, MAX_SEQ_LEN);
+
+    // Right-pad every sequence (pad id 0, mask 0) into rectangular [n, max_len]
+    // buffers. Padded tokens carry mask 0, so masked mean pooling ignores them.
+    let mut ids = vec![0i64; n * max_len];
+    let mut mask = vec![0i64; n * max_len];
+    let mut types = vec![0i64; n * max_len];
+    for (i, enc) in encodings.iter().enumerate() {
+        let eids = enc.get_ids();
+        let emask = enc.get_attention_mask();
+        let etypes = enc.get_type_ids();
+        let len = eids.len().min(max_len);
+        for j in 0..len {
+            ids[i * max_len + j] = eids[j] as i64;
+            mask[i * max_len + j] = emask[j] as i64;
+            types[i * max_len + j] = etypes[j] as i64;
+        }
+    }
+
+    let mut session = session_lock
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Session lock poisoned: {e}"))?;
+
+    let ids_value = Value::from_array(([n, max_len], ids))
+        .map_err(|e| anyhow::anyhow!("Failed to create input_ids tensor: {e}"))?;
+    let mask_value = Value::from_array(([n, max_len], mask.clone()))
+        .map_err(|e| anyhow::anyhow!("Failed to create attention_mask tensor: {e}"))?;
+
+    use ort::session::SessionInputValue;
+    let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> = vec![
+        (std::borrow::Cow::from("input_ids"), ids_value.into()),
+        (std::borrow::Cow::from("attention_mask"), mask_value.into()),
+    ];
+    if config.uses_token_type_ids {
+        let type_value = Value::from_array(([n, max_len], types))
+            .map_err(|e| anyhow::anyhow!("Failed to create token_type_ids tensor: {e}"))?;
+        inputs.push((std::borrow::Cow::from("token_type_ids"), type_value.into()));
+    }
+
+    let outputs = session
+        .run(inputs)
+        .map_err(|e| anyhow::anyhow!("Inference failed: {e}"))?;
+
+    let (shape, data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| anyhow::anyhow!("Failed to extract output tensor: {e}"))?;
+
+    let hidden = if shape.len() == 3 {
+        shape[2] as usize
+    } else {
+        config.vector_size as usize
+    };
+
+    // Pool each row independently using that row's slice of the [n, max_len,
+    // hidden] output and its own attention mask.
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let row = &data[i * max_len * hidden..(i + 1) * max_len * hidden];
+        let row_mask = &mask[i * max_len..(i + 1) * max_len];
+        let mut pooled = if config.pooling == "cls" {
+            cls_pool(row, hidden)
+        } else {
+            mean_pool(row, row_mask, max_len, hidden)
+        };
+        l2_normalize(&mut pooled);
+        out.push(pooled);
+    }
+
+    Ok(out)
 }
 
 /// Attention-masked mean pooling over the token dimension of a `[1, seq_len,

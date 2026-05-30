@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use qdrant_client::qdrant::{
-    PointStruct, PointsIdsList, SetPayloadPointsBuilder, UpsertPointsBuilder,
+    Condition, Filter, NamedVectors, PointStruct, PointsIdsList, ScrollPointsBuilder,
+    SetPayloadPointsBuilder, UpsertPointsBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::config::MindConfig;
-use crate::embedder;
 use crate::storage;
 
 /// Namespace for deterministic fact IDs - dedup by (subject, predicate, object) (audit #13).
@@ -48,13 +48,11 @@ pub async fn add_fact(
     object: &str,
 ) -> Result<String> {
     let client = storage::get_client(config).await?;
-    storage::ensure_facts_collection(&client, config.vector_size).await?;
+    storage::ensure_facts_collection(&client).await?;
 
-    let text = format!("{subject} {predicate} {object}");
-    let embedding = embedder::embed_passage(config, &text).await?;
-    // Same model-swap guard the memory path has (audit #11): the facts
-    // collection was previously left unprotected.
-    storage::check_dim(&embedding, config)?;
+    // Facts are vectorless (audit #6): they're looked up by exact/lexical payload
+    // match, never by vector, so we no longer pay an embedding inference or store
+    // a dead 768-dim vector per fact.
 
     // Deterministic ID dedups identical triples (audit #13): re-adding the same
     // (s,p,o) overwrites instead of piling up duplicates.
@@ -75,7 +73,8 @@ pub async fn add_fact(
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
 
-    let point = PointStruct::new(id.clone(), embedding, payload);
+    // Payload-only point (NamedVectors::default() is empty - no vector stored).
+    let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
 
     client
         .upsert_points(UpsertPointsBuilder::new(storage::FACTS_COLLECTION, vec![point]).wait(true))
@@ -85,9 +84,11 @@ pub async fn add_fact(
     Ok(id)
 }
 
-/// Query facts by matching the term against subject, predicate, OR object -
-/// via a full scroll + filter, so nothing is silently dropped outside a vector
-/// top-K window (audit #12). Only valid (non-invalidated) facts are returned.
+/// Query facts whose subject, predicate, OR object matches the term, filtered
+/// SERVER-SIDE (audit #6): `valid = true` AND a full-text match on any of the
+/// three fields. Qdrant returns only the matching facts (using the payload
+/// indexes), instead of scrolling the whole collection into RAM and filtering
+/// in process. Matching is full-text (tokenized) rather than raw substring.
 pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> {
     let client = storage::get_client(config).await?;
     if !client
@@ -98,49 +99,58 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         return Ok(Vec::new());
     }
 
-    let points = storage::scroll_all(&client, storage::FACTS_COLLECTION).await?;
-    let needle = query.to_lowercase();
+    // valid = true AND (subject ~ q OR predicate ~ q OR object ~ q).
+    let filter = Filter {
+        must: vec![Condition::matches("valid", "true".to_string())],
+        should: vec![
+            Condition::matches_text("subject", query),
+            Condition::matches_text("predicate", query),
+            Condition::matches_text("object", query),
+        ],
+        ..Default::default()
+    };
+
     let mut facts = Vec::new();
-
-    for point in points {
-        let p = &point.payload;
-
-        if extract_string(p, "valid").as_deref() != Some("true") {
-            continue;
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
         }
 
-        let subject = extract_string(p, "subject").unwrap_or_default();
-        let predicate = extract_string(p, "predicate").unwrap_or_default();
-        let object = extract_string(p, "object").unwrap_or_default();
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            let id = point
+                .id
+                .as_ref()
+                .map(|pid| {
+                    use qdrant_client::qdrant::point_id::PointIdOptions;
+                    match &pid.point_id_options {
+                        Some(PointIdOptions::Uuid(u)) => u.clone(),
+                        Some(PointIdOptions::Num(n)) => n.to_string(),
+                        None => "unknown".to_string(),
+                    }
+                })
+                .unwrap_or_default();
 
-        let matches = subject.to_lowercase().contains(&needle)
-            || predicate.to_lowercase().contains(&needle)
-            || object.to_lowercase().contains(&needle);
-        if !matches {
-            continue;
+            facts.push(Fact {
+                id,
+                subject: extract_string(p, "subject").unwrap_or_default(),
+                predicate: extract_string(p, "predicate").unwrap_or_default(),
+                object: extract_string(p, "object").unwrap_or_default(),
+                created_at: extract_string(p, "created_at"),
+                valid: true,
+            });
         }
 
-        let id = point
-            .id
-            .as_ref()
-            .map(|pid| {
-                use qdrant_client::qdrant::point_id::PointIdOptions;
-                match &pid.point_id_options {
-                    Some(PointIdOptions::Uuid(u)) => u.clone(),
-                    Some(PointIdOptions::Num(n)) => n.to_string(),
-                    None => "unknown".to_string(),
-                }
-            })
-            .unwrap_or_default();
-
-        facts.push(Fact {
-            id,
-            subject,
-            predicate,
-            object,
-            created_at: extract_string(p, "created_at"),
-            valid: true,
-        });
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
     }
 
     Ok(facts)

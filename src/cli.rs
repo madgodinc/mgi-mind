@@ -301,7 +301,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn cmd_migrate(purge: bool) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     println!(
         "Migrating legacy per-library collections into '{}'...",
         crate::storage::MEMORIES_COLLECTION
@@ -522,7 +522,7 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
 
     // Check embedding model
     if config::is_initialized() {
-        let cfg = crate::config::MindConfig::load()?;
+        let cfg = crate::config::load_cached()?;
         if crate::embedder::is_model_downloaded(&cfg) {
             let _ = writeln!(out, "[OK]   Embedding model");
         } else {
@@ -602,13 +602,13 @@ async fn cmd_create(name: &str) -> Result<()> {
 }
 
 pub(crate) async fn run_create(name: &str) -> Result<String> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     crate::storage::create_library(&config, name).await?;
     Ok(format!("Library '{name}' created."))
 }
 
 async fn cmd_drop(name: &str) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     crate::storage::drop_library(&config, name).await?;
     println!("Library '{name}' dropped.");
     Ok(())
@@ -621,7 +621,7 @@ async fn cmd_list() -> Result<()> {
 
 pub(crate) async fn run_list() -> Result<String> {
     use std::fmt::Write;
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let libraries = crate::storage::list_libraries(&config).await?;
     if libraries.is_empty() {
         return Ok("No libraries. Create one with `mgimind create <name>`".to_string());
@@ -639,7 +639,7 @@ async fn cmd_delete(library: &str, id: &str) -> Result<()> {
 }
 
 pub(crate) async fn run_delete(library: &str, id: &str) -> Result<String> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     crate::storage::delete_memory(&config, library, id).await?;
     Ok(format!("Deleted from '{library}' [id: {id}]"))
 }
@@ -729,7 +729,7 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
 }
 
 async fn cmd_context() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     print!("{}", build_context(&config).await?);
     Ok(())
 }
@@ -751,7 +751,7 @@ pub(crate) fn render_history(results: &[crate::storage::SearchResult]) -> String
 }
 
 async fn cmd_history(limit: usize) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let results = crate::storage::history(&config, limit).await?;
     println!("{}", render_history(&results));
     Ok(())
@@ -782,7 +782,7 @@ pub(crate) async fn run_web(url: &str, save_to: Option<&str>) -> Result<String> 
     }
 
     if let Some(library) = save_to {
-        let config = crate::config::MindConfig::load()?;
+        let config = crate::config::load_cached()?;
         // add_memory chunks long content itself (audit #3).
         let n = crate::storage::add_memory(&config, library, markdown.trim(), Some(url)).await?;
         Ok(format!("Saved {n} chunk(s) from {url} to '{library}'"))
@@ -792,7 +792,7 @@ pub(crate) async fn run_web(url: &str, save_to: Option<&str>) -> Result<String> 
 }
 
 async fn cmd_add(library: &str, content: &str, source: Option<&str>) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let n = crate::storage::add_memory(&config, library, content, source).await?;
     println!("Added {n} chunk(s) to '{library}'");
     Ok(())
@@ -825,14 +825,14 @@ pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String 
 }
 
 async fn cmd_search(query: &str, library: Option<&str>, limit: usize, tier: u8) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let results = crate::storage::search(&config, query, library, limit, tier).await?;
     println!("{}", render_search(&results));
     Ok(())
 }
 
 async fn cmd_fact_add(subject: &str, predicate: &str, object: &str) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let id = crate::knowledge::add_fact(&config, subject, predicate, object).await?;
     println!("Fact added: {subject} -> {predicate} -> {object} [id: {id}]");
     Ok(())
@@ -855,7 +855,7 @@ pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> S
 }
 
 async fn cmd_fact_query(subject: &str) -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let facts = crate::knowledge::query_facts(&config, subject).await?;
     println!("{}", render_facts(subject, &facts));
     Ok(())
@@ -867,7 +867,7 @@ async fn cmd_fact_invalidate(id: &str) -> Result<()> {
 }
 
 pub(crate) async fn run_fact_invalidate(id: &str) -> Result<String> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     crate::knowledge::invalidate_fact(&config, id).await?;
     Ok(format!("Fact '{id}' invalidated."))
 }
@@ -924,7 +924,7 @@ async fn cmd_export(format: &str, output: Option<&str>) -> Result<()> {
 }
 
 pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<String> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let out = output.unwrap_or("./mgimind-export");
     let count = crate::storage::export_all(&config, format, out).await?;
     Ok(format!(
@@ -941,7 +941,7 @@ async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
 
 pub(crate) async fn run_import(source: &str, path: &str, library: &str) -> Result<String> {
     use std::fmt::Write;
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     let dir = std::path::Path::new(path);
 
     if !dir.exists() || !dir.is_dir() {
@@ -1068,7 +1068,7 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
 }
 
 async fn cmd_stats() -> Result<()> {
-    let config = crate::config::MindConfig::load()?;
+    let config = crate::config::load_cached()?;
     println!("{}", build_stats(&config).await?);
     Ok(())
 }
@@ -1250,7 +1250,7 @@ fn spawn_qdrant_detached() -> Result<u32> {
         .stderr(std::process::Stdio::null());
 
     // Optional API-key authentication (audit #7).
-    if let Ok(cfg) = crate::config::MindConfig::load()
+    if let Ok(cfg) = crate::config::load_cached()
         && let Some(key) = cfg.qdrant_api_key
     {
         command.env("QDRANT__SERVICE__API_KEY", key);
@@ -1335,7 +1335,7 @@ async fn cmd_serve() -> Result<()> {
 /// so a mismatch is reported up front instead of as a raw Qdrant error on the
 /// first add. Never fails serve - memory must still come up.
 async fn warn_on_dimension_mismatch() {
-    let Ok(cfg) = crate::config::MindConfig::load() else {
+    let Ok(cfg) = crate::config::load_cached() else {
         return;
     };
     if let Ok(mismatches) = crate::storage::dimension_mismatches(&cfg).await
