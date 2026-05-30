@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased - auto-memory (Д2) and procedural memory (Д6)
+
+Memory the system helps build and curate, not just a manual store. Built on the
+single-process 0.8 foundation. See `docs/PHASE_D2_D6.md` for the design and the two
+hard invariants (no auto-write before consolidation; no proactive `verified` without a
+truth signal).
+
+### Added
+- **`mind_ingest`** - auto-extraction. Agent-driven primary path: send a `candidates`
+  array of typed items (memory / fact / procedure) you judged worth keeping. Heuristic
+  backstop: pass `raw` text for marker-based extraction. Every candidate is
+  secret-scrubbed and memories are near-duplicate-checked before writing. No LLM.
+- **`mgimind consolidate`** - the mandatory companion to auto-write. Merges exact and
+  near-duplicates (cosine, via each point's stored vector - no re-embedding) and reports
+  cold (old + never-accessed) entries. Dry-run by default; `--apply` to act,
+  `--prune-cold` (opt-in) to also delete cold entries.
+- **Procedural memory** - `mind_learn` (record an error -> fix lesson),
+  `mind_recall` (retrieve playbooks by normalized error signature and/or task context,
+  verified-first), `mind_procedure_outcome` (record whether a reused fix worked, so the
+  store self-corrects). `verified` is set true only by a caller with a deterministic
+  signal; manual lessons stay unverified and low-weight.
+- **Secret scrub** - a conservative, regex-free detector (PEM keys, AWS/GitHub/GitLab/
+  Slack/Google/`sk-`/JWT tokens, `.env`-style assignments) now guards every write path,
+  so a key or password can no longer land in searchable memory.
+- **Access counters** - search hits are counted in process and flushed to a small
+  journal (reads stay read-only to Qdrant); consolidation uses this for decay.
+- **`type` payload field + index** on the memories collection, so notes and procedures
+  share one collection while normal search excludes procedures.
+
 ## 0.8.0 - one cross-platform binary that is itself the MCP server
 
 A single Rust binary now speaks MCP over stdio directly (`mgimind mcp`), replacing the
