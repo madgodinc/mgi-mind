@@ -164,13 +164,14 @@ fn add_then_search_finds_the_memory() {
     };
 
     // create -> add a distinctive memory -> search a paraphrase -> assert it is found.
-    assert!(run(&["create", &lib]).0);
-    let (ok, _out, err) = run(&[
+    let (ok, out, err) = run(&["create", &lib]);
+    assert!(ok, "create failed:\nstdout:\n{out}\nstderr:\n{err}");
+    let (ok, out, err) = run(&[
         "add",
         &lib,
         "The Eiffel Tower stands in Paris and was completed in 1889.",
     ]);
-    assert!(ok, "add failed: {err}");
+    assert!(ok, "add failed:\nstdout:\n{out}\nstderr:\n{err}");
 
     let (ok, out, err) = run(&[
         "search",
@@ -257,26 +258,42 @@ fn mcp_add_then_search_roundtrip() {
         .output(); // cleanup regardless of assertions
 
     // Every non-empty stdout line must be valid JSON-RPC - no stray prints.
+    // Collect each request's tool-result text by id so a failure can show the
+    // whole chain (create id2, add id3, search id4), not just the last step.
+    let mut results: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     let mut search_text = None;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("non-JSON on stdout: {e}\n{line}"));
-        if v.get("id").and_then(serde_json::Value::as_i64) == Some(4) {
-            assert_eq!(
-                v["result"]["isError"], false,
-                "search reported isError\n{line}"
-            );
-            search_text = v["result"]["content"][0]["text"]
+        if let Some(id) = v.get("id").and_then(serde_json::Value::as_i64) {
+            let is_err = v["result"]["isError"].as_bool().unwrap_or(false);
+            let text = v["result"]["content"][0]["text"]
                 .as_str()
-                .map(str::to_owned);
+                .unwrap_or("")
+                .to_owned();
+            results.insert(id, format!("isError={is_err} text={text}"));
+            if id == 4 {
+                search_text = Some((is_err, text));
+            }
         }
     }
 
-    let text = search_text.unwrap_or_else(|| {
-        panic!("no search response (id 4)\nstdout:\n{stdout}\nstderr:\n{stderr}")
-    });
+    // Dump the full create/add/search chain + stderr on any failure below.
+    let chain = || {
+        format!(
+            "create(id2): {}\nadd(id3): {}\nsearch(id4): {}\n--- stderr ---\n{stderr}",
+            results.get(&2).map(String::as_str).unwrap_or("<missing>"),
+            results.get(&3).map(String::as_str).unwrap_or("<missing>"),
+            results.get(&4).map(String::as_str).unwrap_or("<missing>"),
+        )
+    };
+
+    let (is_err, text) =
+        search_text.unwrap_or_else(|| panic!("no search response (id 4)\n{}", chain()));
+    assert!(!is_err, "search reported isError\n{}", chain());
     assert!(
         text.contains("Eiffel Tower") && text.contains("Paris"),
-        "MCP search should retrieve the added memory, got:\n{text}"
+        "MCP search should retrieve the added memory.\n{}",
+        chain()
     );
 }
