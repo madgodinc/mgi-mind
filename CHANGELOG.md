@@ -28,6 +28,10 @@ truth signal).
   journal (reads stay read-only to Qdrant); consolidation uses this for decay.
 - **`type` payload field + index** on the memories collection, so notes and procedures
   share one collection while normal search excludes procedures.
+- **`mgimind bench` (Д1)** - retrieval-recall (R@k) benchmark on LongMemEval, zero-API
+  (no LLM, no keys). Ingests each question's haystack into an isolated library, runs
+  hybrid search, reports R@1/5/10 overall + per question type, writes raw results.
+  Explicitly NOT QA accuracy; see `BENCHMARKS.md` for the metric discipline.
 
 ## 0.8.0 - one cross-platform binary that is itself the MCP server
 
