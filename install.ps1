@@ -57,6 +57,26 @@ try {
         Die "download failed (release for $target may not exist yet; check https://github.com/$Repo/releases): $_"
     }
 
+    # Fetch and verify the SHA-256 checksum published alongside the asset.
+    # Fail closed: if the .sha256 file is missing OR the hash mismatches, we
+    # do not install. Pipe-to-shell installs are the canonical place to insist on this.
+    Write-Host "Verifying SHA-256"
+    $shaFile = Join-Path $tmp "$asset.sha256"
+    try {
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaFile -UseBasicParsing
+    } catch {
+        Die "checksum file missing at $url.sha256 — refusing to install unverified binary: $_"
+    }
+    $expectedHex = ((Get-Content -Raw $shaFile) -split '\s+')[0].ToLower()
+    if ([string]::IsNullOrWhiteSpace($expectedHex)) {
+        Die "checksum file at $url.sha256 is empty or malformed"
+    }
+    $actualHex = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+    if ($actualHex -ne $expectedHex) {
+        Die "SHA-256 mismatch — refusing to install (expected $expectedHex, got $actualHex)"
+    }
+    Write-Host "Checksum OK ($expectedHex)"
+
     Write-Host "Extracting to $InstallDir"
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     $src = Join-Path $tmp $BinName
