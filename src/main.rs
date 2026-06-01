@@ -1,4 +1,5 @@
 mod access;
+mod bench;
 mod cli;
 mod config;
 mod consolidate;

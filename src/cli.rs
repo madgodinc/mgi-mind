@@ -162,6 +162,22 @@ pub enum Commands {
         purge: bool,
     },
 
+    /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
+    /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
+    Bench {
+        /// Path to the dataset JSON (e.g. longmemeval_s.json)
+        dataset: String,
+        /// Dataset format
+        #[arg(long, default_value = "longmemeval")]
+        format: String,
+        /// Run only the first N questions (smoke test; full runs are long on CPU)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Write raw per-question results to this JSON file
+        #[arg(long)]
+        output: Option<String>,
+    },
+
     /// Consolidate memory: merge duplicates / near-duplicates and report cold
     /// (old, unused) entries (phase Д2). Dry-run unless --apply.
     Consolidate {
@@ -317,6 +333,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
+        Commands::Bench {
+            dataset,
+            format,
+            limit,
+            output,
+        } => cmd_bench(&dataset, &format, limit, output.as_deref()).await,
         Commands::Consolidate {
             apply,
             library,
@@ -334,6 +356,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
     }
+}
+
+async fn cmd_bench(
+    dataset: &str,
+    format: &str,
+    limit: Option<usize>,
+    output: Option<&str>,
+) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let report = match format {
+        "longmemeval" => crate::bench::run_longmemeval(&config, dataset, limit, output).await?,
+        other => anyhow::bail!("unknown bench format '{other}' (supported: longmemeval)"),
+    };
+    println!("{report}");
+    Ok(())
 }
 
 async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
