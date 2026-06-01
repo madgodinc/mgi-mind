@@ -90,30 +90,53 @@ MGI-Mind - это собранная локальная версия: гибри
 
 ## Быстрый старт
 
-Один бинарь, три шага, всё из терминала. Без тулчейна для сборки, без Node, без сервиса,
-за которым надо следить.
+Одна команда. Установщик качает бинарь под твою ОС, кладёт его в PATH и сам
+запускает `init` + `doctor --fix` (это вытянет Qdrant, ONNX Runtime и модели).
+
+**Linux / macOS:**
 
 ```bash
-# 1. Возьми бинарь под свою ОС из Releases (или собери из исходников, ниже) и положи
-#    его в PATH. В примерах он называется `mgimind`.
-
-# 2. Настройка: создаёт ~/mgimind/, затем качает Qdrant, ONNX Runtime и модели
-mgimind init
-mgimind doctor --fix
-
-# 3. Подключи к ассистенту. `mgimind mcp` И ЕСТЬ MCP-сервер; Qdrant он поднимает сам,
-#    так что больше ничего запускать не надо.
-claude mcp add mgimind -- /абсолютный/путь/mgimind mcp
+curl -fsSL https://raw.githubusercontent.com/madgodinc/mgi-mind/main/install.sh | sh
 ```
 
-Готово. `mgimind mcp` живёт всю сессию с тёплыми моделями; встроенный Qdrant он
-поднимает при первом обращении. Один раз покажи ассистенту
-[`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md), чтобы он знал протокол (логировать сессию,
-искать перед ответом, секреты - в vault).
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/madgodinc/mgi-mind/main/install.ps1 | iex
+```
+
+В конце он печатает готовую команду для подключения к Claude Code:
+
+```bash
+claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
+```
+
+Готово. `mgimind mcp` И ЕСТЬ MCP-сервер; он живёт всю сессию с тёплыми моделями и
+сам поднимает встроенный Qdrant при первом обращении - отдельный сервис не нужен.
+Один раз покажи ассистенту [`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md), чтобы он знал
+протокол (логировать сессию, искать перед ответом, секреты - в vault).
 
 `doctor --fix` кладёт в `~/mgimind/`: ONNX Runtime (библиотеку, которую грузит
 эмбеддер), бинарь Qdrant, модель эмбеддингов (multilingual-e5-base, квантованный ONNX,
 ~270 МБ) и реранкер (bge-reranker-base, ~280 МБ).
+
+### Параметры установщика
+
+- `INSTALL_DIR=/opt/mgimind curl ... | sh` - поставить не в `~/.local/bin`, а куда укажешь.
+- `MGIMIND_TAG=v0.8.0 curl ... | sh` - зафиксировать конкретный релиз вместо `latest`.
+- `SKIP_DOCTOR=1 curl ... | sh` - только положить бинарь; `init` + `doctor --fix` запустишь сам.
+
+### Установка вручную (без установщика)
+
+Если не хочешь скармливать sh-скрипт в шелл - возьми архив релиза под свою ОС из
+[Releases](https://github.com/madgodinc/mgi-mind/releases/latest), положи `mgimind` в
+PATH, потом:
+
+```bash
+mgimind init
+mgimind doctor --fix
+claude mcp add mgimind -- /абсолютный/путь/mgimind mcp
+```
 
 **Проба из CLI** (по желанию - тот же бинарь работает как обычный инструмент командной
 строки):

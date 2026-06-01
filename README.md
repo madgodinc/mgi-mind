@@ -89,30 +89,54 @@ never leaves the machine.
 
 ## Quick start
 
-One binary, three steps, all in the terminal. No build toolchain, no Node, no manual
-service to babysit.
+One command. The installer downloads the binary for your OS, drops it on PATH, and
+runs `init` + `doctor --fix` (which pulls Qdrant, ONNX Runtime, and the models).
+
+**Linux / macOS:**
 
 ```bash
-# 1. Get the binary for your OS from Releases (or build from source, below) and put it
-#    on your PATH. Examples assume it is called `mgimind`.
-
-# 2. Set up: create ~/mgimind/, then download Qdrant, ONNX Runtime, and the models
-mgimind init
-mgimind doctor --fix
-
-# 3. Wire it into your assistant. `mgimind mcp` IS the MCP server; it starts Qdrant
-#    itself, so there is nothing else to run.
-claude mcp add mgimind -- /absolute/path/to/mgimind mcp
+curl -fsSL https://raw.githubusercontent.com/madgodinc/mgi-mind/main/install.sh | sh
 ```
 
-That's it. `mgimind mcp` runs for the whole session with the models warm; it brings up
-the bundled Qdrant on first use. Point your assistant at
-[`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md) once so it knows the protocol (log a session,
-search before answering, use the vault for secrets).
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/madgodinc/mgi-mind/main/install.ps1 | iex
+```
+
+When it finishes it prints the exact command to wire the server into Claude Code:
+
+```bash
+claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
+```
+
+That's it. `mgimind mcp` IS the MCP server; it runs for the whole session with the
+models warm and brings up the bundled Qdrant on first use - there is no separate
+service to babysit. Point your assistant at [`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md)
+once so it knows the protocol (log a session, search before answering, use the vault
+for secrets).
 
 `doctor --fix` downloads into `~/mgimind/`: ONNX Runtime (the library the embedder
 loads), the Qdrant binary, the embedding model (multilingual-e5-base, quantized ONNX,
 about 270 MB) and the reranker (bge-reranker-base, quantized ONNX, about 280 MB).
+
+### Installer knobs
+
+- `INSTALL_DIR=/opt/mgimind curl ... | sh` - install somewhere other than `~/.local/bin`.
+- `MGIMIND_TAG=v0.8.0 curl ... | sh` - pin a specific release instead of `latest`.
+- `SKIP_DOCTOR=1 curl ... | sh` - just drop the binary; run `init` + `doctor --fix` yourself later.
+
+### Manual install (no installer)
+
+If you would rather not pipe a script to a shell, grab the release tarball for your OS
+from [Releases](https://github.com/madgodinc/mgi-mind/releases/latest), put `mgimind`
+on your PATH, then:
+
+```bash
+mgimind init
+mgimind doctor --fix
+claude mcp add mgimind -- /absolute/path/to/mgimind mcp
+```
 
 **Try it from the CLI** (optional - the same binary is a normal command-line tool):
 
