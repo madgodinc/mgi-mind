@@ -132,7 +132,11 @@ mgimind search "怎么连到部署服务器"
 
 ### 各系统注意事项
 
-- **Linux / macOS。** 上面的步骤可直接用。在 macOS 上，首次运行下载来的程序可能需要
+- **Linux x86_64、macOS arm64（Apple Silicon）、Windows x86_64。** 每次发布都附带
+  现成程序。安装脚本会自动选对的那个。
+- **macOS Intel（x86_64）。** 没有现成程序。GitHub 托管的 `macos-13` 运行器排队 20-30+
+  分钟，且正在逐步淘汰，所以已从发布矩阵移除。请从源码构建（下一节），只需几分钟。
+- **macOS 首次运行的隔离。** 下载的程序首次运行可能需要
   `xattr -d com.apple.quarantine /path/to/mgimind`，或在 Finder 里右键 -> 打开一次。
 - **Windows。** SmartScreen 可能对未签名的 `mgimind.exe` 报警（“Windows 已保护你的电脑”）-
   选择 **更多信息 -> 仍要运行**。杀毒软件也可能隔离程序或它下载的模型；如果 `mgimind doctor`

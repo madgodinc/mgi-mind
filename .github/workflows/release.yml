@@ -21,10 +21,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Intel Mac (macos-13 runner) is intentionally omitted: GitHub's hosted
+          # macos-13 queue sits for 20-30+ minutes and is being phased out. Intel
+          # Mac users build from source ("Build from source" in README). When
+          # ort/ONNX has a clean cross-compile story from arm64, this can move
+          # to a cross-build on macos-latest instead of a separate runner.
     steps:
       - uses: actions/checkout@v4
 
