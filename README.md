@@ -148,9 +148,13 @@ mgimind search "how do I reach the deploy box"
 
 ### Per-OS notes
 
-- **Linux / macOS.** The steps above work as-is. On macOS the first run of a downloaded
-  binary may need `xattr -d com.apple.quarantine /path/to/mgimind`, or right-click ->
-  Open once in Finder.
+- **Linux x86_64, macOS arm64 (Apple Silicon), Windows x86_64.** Prebuilt binaries
+  in every release. The installer picks the right one.
+- **macOS Intel (x86_64).** No prebuilt binary. GitHub's hosted `macos-13` runner
+  sits in queue for 20-30+ minutes and is being phased out, so it is omitted from
+  the release matrix. Build from source (next section); it takes a few minutes.
+- **macOS first-run quarantine.** A downloaded binary may need
+  `xattr -d com.apple.quarantine /path/to/mgimind`, or right-click -> Open once in Finder.
 - **Windows.** SmartScreen may warn on the unsigned `mgimind.exe` ("Windows protected
   your PC") - choose **More info -> Run anyway**. Antivirus can also quarantine the
   binary or the models it downloads; if `mgimind doctor` reports a file as downloaded
