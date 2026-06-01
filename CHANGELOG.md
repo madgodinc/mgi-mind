@@ -8,6 +8,19 @@ hard invariants (no auto-write before consolidation; no proactive `verified` wit
 truth signal).
 
 ### Added
+- **`mind_provenance_add`** - strict variant of `mind_add` for externally-sourced
+  snippets (code, doc, RFC quote, commit message). Provenance fields are required and
+  validated in Rust before any storage call: `origin_url` must be https + host in a
+  small allowlist (github.com, gitlab.com, bitbucket.org, sr.ht, codeberg.org,
+  grep.app, sourcegraph.com), `repo` matches `^[\w.-]+/[\w.-]+$`, `file` rejects
+  absolute paths and `..` traversal, `line_range` matches `^\d+(-\d+)?$`, and an
+  empty `search_tool_used` yields the actionable error
+  `"provenance source unknown — use mind_add instead"`. Dedup key is
+  `uuid_v5(NAMESPACE_PROVENANCE, library + snippet + origin_url + line_range)`, so
+  the same snippet from two different repos correctly produces two records (the
+  citation is part of the identity, not noise). No HTTP, no enrichment, no HTML
+  stripping — the agent passes plain UTF-8 or gets rejected. Tools count: 25 → 26.
+  Design: `docs/design/provenance-add.md`.
 - **`mind_ingest`** - auto-extraction. Agent-driven primary path: send a `candidates`
   array of typed items (memory / fact / procedure) you judged worth keeping. Heuristic
   backstop: pass `raw` text for marker-based extraction. Every candidate is

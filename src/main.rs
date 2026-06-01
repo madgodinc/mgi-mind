@@ -10,6 +10,7 @@ mod integrity;
 mod knowledge;
 mod mcp;
 mod procedure;
+mod provenance;
 mod reranker;
 mod secrets;
 mod session;
