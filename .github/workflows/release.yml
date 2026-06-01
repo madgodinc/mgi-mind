@@ -48,7 +48,15 @@ jobs:
           bin="target/${{ matrix.target }}/release/mgimind"
           out="mgimind-${{ matrix.target }}.tar.gz"
           tar -czf "$out" -C "$(dirname "$bin")" mgimind
+          # SHA-256 in the canonical `shasum -c`-compatible format ("<hex>  <name>")
+          # so install.sh can verify the download with one command.
+          if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$out" > "$out.sha256"
+          else
+              shasum -a 256 "$out" > "$out.sha256"
+          fi
           echo "ASSET=$out" >> "$GITHUB_ENV"
+          echo "ASSET_SHA=$out.sha256" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -57,10 +65,17 @@ jobs:
           $bin = "target/${{ matrix.target }}/release/mgimind.exe"
           $out = "mgimind-${{ matrix.target }}.zip"
           Compress-Archive -Path $bin -DestinationPath $out
-          "ASSET=$out" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Match the Unix `shasum -c` format ("<hex>  <name>") for consistency,
+          # even though install.ps1 parses the hex itself.
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $out).Hash.ToLower()
+          "$hash  $out" | Out-File -FilePath "$out.sha256" -Encoding ascii -NoNewline
+          "ASSET=$out"          | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ASSET_SHA=$out.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET_SHA }}
           fail_on_unmatched_files: true
