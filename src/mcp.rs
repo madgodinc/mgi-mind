@@ -223,7 +223,7 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     }
 }
 
-/// Map a tool name + arguments to its rendered text. All 25 tools are wired:
+/// Map a tool name + arguments to its rendered text. All 26 tools are wired:
 /// - 7 "warm" embed-path tools reuse the existing `render_*`/`build_*` helpers
 ///   + storage/knowledge functions, using the pre-loaded warm config;
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
@@ -259,6 +259,55 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let source = arg_str(args, "source");
             let n = crate::storage::add_memory(cfg, library, content, source).await?;
             Ok(format!("Added {n} chunk(s) to '{library}'"))
+        }
+        "mind_provenance_add" => {
+            // Strict variant of mind_add: provenance is required and validated.
+            // See docs/design/provenance-add.md and src/provenance.rs.
+            //
+            // Argument presence + validation run BEFORE `warm(...)` so a
+            // bad-args call returns an actionable message even on a system
+            // that has not been initialized yet (mirrors how the agent learns
+            // the surface from `tools/list` + a couple of probe calls).
+            let snippet = arg_str(args, "snippet")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'snippet'"))?;
+            let origin_url = arg_str(args, "origin_url")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'origin_url'"))?;
+            let search_tool_used = arg_str(args, "search_tool_used")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'search_tool_used'"))?;
+            let library = arg_str(args, "library").unwrap_or(crate::provenance::DEFAULT_LIBRARY);
+            let input = crate::provenance::ProvenanceInput {
+                library,
+                snippet,
+                origin_url,
+                repo: arg_str(args, "repo"),
+                file: arg_str(args, "file"),
+                line_range: arg_str(args, "line_range"),
+                lang: arg_str(args, "lang"),
+                search_tool_used,
+                note: arg_str(args, "note"),
+            };
+            // Validate BEFORE touching storage. Failures come back as plain
+            // tool-error text so the agent can self-correct.
+            if let Err(e) = crate::provenance::validate(&input) {
+                anyhow::bail!("{e}");
+            }
+            // Validation passed; now we need a live config to actually persist.
+            let cfg = warm(true)?;
+            let content = crate::provenance::format_content(&input);
+            let source = crate::provenance::source_tag(&input);
+            let id = crate::provenance::dedup_id(
+                input.library,
+                input.snippet,
+                input.origin_url,
+                input.line_range,
+            );
+            let n = crate::storage::add_memory(cfg, input.library, &content, Some(&source)).await?;
+            // `add_memory` is idempotent (UUIDv5 of library+content collapses
+            // repeat writes), so we always report success here — the dedup id
+            // surfaces the canonical provenance identifier.
+            Ok(format!(
+                "Saved {n} chunk(s) to '{library}' (provenance id: {id})"
+            ))
         }
         "mind_context" => {
             let cfg = warm(true)?;
@@ -433,7 +482,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
     }
 }
 
-/// The 25 tool definitions advertised by `tools/list`. Schemas are hand-written
+/// The 26 tool definitions advertised by `tools/list`. Schemas are hand-written
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
@@ -463,6 +512,25 @@ fn tool_definitions() -> Vec<Value> {
                     "source": { "type": "string", "description": "Source tag" }
                 },
                 "required": ["library", "content"]
+            }
+        }),
+        json!({
+            "name": "mind_provenance_add",
+            "description": "Persist an externally-sourced snippet (code, doc, RFC quote, commit message, etc.) into mgi-mind with a mandatory provenance citation. The agent supplies the snippet AS PLAIN UTF-8 — no HTML, no markup. Call this ONLY when the snippet was just produced by a code-search or doc-search MCP in the same session; do NOT fill provenance fields from memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library":          { "type": "string", "default": "external-snippets", "description": "Target library. Must exist (create with mind_create)." },
+                    "snippet":          { "type": "string", "description": "Raw text to store. Plain UTF-8. Must NOT contain HTML tags; the agent is responsible for stripping markup upstream." },
+                    "origin_url":       { "type": "string", "description": "https:// URL the snippet was lifted from. Host must be in the allowlist (github.com, gitlab.com, bitbucket.org, sr.ht, codeberg.org, grep.app, sourcegraph.com)." },
+                    "repo":             { "type": "string", "description": "Optional owner/repo when the source is a code host. Regex: ^[\\w.-]+/[\\w.-]+$." },
+                    "file":             { "type": "string", "description": "Optional path inside the repo. No leading '/', no '..' segments." },
+                    "line_range":       { "type": "string", "description": "Optional line range, e.g. \"42\" or \"42-58\". Regex: ^\\d+(-\\d+)?$." },
+                    "lang":             { "type": "string", "description": "Optional language tag (free string)." },
+                    "search_tool_used": { "type": "string", "description": "Identifier of the search source the agent used in THIS session, e.g. \"mcp.grep.app\", \"sourcegraph\", \"github code search\", \"local ripgrep\". REQUIRED. Empty rejects with 'provenance source unknown — use mind_add instead'." },
+                    "note":             { "type": "string", "description": "Optional one-liner the agent attaches (why this is worth keeping)." }
+                },
+                "required": ["snippet", "origin_url", "search_tool_used"]
             }
         }),
         json!({
@@ -698,13 +766,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_25_tools() {
+    fn exposes_all_26_tools() {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            25,
-            "tools/list must advertise exactly 25 tools"
+            26,
+            "tools/list must advertise exactly 26 tools"
         );
+    }
+
+    #[test]
+    fn provenance_add_is_listed() {
+        let tools = tool_definitions();
+        let found = tools
+            .iter()
+            .any(|t| t.get("name").and_then(Value::as_str) == Some("mind_provenance_add"));
+        assert!(found, "mind_provenance_add must appear in tools/list");
     }
 
     #[test]
@@ -741,10 +818,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_25() {
+    async fn tools_list_returns_26() {
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 25);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 26);
     }
 
     #[tokio::test]
@@ -781,6 +858,123 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("mgimind init")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // mind_provenance_add: argument + validation rejections must surface as
+    // `isError: true` tool results (so the agent can self-correct), never as
+    // protocol errors and never as silent successes. These run without a real
+    // config because the tool checks arguments + validation BEFORE warm-up.
+    // -----------------------------------------------------------------------
+
+    async fn provenance_call(args: Value) -> (bool, String) {
+        let params = json!({ "name": "mind_provenance_add", "arguments": args });
+        let res = call_tool(None, params).await;
+        let is_err = res["isError"].as_bool().unwrap_or(false);
+        let text = res["content"][0]["text"].as_str().unwrap_or("").to_string();
+        (is_err, text)
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_missing_snippet() {
+        let (is_err, text) = provenance_call(json!({
+            "origin_url": "https://github.com/a/b",
+            "search_tool_used": "ripgrep",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains("snippet"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_missing_origin_url() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "search_tool_used": "ripgrep",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains("origin_url"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_missing_search_tool_used() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "origin_url": "https://github.com/a/b",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains("search_tool_used"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_empty_search_tool_used() {
+        // An empty (but present) field exercises the validator, which yields
+        // the specific "use mind_add instead" guidance string.
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "origin_url": "https://github.com/a/b",
+            "search_tool_used": "",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(
+            text.contains("provenance source unknown") && text.contains("mind_add"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_http_url() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "origin_url": "http://github.com/a/b",
+            "search_tool_used": "ripgrep",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains("https"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_off_allowlist_host() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "origin_url": "https://evil.example.com/a/b",
+            "search_tool_used": "ripgrep",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains("allowlist"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_path_traversal_in_file() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn x() {}",
+            "origin_url": "https://github.com/a/b",
+            "search_tool_used": "ripgrep",
+            "file": "../../etc/passwd",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(text.contains(".."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mind_provenance_add_rejects_mark_tags_in_snippet() {
+        let (is_err, text) = provenance_call(json!({
+            "snippet": "fn foo<mark>bar</mark>()",
+            "origin_url": "https://github.com/a/b",
+            "search_tool_used": "ripgrep",
+        }))
+        .await;
+        assert!(is_err);
+        assert!(
+            text.contains("plain UTF-8") || text.contains("<mark>"),
+            "{text}"
         );
     }
 

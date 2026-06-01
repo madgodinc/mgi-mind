@@ -297,3 +297,276 @@ fn mcp_add_then_search_roundtrip() {
         chain()
     );
 }
+
+// ---------------------------------------------------------------------------
+// mind_provenance_add integration tests.
+//
+// All three drive `mgimind mcp` over its real stdio JSON-RPC transport — the
+// tool has no CLI subcommand (per design §6), so this is the only end-to-end
+// path. Each test creates an isolated library, runs a sequence of tool calls,
+// then drops the library regardless of assertions.
+//
+// Gated on the same env vars as the other model-needing tests above. CI
+// without the model+ORT skips them.
+// ---------------------------------------------------------------------------
+
+/// Helper: run one `mgimind mcp` invocation with the given concatenated JSON
+/// lines as stdin. Returns (stdout, stderr).
+fn run_mcp(mind: &Path, ort: &str, input: &str) -> (String, String) {
+    use std::io::Write;
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .env("MGIMIND_HOME", mind)
+        .env("ORT_DYLIB_PATH", ort)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mgimind mcp");
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        stdin.write_all(input.as_bytes()).expect("write requests");
+    }
+    let out = child.wait_with_output().expect("wait mcp");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Helper: parse the MCP stdout transcript into a map of id -> (is_error, text).
+fn parse_mcp_results(stdout: &str) -> std::collections::HashMap<i64, (bool, String)> {
+    let mut results = std::collections::HashMap::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("non-JSON on stdout: {e}\n{line}"));
+        if let Some(id) = v.get("id").and_then(serde_json::Value::as_i64) {
+            let is_err = v["result"]["isError"].as_bool().unwrap_or(false);
+            let text = v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            results.insert(id, (is_err, text));
+        }
+    }
+    results
+}
+
+/// Round-trip: a valid `mind_provenance_add` call lands in storage and is
+/// retrievable via `mind_search` on a token from the snippet, with the
+/// expected `[external]` header in the embedded content.
+#[test]
+fn provenance_round_trip_through_add_memory() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itprov_{}", std::process::id());
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_create","arguments":{"name":lib}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"mind_provenance_add","arguments":{
+            "library": lib,
+            "snippet": "kangaroo_marker_for_provenance_test_xyz123",
+            "origin_url": "https://github.com/example/repo",
+            "search_tool_used": "ripgrep",
+            "repo": "example/repo",
+            "file": "src/lib.rs",
+            "line_range": "10-20",
+            "lang": "rust"
+        }}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+        "params":{"name":"mind_search","arguments":{
+            "query":"kangaroo_marker_for_provenance_test_xyz123",
+            "library": lib,
+            "tier": 3
+        }}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+    let _ = Command::new(bin())
+        .args(["drop", &lib])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .output();
+
+    let results = parse_mcp_results(&stdout);
+    let create = results.get(&2).cloned().unwrap_or((true, String::new()));
+    let prov = results.get(&3).cloned().unwrap_or((true, String::new()));
+    let search = results.get(&4).cloned().unwrap_or((true, String::new()));
+    let chain = format!(
+        "create: {create:?}\nprovenance_add: {prov:?}\nsearch: {search:?}\n--- stderr ---\n{stderr}",
+    );
+
+    assert!(!create.0, "create failed: {chain}");
+    assert!(!prov.0, "provenance_add failed: {chain}");
+    assert!(
+        prov.1.contains("Saved") && prov.1.contains("provenance id:"),
+        "provenance_add response shape: {chain}"
+    );
+    assert!(!search.0, "search reported isError: {chain}");
+    assert!(
+        search.1.contains("[external]")
+            && search
+                .1
+                .contains("kangaroo_marker_for_provenance_test_xyz123"),
+        "search must return the cited record: {chain}"
+    );
+}
+
+/// Same inputs twice → exactly one stored chunk (idempotent). The library's
+/// stats count must not double after the second call.
+#[test]
+fn provenance_dedup_same_inputs_inserts_once() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itprovdup_{}", std::process::id());
+
+    let snippet = "dedup_marker_aardvark_98765";
+    let call = serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/call",
+    "params":{"name":"mind_provenance_add","arguments":{
+        "library": lib,
+        "snippet": snippet,
+        "origin_url": "https://github.com/example/repo",
+        "search_tool_used": "ripgrep",
+        "line_range": "1-2"
+    }}});
+    let mut call_a = call.clone();
+    call_a["id"] = serde_json::json!(3);
+    let mut call_b = call.clone();
+    call_b["id"] = serde_json::json!(4);
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_create","arguments":{"name":lib}}}),
+        call_a,
+        call_b,
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+        "params":{"name":"mind_search","arguments":{
+            "query": snippet, "library": lib, "tier": 3, "limit": 10
+        }}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+    let _ = Command::new(bin())
+        .args(["drop", &lib])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .output();
+
+    let results = parse_mcp_results(&stdout);
+    let a = results.get(&3).cloned().unwrap_or((true, String::new()));
+    let b = results.get(&4).cloned().unwrap_or((true, String::new()));
+    let s = results.get(&5).cloned().unwrap_or((true, String::new()));
+    let chain = format!("a: {a:?}\nb: {b:?}\nsearch: {s:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!a.0 && !b.0, "both provenance calls must succeed: {chain}");
+    assert!(!s.0, "search must succeed: {chain}");
+    // The snippet is short, so it produces exactly one chunk. Search returns
+    // only one hit carrying the marker (we asserted libraries match too).
+    let hits = s.1.matches(snippet).count();
+    assert_eq!(
+        hits, 1,
+        "snippet must appear in exactly one stored record (dedup), got {hits}: {chain}"
+    );
+}
+
+/// Same snippet, two different allowlisted URLs → two distinct records (the
+/// provenance is in the dedup key).
+#[test]
+fn provenance_same_snippet_two_urls_inserts_twice() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itprovurls_{}", std::process::id());
+
+    let snippet = "two_url_marker_walrus_55555";
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_create","arguments":{"name":lib}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"mind_provenance_add","arguments":{
+            "library": lib,
+            "snippet": snippet,
+            "origin_url": "https://github.com/owner-one/repo",
+            "search_tool_used": "ripgrep"
+        }}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+        "params":{"name":"mind_provenance_add","arguments":{
+            "library": lib,
+            "snippet": snippet,
+            "origin_url": "https://gitlab.com/owner-two/repo",
+            "search_tool_used": "ripgrep"
+        }}}),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+        "params":{"name":"mind_search","arguments":{
+            "query": snippet, "library": lib, "tier": 3, "limit": 10
+        }}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+    let _ = Command::new(bin())
+        .args(["drop", &lib])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .output();
+
+    let results = parse_mcp_results(&stdout);
+    let s = results.get(&5).cloned().unwrap_or((true, String::new()));
+    let chain = format!("search: {s:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!s.0, "search must succeed: {chain}");
+    // Both URLs are present in the result text → confirms two distinct records.
+    assert!(
+        s.1.contains("github.com/owner-one/repo") && s.1.contains("gitlab.com/owner-two/repo"),
+        "both citations must be in the search output: {chain}"
+    );
+}

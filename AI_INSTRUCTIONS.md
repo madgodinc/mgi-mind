@@ -128,9 +128,27 @@ fix, tell the store whether it worked with `mind_procedure_outcome` (`worked: tr
 - a failure raises its fail count and demotes it, so the memory self-corrects instead of
 ossifying on a bad fix.
 
+## Saving externally-sourced snippets (`mind_provenance_add`)
+
+When you just produced a snippet via a code-search or doc-search MCP (`mcp.grep.app`,
+Sourcegraph, GitHub code search, local `ripgrep`, etc.) and want it durable, use
+`mind_provenance_add`, not `mind_add`. Required fields: `snippet` (plain UTF-8, no
+HTML), `origin_url` (https, host must be one of github.com / gitlab.com /
+bitbucket.org / sr.ht / codeberg.org / grep.app / sourcegraph.com), and
+`search_tool_used` (where you found it in THIS session). Optional locators:
+`library` (defaults to `external-snippets`, must exist — `mind_create` it first),
+`repo` (`owner/repo`), `file` (no `/`, no `..`), `line_range` (`42` or `42-58`),
+`lang`, `note`.
+
+The dedup key includes `origin_url` and `line_range`, so the same snippet from two
+different repos is stored as two records (each with its own citation). The tool is
+strictly local: no HTTP, no enrichment, no HTML stripping. Do **not** invent
+provenance fields from memory — fill them only from the search result you literally
+just saw, or the validation will reject the call.
+
 ## Your MCP tools
 
-Memory: `mind_search`, `mind_add`, `mind_ingest`, `mind_history`, `mind_delete`, `mind_context`.
+Memory: `mind_search`, `mind_add`, `mind_provenance_add`, `mind_ingest`, `mind_history`, `mind_delete`, `mind_context`.
 Libraries: `mind_create`, `mind_list`, `mind_stats`.
 Facts: `mind_fact_add`, `mind_fact_query`, `mind_fact_invalidate`.
 Procedures: `mind_learn`, `mind_recall`, `mind_procedure_outcome`.

@@ -82,5 +82,11 @@ futures-util = "0.3"
 # Zeroize password buffers after key derivation — audit #3
 zeroize = "1"
 
+# Provenance ingest (mind_provenance_add): URL parse + small validation regexes.
+# Both are already in the transitive tree (via reqwest / tokenizers) — listing
+# them direct keeps the import path explicit.
+url = "2"
+regex = "1"
+
 [dev-dependencies]
 tempfile = "3"
