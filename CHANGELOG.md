@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.11.1 - inspect & manage the quarantine layer
+
+Surfaces the v0.11.0 quarantine layer through CLI and MCP. The store-side
+machinery shipped in 0.11.0; this release adds the inspection commands so a
+user (or agent) can see what was filtered, why, and override the gate by
+promoting an entry by id.
+
+### Added
+- `mgimind quarantine list [--library X] [--limit N]` — newest first,
+  entries scoped to one library or across all.
+- `mgimind quarantine show <id>` — full content + gate reason + audit
+  trail for one entry. Returns "not in quarantine" for ordinary memory
+  ids: the surface only sees what it should.
+- `mgimind quarantine promote <id>` — explicit promotion path, distinct
+  from the automatic "re-assert same content via ingest" flow. For when
+  the agent knows the entry belongs in normal memory without an
+  ingest round-trip.
+- MCP tools: `mind_quarantine_list`, `mind_quarantine_show`,
+  `mind_quarantine_promote` (mirror the CLI). Tools count: 26 → 29.
+
+### Notes
+The quarantine layer was deliberately invisible in 0.11.0 — by design,
+quarantined points must not surface through `mind_search`. The
+inspection commands are the only surface that ever returns them.
+
 ## 0.11.0 - quarantine layer + relevance gate + best-effort retrieval
 
 The core problem v0.11 solves: a write-side relevance filter that silently

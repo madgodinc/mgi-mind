@@ -238,7 +238,7 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     }
 }
 
-/// Map a tool name + arguments to its rendered text. All 26 tools are wired:
+/// Map a tool name + arguments to its rendered text. All 29 tools are wired:
 /// - 7 "warm" embed-path tools reuse the existing `render_*`/`build_*` helpers
 ///   + storage/knowledge functions, using the pre-loaded warm config;
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
@@ -352,6 +352,36 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let limit = arg_u64(args, "limit", 10) as usize;
             let results = crate::storage::history(cfg, limit).await?;
             Ok(crate::cli::render_history(&results))
+        }
+        "mind_quarantine_list" => {
+            let cfg = warm(true)?;
+            let library = arg_str(args, "library");
+            let limit = arg_u64(args, "limit", 20) as usize;
+            let entries = crate::storage::quarantine_list(cfg, library, limit).await?;
+            Ok(crate::cli::render_quarantine_list(&entries))
+        }
+        "mind_quarantine_show" => {
+            let cfg = warm(true)?;
+            let id = arg_str(args, "id")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
+            match crate::storage::quarantine_get(cfg, id).await? {
+                Some(e) => Ok(crate::cli::render_quarantine_entry(&e)),
+                None => Ok(format!(
+                    "No quarantined entry with id '{id}' (may be a regular memory or unknown id)."
+                )),
+            }
+        }
+        "mind_quarantine_promote" => {
+            let cfg = warm(true)?;
+            let id = arg_str(args, "id")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
+            if crate::storage::promote_from_quarantine(cfg, id).await? {
+                Ok(format!(
+                    "Promoted '{id}' from quarantine to ordinary memory."
+                ))
+            } else {
+                Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
+            }
         }
         "mind_stats" => {
             let cfg = warm(true)?;
@@ -501,7 +531,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
     }
 }
 
-/// The 26 tool definitions advertised by `tools/list`. Schemas are hand-written
+/// The 29 tool definitions advertised by `tools/list`. Schemas are hand-written
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
@@ -714,6 +744,35 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_quarantine_list",
+            "description": "List entries the v0.11 relevance gate filtered into the quarantine layer. These are not surfaced by mind_search by design — use this tool when you suspect a fact was filtered (e.g., the user keeps repeating something the gate would reject as low-signal). Newest first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string", "description": "Scope to one library (omit for all)" },
+                    "limit": { "type": "number", "default": 20 }
+                }
+            }
+        }),
+        json!({
+            "name": "mind_quarantine_show",
+            "description": "Show a single quarantined entry with its full content and the gate reason. Returns 'not in quarantine' for regular memory ids — the surface is honest about what it can see.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "mind_quarantine_promote",
+            "description": "Explicitly promote a quarantined entry to ordinary memory by id. The automatic promotion path is re-asserting the same content via mind_ingest; use this when you know the entry should be live without re-ingesting.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        }),
+        json!({
             "name": "mind_web",
             "description": "Read a webpage as Markdown, optionally save to library",
             "inputSchema": {
@@ -785,12 +844,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_26_tools() {
+    fn exposes_all_29_tools() {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            26,
-            "tools/list must advertise exactly 26 tools"
+            29,
+            "tools/list must advertise exactly 29 tools"
         );
     }
 
@@ -857,10 +916,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_26() {
+    async fn tools_list_returns_29() {
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 26);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 29);
     }
 
     #[tokio::test]

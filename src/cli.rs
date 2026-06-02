@@ -236,6 +236,14 @@ pub enum Commands {
         #[arg(long, value_name = "TEXT")]
         memory: Vec<String>,
     },
+    /// Inspect and manage the v0.11 quarantine layer. The relevance gate
+    /// routes low-signal candidates here instead of dropping them; from this
+    /// surface you can see what was filtered, why, and promote entries back
+    /// to ordinary memory by id.
+    Quarantine {
+        #[command(subcommand)]
+        action: QuarantineAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -248,6 +256,25 @@ pub enum AuditAction {
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
     Show { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum QuarantineAction {
+    /// List quarantined entries, newest first. Scope to one library with
+    /// `--library`, otherwise lists across all libraries.
+    List {
+        #[arg(long)]
+        library: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Show a single quarantined entry by id with its full content and
+    /// the gate reason that filtered it.
+    Show { id: String },
+    /// Manually promote a quarantined entry to ordinary memory by id. The
+    /// usual promotion path is automatic (re-asserting the same content via
+    /// ingest); this is the explicit override when you know what you want.
+    Promote { id: String },
 }
 
 #[derive(Subcommand)]
@@ -426,7 +453,82 @@ pub async fn run(cli: Cli) -> Result<()> {
             raw,
             memory,
         } => cmd_ingest(&library, raw.as_deref(), memory).await,
+        Commands::Quarantine { action } => match action {
+            QuarantineAction::List { library, limit } => {
+                cmd_quarantine_list(library.as_deref(), limit).await
+            }
+            QuarantineAction::Show { id } => cmd_quarantine_show(&id).await,
+            QuarantineAction::Promote { id } => cmd_quarantine_promote(&id).await,
+        },
     }
+}
+
+async fn cmd_quarantine_list(library: Option<&str>, limit: usize) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let entries = crate::storage::quarantine_list(&config, library, limit).await?;
+    print!("{}", render_quarantine_list(&entries));
+    Ok(())
+}
+
+async fn cmd_quarantine_show(id: &str) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    match crate::storage::quarantine_get(&config, id).await? {
+        Some(e) => print!("{}", render_quarantine_entry(&e)),
+        None => println!("No quarantined entry with id '{id}' (it may be a regular memory or unknown id)."),
+    }
+    Ok(())
+}
+
+async fn cmd_quarantine_promote(id: &str) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    if crate::storage::promote_from_quarantine(&config, id).await? {
+        println!("Promoted '{id}' from quarantine to ordinary memory.");
+    } else {
+        println!("Nothing to promote — '{id}' is not in quarantine.");
+    }
+    Ok(())
+}
+
+pub(crate) fn render_quarantine_list(entries: &[crate::storage::QuarantineEntry]) -> String {
+    use std::fmt::Write;
+    if entries.is_empty() {
+        return "No quarantined entries.\n".to_string();
+    }
+    let mut out = String::new();
+    for (i, e) in entries.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "{}. [{}] id: {}  reason: {}",
+            i + 1,
+            e.library,
+            e.id,
+            e.reason
+        );
+        let _ = writeln!(out, "   {}", e.content);
+        if let Some(src) = &e.source {
+            let _ = writeln!(out, "   source: {src}");
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "{} quarantined entry/entries.", entries.len());
+    out
+}
+
+pub(crate) fn render_quarantine_entry(e: &crate::storage::QuarantineEntry) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "id:       {}", e.id);
+    let _ = writeln!(out, "library:  {}", e.library);
+    let _ = writeln!(out, "reason:   {}", e.reason);
+    if let Some(src) = &e.source {
+        let _ = writeln!(out, "source:   {src}");
+    }
+    if let Some(ts) = &e.created_at {
+        let _ = writeln!(out, "created:  {ts}");
+    }
+    let _ = writeln!(out, "content:");
+    let _ = writeln!(out, "{}", e.content);
+    out
 }
 
 async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Result<()> {
