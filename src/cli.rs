@@ -184,6 +184,21 @@ pub enum Commands {
         output: Option<String>,
     },
 
+    /// Procedural memory benchmark (phase Д6): measure recall@k on a dataset of
+    /// (error, fix) pairs. Learns each pair into an isolated bench library,
+    /// then recalls by error signature and reports overall + per-stratum R@k.
+    /// Zero-API. The dataset is JSONL with fields {error, fix, language, stratum, id?, context?}.
+    BenchProcedural {
+        /// Path to the dataset JSONL (e.g. procedural-dataset.jsonl)
+        dataset: String,
+        /// Run only the first N pairs (smoke test)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Write raw per-pair results to this JSON file
+        #[arg(long)]
+        output: Option<String>,
+    },
+
     /// Consolidate memory: merge duplicates / near-duplicates and report cold
     /// (old, unused) entries (phase Д2). Dry-run unless --apply.
     Consolidate {
@@ -437,6 +452,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
             output,
         } => cmd_bench(&dataset, &format, limit, output.as_deref()).await,
+        Commands::BenchProcedural {
+            dataset,
+            limit,
+            output,
+        } => cmd_bench_procedural(&dataset, limit, output.as_deref()).await,
         Commands::Consolidate {
             apply,
             library,
@@ -646,6 +666,17 @@ async fn cmd_bench(
         "longmemeval" => crate::bench::run_longmemeval(&config, dataset, limit, output).await?,
         other => anyhow::bail!("unknown bench format '{other}' (supported: longmemeval)"),
     };
+    println!("{report}");
+    Ok(())
+}
+
+async fn cmd_bench_procedural(
+    dataset: &str,
+    limit: Option<usize>,
+    output: Option<&str>,
+) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let report = crate::bench_procedural::run(&config, dataset, limit, output).await?;
     println!("{report}");
     Ok(())
 }

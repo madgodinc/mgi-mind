@@ -74,17 +74,31 @@ never build on yesterday's work. The usual workaround is you keeping notes, tags
 folders, which is a chore that never ends, and the assistant still cannot read them
 well.
 
-The alternatives have real gaps:
+### The single thing that's different: automated memory, not hand-curated notes
 
-- **Plain notes (Obsidian, Notion).** Great for you, but the assistant cannot search
-  them by meaning, and you do all the filing.
-- **A bare vector database.** Gives you semantic search but no exact-term matching, no
-  reranking, no dedup, no sessions, no facts, no secrets handling. You assemble all of
-  that yourself.
-- **A hosted "memory" API.** Sends your data to someone else's servers.
+**The system decides what to write down. You don't.** Obsidian and Notion are
+beautiful notebooks where you do the curating — every note, tag, and folder is your
+labour. MGI-Mind reads what the assistant is doing in real time and routes facts,
+decisions, and fixes into the store through a relevance gate. You don't file
+anything. You don't tag anything. You don't decide what's "worth saving" — that's the
+system's job. Low-signal candidates land in a quarantine layer (still recoverable
+on re-assertion) instead of polluting retrieval. **This is the moat.** A nicer web UI
+over Qdrant is not the differentiator; not having to maintain it by hand is.
 
-MGI-Mind is the assembled, local version: hybrid + reranked retrieval, dedup, facts,
-sessions, and a vault, behind one binary you run yourself. You own the data and it
+### Where the alternatives fall short
+
+- **Plain notes (Obsidian, Notion).** Great as your personal notebook, but the
+  assistant cannot search them by meaning, you do all the filing, and there is no
+  relevance gate — every keystroke is equally important to a folder of `.md`.
+- **A bare vector database.** Gives you semantic search but no exact-term matching,
+  no reranking, no dedup, no sessions, no facts, no secrets handling, no relevance
+  gate, no procedural memory. You assemble all of that yourself.
+- **A hosted "memory" API.** Your data on someone else's servers, and you trade the
+  moat above for a closed black box.
+
+MGI-Mind is the assembled, local version: hybrid + reranked retrieval, the relevance
+gate, dedup, facts, sessions, procedural memory ("error → fix" playbooks), and a
+terminal-only vault, behind one binary you run yourself. You own the data and it
 never leaves the machine.
 
 ## Quick start

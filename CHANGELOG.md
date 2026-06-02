@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.14.0 — procedural-memory benchmark harness, README differentiation
+
+First half of the v1.0 push: the recall harness for procedural memory
+(phase Д6) and the README updates so the project sells what it actually
+is, not "another wrapper around Qdrant."
+
+### Added
+- `mgimind bench-procedural <dataset.jsonl>` — measures recall@k on a
+  dataset of (error, fix) pairs. Learns each pair into an isolated bench
+  library, then recalls by error signature and reports overall +
+  per-language + per-stratum + per-language×stratum R@1/R@5/R@10.
+  Zero-API. Output is a text report; optional `--output raw.json`
+  writes per-pair detail for analysis. Mirrors `mgimind bench` for
+  LongMemEval, just on the procedural side.
+- `scripts/scrape_procedural_dataset.py` — local-only scraper that
+  mines (error, fix) pairs from already-cloned git repos. Looks for
+  fix-pattern commit subjects and extracts an error signature from
+  the body (panics, tracebacks, code-quoted errors, symptom
+  sentences). Writes JSONL ready for `bench-procedural`. No HTTP, no
+  GitHub API.
+- README dedicated section "The single thing that's different:
+  automated memory, not hand-curated notes." Explicit moat statement,
+  not a hidden line. Same paragraph reflows the "alternatives fall
+  short" list so each comparison hits the relevance-gate / procedural
+  memory / vault gaps in the alternatives.
+
+### Notes
+- A real 200-pair dataset is the v0.10.0 sister task. This release
+  ships the harness so the dataset, when built, has a place to land.
+  A 5-pair smoke set against the harness returned R@1=100% (trivial
+  signatures, no collisions) — useful only to confirm the pipeline,
+  not to claim recall numbers.
+
 ## 0.13.0 — session liveness: zombie sessions auto-close on next start
 
 Closes the long-standing leak where `mind_session_end` was never reached

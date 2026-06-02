@@ -1,6 +1,7 @@
 mod access;
 mod audit;
 mod bench;
+mod bench_procedural;
 mod cli;
 mod config;
 mod consolidate;
