@@ -78,12 +78,12 @@
   <section id="quarantine" class="panel">
     <div class="controls">
       <label>library:</label>
-      <select id="qlibsel" onchange="loadQuarantine()">
+      <select id="qlibsel" onchange="resetQuarantineCursor(); loadQuarantine()">
         <option value="">(all)</option>
       </select>
       <label>limit:</label>
-      <input id="qlimit" type="number" min="1" max="200" value="50" onchange="loadQuarantine()" style="width:80px">
-      <button onclick="loadQuarantine()">reload</button>
+      <input id="qlimit" type="number" min="1" max="200" value="50" onchange="resetQuarantineCursor(); loadQuarantine()" style="width:80px">
+      <button onclick="resetQuarantineCursor(); loadQuarantine()">reload</button>
       <span class="dim">v0.11 relevance gate filtered these; not shown in mind_search</span>
     </div>
     <div id="qlist"></div>
@@ -322,13 +322,27 @@
       // Empty library means "all libraries" — backend treats omitted param
       // that way. We must NOT pass library= as empty string; some servers
       // would filter to literal "" and return nothing.
-      const qs = (lib ? ('library=' + encodeURIComponent(lib) + '&') : '') + 'limit=' + limit;
-      const rows = await api('/api/quarantine?' + qs);
-      if (!rows || rows.length === 0) {
+      // Cursor is opaque (set by a prior next-page click below); first load
+      // sends none.
+      const cursor = wrap.dataset.cursor || '';
+      const append = !!cursor;
+      const qs = (lib ? ('library=' + encodeURIComponent(lib) + '&') : '')
+               + 'limit=' + limit
+               + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+      const resp = await api('/api/quarantine?' + qs);
+      const rows = resp.entries || [];
+      const nextCursor = resp.next_cursor || '';
+      if (!rows.length && !append) {
         wrap.innerHTML = '<div class="empty">No quarantined entries' + (lib ? (' in ' + esc(lib)) : '') + '.</div>';
+        delete wrap.dataset.cursor;
         return;
       }
-      wrap.innerHTML = '';
+      // Append mode keeps the prior page visible and adds the new rows
+      // below; first-page mode replaces the pane. Either way we strip any
+      // existing "load more" button first so it doesn't accumulate.
+      const existingMore = wrap.querySelector('.qmore');
+      if (existingMore) existingMore.remove();
+      if (!append) wrap.innerHTML = '';
       for (const r of rows) {
         const div = document.createElement('div');
         div.className = 'row';
@@ -373,7 +387,27 @@
         };
         wrap.appendChild(div);
       }
+      // If the backend reports more data, append a "load more" footer that
+      // re-enters loadQuarantine() with the new cursor stored on dataset.
+      if (nextCursor) {
+        wrap.dataset.cursor = nextCursor;
+        const more = document.createElement('div');
+        more.className = 'qmore';
+        more.style.cssText = 'margin-top:8px;text-align:center';
+        more.innerHTML = '<button>load more</button>';
+        more.querySelector('button').onclick = () => loadQuarantine();
+        wrap.appendChild(more);
+      } else {
+        delete wrap.dataset.cursor;
+      }
     } catch (e) { showErr(e); }
+  }
+
+  // Filter or limit changes always reset pagination (otherwise we'd
+  // re-query with a stale cursor against a different scope).
+  function resetQuarantineCursor() {
+    const wrap = document.getElementById('qlist');
+    if (wrap) delete wrap.dataset.cursor;
   }
 
   async function loadMemories() {
