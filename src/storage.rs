@@ -522,6 +522,11 @@ pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
     register_library(name)?;
+    crate::audit::record(crate::audit::AuditEvent::new(
+        crate::audit::AuditOp::LibraryCreate,
+        "",
+        name,
+    ));
     Ok(())
 }
 
@@ -544,6 +549,11 @@ pub async fn drop_library(config: &MindConfig, name: &str) -> Result<()> {
             .context("Failed to delete library points")?;
     }
     unregister_library(name)?;
+    crate::audit::record(crate::audit::AuditEvent::new(
+        crate::audit::AuditOp::LibraryDrop,
+        "",
+        name,
+    ));
     Ok(())
 }
 
@@ -744,6 +754,136 @@ pub async fn add_memory(
         .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, points).wait(true))
         .await
         .context("Failed to add memory")?;
+    // Audit the write. Empty target — one logical add can produce N point ids
+    // for a long note; the (library, content) tuple is the meaningful trail.
+    crate::audit::record(
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, "")
+            .after(truncate_for_audit(content))
+            .note(format!("{stored} chunks")),
+    );
+    Ok(stored)
+}
+
+/// Cap audit log lines: a single memory can be a long article. 500 chars is
+/// enough to remember what was added without ballooning the log file.
+pub(crate) fn truncate_for_audit(s: &str) -> String {
+    const MAX: usize = 500;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(MAX).collect();
+        out.push_str("… [truncated]");
+        out
+    }
+}
+
+/// Batched ingest of many (content, source) pairs in one go. The embedding pass
+/// runs as a single padded ONNX batch over ALL chunks across all items, which is
+/// what makes the bench harness usable: 150 sessions × ~1.5s per-call embedding
+/// vs ~3-5s for the whole batch on GPU.
+pub async fn add_memories_batch(
+    config: &MindConfig,
+    library: &str,
+    items: &[(String, Option<String>)],
+) -> Result<usize> {
+    if !is_registered(library) {
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryNotFound(library.to_string())
+        );
+    }
+    if items.is_empty() {
+        return Ok(0);
+    }
+
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    // Collect (chunk, source) pairs across all items. Each item is chunked
+    // independently, but all chunks are embedded in a single padded batch.
+    // Secret-scrub runs per-item: a hit just skips that item, doesn't poison
+    // the whole batch.
+    let mut all_chunks: Vec<String> = Vec::with_capacity(items.len());
+    let mut all_sources: Vec<Option<String>> = Vec::with_capacity(items.len());
+    for (content, source) in items {
+        if crate::secrets::scan(content).is_some() {
+            continue;
+        }
+        for chunk in chunk_text(content, CHUNK_CHARS) {
+            if chunk.trim().chars().count() < 3 {
+                continue;
+            }
+            all_chunks.push(chunk);
+            all_sources.push(source.clone());
+        }
+    }
+    if all_chunks.is_empty() {
+        return Ok(0);
+    }
+
+    // Sub-batch embedding: ALL chunks in one ONNX padded pass would blow up VRAM
+    // on questions with 50+ sessions (a single [batch, seq, hidden] tensor goes
+    // multi-GB at seq=512). Embed in groups of 16 — keeps GPU memory bounded
+    // while still amortizing the cuDNN warmup that made per-call embedding cost
+    // 1.5-3s each. Configurable via MGIMIND_EMBED_BATCH if needed.
+    let batch_size: usize = std::env::var("MGIMIND_EMBED_BATCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(all_chunks.len());
+    for sub in all_chunks.chunks(batch_size) {
+        let part = embedder::embed_passages(config, sub).await?;
+        embeddings.extend(part);
+    }
+    for e in &embeddings {
+        check_dim(e, config)?;
+    }
+
+    let ids: Vec<String> = all_chunks
+        .iter()
+        .map(|c| deterministic_id(library, c))
+        .collect();
+    let existing = existing_created_at_map(&client, MEMORIES_COLLECTION, &ids).await;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut points = Vec::with_capacity(all_chunks.len());
+    for (((chunk, id), src), embedding) in all_chunks
+        .iter()
+        .zip(ids.iter())
+        .zip(all_sources.iter())
+        .zip(embeddings)
+    {
+        let hash = blake3::hash(chunk.as_bytes()).to_hex().to_string();
+        let created_at = existing.get(id).cloned().unwrap_or_else(|| now.clone());
+
+        let (s_idx, s_val) = sparse_vector(chunk);
+        let vectors = NamedVectors::default()
+            .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+            .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+        points.push(PointStruct::new(
+            id.clone(),
+            vectors,
+            build_payload(
+                chunk,
+                &hash,
+                &created_at,
+                &now,
+                library,
+                src.as_deref(),
+                TYPE_MEMORY,
+            ),
+        ));
+    }
+
+    let stored = points.len();
+    // wait=false: bench uploads ~150 sessions per question; waiting on each
+    // upsert's HNSW indexation serializes the batch. We search the library
+    // immediately after — Qdrant handles in-flight points correctly for our
+    // single-collection layout.
+    client
+        .upsert_points(UpsertPointsBuilder::new(MEMORIES_COLLECTION, points).wait(true))
+        .await
+        .context("Failed to add memories batch")?;
     Ok(stored)
 }
 
@@ -1256,6 +1396,13 @@ pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Res
     // IDs are globally unique (UUIDv5 of library+content), so a delete by id in
     // the single collection is unambiguous - the library arg is kept only for
     // CLI/MCP signature compatibility.
+
+    // Best-effort: snapshot the content first so the audit log keeps a copy of
+    // what was deleted. A read failure here is non-fatal — the delete itself
+    // must still run, and an empty `before` is better than refusing to delete
+    // because we couldn't snapshot.
+    let before = fetch_content_by_id(&client, id).await;
+
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
     client
         .delete_points(
@@ -1267,7 +1414,32 @@ pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Res
         )
         .await
         .context("Failed to delete memory")?;
+
+    let mut ev =
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, _library, id);
+    if let Some(content) = before {
+        ev = ev.before(truncate_for_audit(&content));
+    }
+    crate::audit::record(ev);
     Ok(())
+}
+
+/// Best-effort content fetch by point id, used by audit pre-delete snapshot.
+async fn fetch_content_by_id(client: &Qdrant, id: &str) -> Option<String> {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid])
+                .with_payload(true),
+        )
+        .await
+        .ok()?;
+    let p = resp.result.into_iter().next()?;
+    let kind = p.payload.get("content")?.kind.clone()?;
+    match kind {
+        qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// Scroll an entire collection, following pagination to the end (audit #10).
@@ -1301,6 +1473,65 @@ pub async fn scroll_all(
 /// Recent memories, newest first. Single collection + a datetime index on
 /// `created_at` let Qdrant return the newest `limit` via `order_by` - no longer
 /// O(total memories) (audit #18, fixes the post-0.2 review's `history` finding).
+/// One memory as the viewer needs it. Full content, all metadata, no score
+/// (this isn't a search result). Returned by `list_memories`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryRecord {
+    pub id: String,
+    pub content: String,
+    pub source: Option<String>,
+    pub r#type: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// List memories of a single library, newest first. Returns full content
+/// (no truncation) and all payload metadata. Used by the viewer.
+pub async fn list_memories(
+    config: &MindConfig,
+    library: &str,
+    limit: usize,
+) -> Result<Vec<MemoryRecord>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(library_filter(library))
+                .limit(limit as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("list_memories scroll failed")?;
+    Ok(response
+        .result
+        .into_iter()
+        .map(|point| {
+            let p = &point.payload;
+            MemoryRecord {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                content: extract_string(p, "content").unwrap_or_default(),
+                source: extract_string(p, "source"),
+                r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
+                created_at: extract_string(p, "created_at").unwrap_or_default(),
+                updated_at: extract_string(p, "updated_at").unwrap_or_default(),
+            }
+        })
+        .collect())
+}
+
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     if !client
