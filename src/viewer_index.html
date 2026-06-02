@@ -56,6 +56,7 @@
 <nav>
   <button id="tab-mem" class="on" onclick="show('mem')">memories</button>
   <button id="tab-quarantine" onclick="show('quarantine')">quarantine</button>
+  <button id="tab-consolidate" onclick="show('consolidate')">consolidate</button>
   <button id="tab-audit" onclick="show('audit')">audit log</button>
 </nav>
 
@@ -85,6 +86,18 @@
       <span class="dim">v0.11 relevance gate filtered these; not shown in mind_search</span>
     </div>
     <div id="qlist"></div>
+  </section>
+
+  <section id="consolidate" class="panel">
+    <div class="err" style="display:block;margin-bottom:12px;border-color:var(--warn);color:var(--warn)">
+      Read-only preview. To act on this, run <code>mgimind consolidate --apply</code> in a terminal.
+    </div>
+    <div class="controls">
+      <label>library:</label>
+      <select id="clibsel" onchange="loadConsolidate()"></select>
+      <button id="cload-btn" onclick="loadConsolidate()">reload</button>
+    </div>
+    <div id="consolidateresult"></div>
   </section>
 
   <section id="audit" class="panel">
@@ -124,12 +137,13 @@
   function clearErr() { document.getElementById('err').style.display = 'none'; }
 
   function show(tab) {
-    for (const id of ['mem', 'quarantine', 'audit']) {
+    for (const id of ['mem', 'quarantine', 'consolidate', 'audit']) {
       document.getElementById(id).classList.toggle('on', id === tab);
       document.getElementById('tab-' + id).classList.toggle('on', id === tab);
     }
     if (tab === 'audit') loadAudit();
     if (tab === 'quarantine') loadQuarantine();
+    if (tab === 'consolidate') loadConsolidate();
   }
 
   async function loadLibs() {
@@ -138,11 +152,17 @@
       const libs = await api('/api/libraries');
       const sel = document.getElementById('libsel');
       const qsel = document.getElementById('qlibsel');
+      const csel = document.getElementById('clibsel');
       sel.innerHTML = '';
-      // Quarantine library selector starts with "(all)" so the user can see
-      // every quarantined entry without picking a library first — they may
-      // not know which library a filtered entry landed in.
+      // Quarantine starts with "(all)" — flagged subset is cheap to scan
+      // cross-library, and the user may not know which library a filtered
+      // entry landed in.
       qsel.innerHTML = '<option value="">(all)</option>';
+      // Consolidate does NOT default to "(all)" — full-corpus scan can be
+      // expensive (embedding work, near-dup math) and hangs the UI on a
+      // large palace. Default to the first library; user can opt in to
+      // "(all)" explicitly.
+      csel.innerHTML = '';
       if (libs.length === 0) {
         const opt = document.createElement('option');
         opt.value = ''; opt.textContent = '(no libraries)';
@@ -157,12 +177,76 @@
         const qopt = document.createElement('option');
         qopt.value = l; qopt.textContent = l;
         qsel.appendChild(qopt);
+        const copt = document.createElement('option');
+        copt.value = l; copt.textContent = l;
+        csel.appendChild(copt);
       }
+      // Append "(all)" to consolidate AFTER libraries so it's an explicit
+      // opt-in, not the default. The "" value path in loadConsolidate hits
+      // /api/consolidate without library= which scans everything.
+      const callopt = document.createElement('option');
+      callopt.value = ''; callopt.textContent = '(all libraries)';
+      csel.appendChild(callopt);
       loadMemories();
     } catch (e) { showErr(e); }
   }
 
+  async function loadConsolidate() {
+    const btn = document.getElementById('cload-btn');
+    const wrap = document.getElementById('consolidateresult');
+    // Loading state so the user knows we're scanning. Consolidate can take
+    // a while on a large library because it walks every point. Without this,
+    // the panel just sits dead and looks broken.
+    btn.disabled = true;
+    const origLabel = btn.textContent;
+    btn.textContent = 'scanning…';
+    wrap.innerHTML = '<div class="empty">Scanning…</div>';
+    try {
+      clearErr();
+      const lib = document.getElementById('clibsel').value;
+      const qs = lib ? ('library=' + encodeURIComponent(lib)) : '';
+      const r = await api('/api/consolidate' + (qs ? '?' + qs : ''));
+      // Field-name labels (would_remove_*) on the UI side, not API names.
+      // The API field is `exact_dups_removed` because the same struct is
+      // shared with the apply path. On a dry-run nothing has been removed
+      // — present it as "would remove" so the tense isn't a lie.
+      const wouldRemoveExact = r.exact_dups_removed || 0;
+      const wouldRemoveNear = r.near_dups_removed || 0;
+      const cold = r.cold_candidates || 0;
+      const totalSignal = wouldRemoveExact + wouldRemoveNear + cold;
+      let hint;
+      if ((r.scanned || 0) === 0) {
+        hint = '<div class="empty">Nothing to scan' + (lib ? (' in ' + esc(lib)) : '') + '. Add memories first.</div>';
+      } else if (totalSignal === 0) {
+        hint = '<div class="empty">No duplicates or cold entries' + (lib ? (' in ' + esc(lib)) : '') + '. Library is clean.</div>';
+      } else {
+        const toRemove = wouldRemoveExact + wouldRemoveNear;
+        const cmd = 'mgimind consolidate --apply' + (lib ? ' --library ' + lib : '');
+        hint =
+          '<div class="row">' +
+          '<div class="meta">' +
+          '<span>scanned: ' + (r.scanned || 0) + '</span>' +
+          '<span class="lib">would remove exact: ' + wouldRemoveExact + '</span>' +
+          '<span class="lib">would remove near: ' + wouldRemoveNear + '</span>' +
+          '<span>cold candidates: ' + cold + '</span>' +
+          '</div>' +
+          '<pre>Would remove ' + toRemove + ' duplicate(s) and flag ' + cold +
+          ' cold entry/entries.\n\nTo act on this, run in a terminal:\n  ' + esc(cmd) + '</pre>' +
+          '</div>';
+      }
+      wrap.innerHTML = hint;
+    } catch (e) {
+      showErr(e);
+      wrap.innerHTML = '';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  }
+
   async function loadQuarantine() {
+    const wrap = document.getElementById('qlist');
+    wrap.innerHTML = '<div class="empty">Loading…</div>';
     try {
       clearErr();
       const lib = document.getElementById('qlibsel').value;
@@ -172,7 +256,6 @@
       // would filter to literal "" and return nothing.
       const qs = (lib ? ('library=' + encodeURIComponent(lib) + '&') : '') + 'limit=' + limit;
       const rows = await api('/api/quarantine?' + qs);
-      const wrap = document.getElementById('qlist');
       if (!rows || rows.length === 0) {
         wrap.innerHTML = '<div class="empty">No quarantined entries' + (lib ? (' in ' + esc(lib)) : '') + '.</div>';
         return;

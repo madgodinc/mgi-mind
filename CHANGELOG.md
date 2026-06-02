@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.9 - viewer: Consolidate dry-run tab + Quarantine loading state
+
+Second of three UI tabs. Pre-ship critic flagged four real issues; all
+four are addressed in this drop, plus the same loading-state hole in
+Quarantine that the critic correctly extrapolated.
+
+### Added
+- Consolidate tab. Read-only preview surface — `--apply` stays on the
+  CLI. The tab opens with a bordered warn-coloured notice
+  ("Read-only preview. To act on this, run `mgimind consolidate
+  --apply` in a terminal.") so the absence of an apply button is
+  *loud*, not whispered in dim text.
+- Library dropdown is populated from `/api/libraries`. The selector
+  defaults to the first user library, not `(all)` — full-corpus
+  consolidate walks every point's vector for near-dup math and would
+  hang the UI on a large palace. `(all libraries)` is appended as an
+  explicit opt-in instead.
+- UI labels rename the API's past-tense field names on a dry-run:
+  `exact_dups_removed` → `would remove exact`, etc. Nothing has been
+  removed on a preview; the tense matters.
+- Loading state on the reload button (disabled, label "scanning…")
+  and the result pane ("Scanning…"). Without it the panel sits dead
+  on a large library and looks broken.
+- Same loading-state fix applied to the Quarantine tab.
+
+### Notes
+The third tab (auto-ingest recent) will land in 0.11.10 once Mad
+verifies these two in a real browser.
+
 ## 0.11.8 - viewer: Quarantine tab
 
 First of three UI tabs that consume the v0.11.2–v0.11.4 backend
