@@ -147,23 +147,28 @@ pub async fn run_longmemeval(
         let _ = storage::drop_library(config, BENCH_LIB).await;
         storage::create_library(config, BENCH_LIB).await?;
 
-        // Ingest each session as one memory tagged with its session id.
-        for (sid, session) in item
+        // Build the full (text, session_id) list and ingest in ONE batched embed
+        // pass. Previous per-session calls cost ~1.5-3s each on GPU (cuDNN warmup
+        // per call dominated); batched embedding of all sessions for a question
+        // runs as a single padded ONNX forward.
+        let batch: Vec<(String, Option<String>)> = item
             .haystack_session_ids
             .iter()
             .zip(item.haystack_sessions.iter())
-        {
-            let text = session
-                .iter()
-                .map(|t| format!("{}: {}", t.role, t.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.trim().is_empty() {
-                continue;
-            }
-            // Secret scrub can refuse a session; that's fine for a benchmark - skip it.
-            let _ = storage::add_memory(config, BENCH_LIB, &text, Some(sid)).await;
-        }
+            .filter_map(|(sid, session)| {
+                let text = session
+                    .iter()
+                    .map(|t| format!("{}: {}", t.role, t.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some((text, Some(sid.clone())))
+                }
+            })
+            .collect();
+        let _ = storage::add_memories_batch(config, BENCH_LIB, &batch).await;
 
         let results = storage::search(config, &item.question, Some(BENCH_LIB), FETCH, 1).await?;
         let sources: Vec<String> = results.iter().filter_map(|r| r.source.clone()).collect();

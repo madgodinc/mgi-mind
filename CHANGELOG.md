@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.14.1 — counterfactual A/B for retrieval policy
+
+Companion to the LongMemEval recall numbers: a CLI that takes any prior
+`mgimind bench` raw.json, classifies each question by the trigger table
+(P1 must-search, P2 should-search, P0 no-search), and reports ΔR@k vs
+a no-search baseline. Quantifies the **structural** recall value of
+the search-before-answer policy. Not an LLM accuracy measure.
+
+### Added
+- `mgimind bench-policy <raw.json>` — counterfactual A/B over a prior
+  bench output. Output is a text report + embedded JSON for downstream
+  consumers. Zero-API.
+- BENCHMARKS.md "Counterfactual A/B — retrieval policy on / off"
+  section with the question-type → priority mapping table and the
+  baseline result on the v0.8.1 500q run:
+  WITH policy R@5 = 98.2%, WITHOUT R@5 = 0.0% (structural), ΔR@5 = +98.2 pct.
+
+### Notes
+- LongMemEval-S contains no P0 questions — the policy unlocks 100% of
+  recall on this corpus. A dataset with explicit chit-chat would split
+  the gap (the policy doesn't help there, and the trigger table says
+  skip P0).
+- "WITHOUT policy R@5 = 0%" is by construction (no search → no
+  candidates). The Δ goes to "what would the policy save if the agent
+  did skip search". Not the same as "LLM is more accurate with mgi-mind."
+
 ## 0.14.0 — procedural-memory benchmark harness, README differentiation
 
 First half of the v1.0 push: the recall harness for procedural memory

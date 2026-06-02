@@ -1,0 +1,73 @@
+{
+  "total_questions": 500,
+  "priority_counts": {
+    "P1": 367,
+    "P2": 133
+  },
+  "with_policy": {
+    "p1": {
+      "n": 367,
+      "hit_at_1": 319,
+      "hit_at_5": 363,
+      "hit_at_10": 366
+    },
+    "p2": {
+      "n": 133,
+      "hit_at_1": 107,
+      "hit_at_5": 128,
+      "hit_at_10": 131
+    },
+    "p0": {
+      "n": 0,
+      "hit_at_1": 0,
+      "hit_at_5": 0,
+      "hit_at_10": 0
+    },
+    "overall": {
+      "n": 500,
+      "hit_at_1": 426,
+      "hit_at_5": 491,
+      "hit_at_10": 497
+    }
+  },
+  "without_policy": {
+    "p1": {
+      "n": 367,
+      "hit_at_1": 0,
+      "hit_at_5": 0,
+      "hit_at_10": 0
+    },
+    "p2": {
+      "n": 133,
+      "hit_at_1": 0,
+      "hit_at_5": 0,
+      "hit_at_10": 0
+    },
+    "p0": {
+      "n": 0,
+      "hit_at_1": 0,
+      "hit_at_5": 0,
+      "hit_at_10": 0
+    },
+    "overall": {
+      "n": 500,
+      "hit_at_1": 0,
+      "hit_at_5": 0,
+      "hit_at_10": 0
+    }
+  },
+  "delta_r_at_5_pct": {
+    "knowledge-update (P1)": 100.0,
+    "multi-session (P1)": 99.24812,
+    "single-session-assistant (P1)": 100.0,
+    "single-session-preference (P1)": 93.333336,
+    "single-session-user (P1)": 98.57143,
+    "temporal-reasoning (P2)": 96.2406
+  },
+  "notes": [
+    "Overall ΔR@5 = +98.2 pct — this is the recall a no-search baseline would not have.",
+    "All questions in this dataset map to P1 or P2 (no chit-chat / no-search bucket). The policy unlocks 100% of recall here. A future dataset with explicit P0 chit-chat (\"hi\", \"thanks\") would split the gap cleanly.",
+    "Caveat: this benchmark proves structural value of the trigger policy, not LLM accuracy. A real A/B with a generation step needs a like-for-like LLM-judged harness (see BENCHMARKS.md \"Like-for-like vs other systems\")."
+  ]
+}
+

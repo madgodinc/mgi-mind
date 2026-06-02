@@ -199,6 +199,16 @@ pub enum Commands {
         output: Option<String>,
     },
 
+    /// Counterfactual A/B for the retrieval policy: take a `mgimind bench`
+    /// raw.json output, classify each question by the trigger table (P1
+    /// must-search, P2 should-search, P0 no-search), and report ΔR@k with
+    /// vs without the search-before-answer policy. Zero-API. Measures
+    /// **structural** value of the policy, not LLM generation quality.
+    BenchPolicy {
+        /// Path to the raw.json produced by `mgimind bench --output raw.json`
+        input: String,
+    },
+
     /// Consolidate memory: merge duplicates / near-duplicates and report cold
     /// (old, unused) entries (phase Д2). Dry-run unless --apply.
     Consolidate {
@@ -457,6 +467,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
             output,
         } => cmd_bench_procedural(&dataset, limit, output.as_deref()).await,
+        Commands::BenchPolicy { input } => cmd_bench_policy(&input).await,
         Commands::Consolidate {
             apply,
             library,
@@ -677,6 +688,12 @@ async fn cmd_bench_procedural(
 ) -> Result<()> {
     let config = crate::config::load_cached()?;
     let report = crate::bench_procedural::run(&config, dataset, limit, output).await?;
+    println!("{report}");
+    Ok(())
+}
+
+async fn cmd_bench_policy(input: &str) -> Result<()> {
+    let report = crate::bench_policy::run(std::path::Path::new(input))?;
     println!("{report}");
     Ok(())
 }
