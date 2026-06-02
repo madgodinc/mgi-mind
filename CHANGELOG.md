@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.3 — surface errors from idempotent index creation, add hot-path tracing
+
+Diagnostic + correctness patch on top of 0.12.2. The 0.12.2 hotfix
+was based on the wrong root cause (IPv6 vs IPv4 race in
+`Qdrant::from_url("localhost:...")`); the actual hang in `add_memory`
+was somewhere else, and we couldn't see it because every
+`create_field_index` result was being discarded with `let _ = …`.
+An infinite-await against the qdrant server during index creation
+looks identical to "success" from outside the function.
+
+### Changed
+- `ensure_payload_indexes` and `ensure_facts_indexes`: stopped
+  discarding errors with `let _ =`. "Already exists" is filtered as
+  the only success-equivalent; everything else surfaces via
+  `tracing::warn!` with the field name and the error string.
+- Added `tracing::debug!` around every `.await` in `add_memory`:
+  `get_client`, `ensure_memories_collection`, `embed_passages`.
+  Running `RUST_LOG=mgimind=debug` (or `mgi_mind=debug` depending on
+  binary name) now pinpoints the hanging step in seconds.
+
+### Caveats
+- `tracing::debug!` is compiled in but inactive by default — same
+  no-overhead in release as before. Only fires when the user opts
+  into `RUST_LOG=debug`. Production users see no log spam.
+
 ## 0.12.2 — Qdrant client binds IPv4 explicitly, with timeouts
 
 Hotfix continuation. After 0.12.1 fixed the glibc problem, the next
