@@ -1,0 +1,14 @@
+{
+  "version": "0.8.0",
+  "data_dir": "/home/madgodinc/mgimind-bench",
+  "model_name": "all-MiniLM-L6-v2",
+  "qdrant_port": 6336,
+  "vector_size": 384,
+  "pooling": "mean",
+  "uses_token_type_ids": true,
+  "query_prefix": "",
+  "passage_prefix": "",
+  "rerank_enabled": false,
+  "rerank_model": "bge-reranker-base",
+  "rerank_top_k": 20
+}

@@ -57,15 +57,39 @@ raw file alongside any number you publish, so the claim is checkable.
 
 ## Results
 
-_Not yet run on the full datasets._ Run the command above locally and paste the
-report here, with:
+### LongMemEval-S — 2026-06-02, CPU
 
-- metric name (R@k retrieval recall — not QA accuracy),
-- dataset + version + subset (e.g. "LongMemEval-S, 500 questions, abstention
-  excluded"; "LoCoMo, 1540 non-adversarial"),
-- the config line from the report header (model, dim, rerank on/off),
-- date of the run,
-- the raw `--output` JSON committed to the repo.
+```
+config: model=all-MiniLM-L6-v2 dim=384 rerank=false (sessions ranked by hybrid dense+sparse)
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 85.2%
+  R@5  = 98.2%
+  R@10 = 99.4%
+
+By question type:
+  knowledge-update           n=78   R@1=94%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=86%  R@5=99%  R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=53%  R@5=93%  R@10=97%
+  single-session-user        n=70   R@1=86%  R@5=99%  R@10=100%
+  temporal-reasoning         n=133  R@1=80%  R@5=96%  R@10=98%
+```
+
+- **Date:** 2026-06-02
+- **Build:** mgimind v0.8.1 (commit `a5fb6e4`, main)
+- **Host:** Intel i5-12400F (6c/12t), 48GB RAM, CPU-only (no GPU acceleration)
+- **Wall time:** ~1h 45min for 500 questions
+- **Raw per-question JSON:**
+  [`benchmark/results/2026-06-02-cpu-overnight/run01_minilm_rerank_off/raw.json`](benchmark/results/2026-06-02-cpu-overnight/run01_minilm_rerank_off/raw.json)
+- **Full run notes:**
+  [`benchmark/results/2026-06-02-cpu-overnight/README.md`](benchmark/results/2026-06-02-cpu-overnight/README.md)
+
+Variance (multiple repeats) and additional configs (`rerank=on`,
+`multilingual-e5-base`) will be added on subsequent minor releases rather than
+in a single overnight burst. The plan is: every minor tag re-runs the headline
+config above and publishes Δ; milestone releases run the full ablation matrix.
 
 Do not paste a number you did not produce on this build — borrowing another
 project's figure is exactly the overclaim this file exists to prevent.
