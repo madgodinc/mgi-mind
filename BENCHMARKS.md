@@ -177,55 +177,59 @@ mgimind bench-procedural <dataset.jsonl> --output raw.json
 
 Dataset format is JSONL with fields `{error, fix, language, stratum, id?, context?}`.
 
-### Results — 2026-06-02 (v0.14.x, 177-pair v3 corpus)
+### Results — 2026-06-02 (v0.14.x, final 227-pair v0.10.0 set)
 
-Mined locally with `scripts/scrape_procedural_dataset.py` from 19 OSS repos
-(cargo, clap, click, cobra, commander.js, express, flask, hyper, pytest,
-qdrant, requests, reqwest, rust-clippy, rustfmt, rustlings, serde, tokio,
-yargs, and one more) at depth 5000 commits each. **177 pairs** after
-filtering, stratified by file-touch heuristic (test paths → `test`,
-build manifests → `compile`, etc).
+Mined locally with `scripts/scrape_procedural_dataset.py` from 20 OSS repos
+(cargo, clap, click, cobra, commander.js, django, express, flask, go,
+hyper, next.js, pytest, qdrant, requests, reqwest, rust-clippy, rustfmt,
+rustlings, serde, tokio, yargs) at depth 5000 commits each. **227 pairs**
+after filtering, stratified by file-touch heuristic (test paths → `test`,
+build manifests → `compile`, CI dirs → `ci`).
 
 ```
 config: model=multilingual-e5-base dim=768 rerank=false
-scored: 177 pairs
+scored: 227 pairs
 
 Overall:
-  R@1  = 44.1%
-  R@5  = 98.9%   <- headline
-  R@10 = 100.0%
+  R@1  = 48.0%
+  R@5  = 96.5%   <- headline
+  R@10 = 98.7%
 
 By language:
-  py    n=46   R@1= 41.3% R@5=100.0% R@10=100.0%
-  rust  n=110  R@1= 45.5% R@5= 98.2% R@10=100.0%
-  ts    n=19   R@1= 47.4% R@5=100.0% R@10=100.0%
-  go    n=2    R@1=  0.0% R@5=100.0% R@10=100.0%
+  go    n=2    R@1= 50.0% R@5=100.0% R@10=100.0%
+  py    n=46   R@1= 50.0% R@5= 97.8% R@10=100.0%
+  rust  n=116  R@1= 45.7% R@5= 96.6% R@10=100.0%
+  ts    n=63   R@1= 50.8% R@5= 95.2% R@10= 95.2%
 
 By stratum (error type):
-  compile  n=8    R@1= 50.0% R@5=100.0% R@10=100.0%
-  runtime  n=108  R@1= 48.1% R@5= 98.1% R@10=100.0%
-  test     n=61   R@1= 36.1% R@5=100.0% R@10=100.0%
+  ci       n=1    R@1=  0.0% R@5=100.0% R@10=100.0%
+  compile  n=10   R@1= 80.0% R@5=100.0% R@10=100.0%
+  runtime  n=120  R@1= 47.5% R@5= 95.8% R@10= 99.2%
+  test     n=96   R@1= 45.8% R@5= 96.9% R@10= 97.9%
 ```
 
-- **Dataset:** [`benchmark/datasets/procedural-v010-177.jsonl`](benchmark/datasets/procedural-v010-177.jsonl)
-- **Raw per-pair JSON:** [`benchmark/results/2026-06-02-procedural-v3/raw.json`](benchmark/results/2026-06-02-procedural-v3/raw.json)
+- **Dataset:** [`benchmark/datasets/procedural-v010-227.jsonl`](benchmark/datasets/procedural-v010-227.jsonl)
+- **Raw per-pair JSON:** [`benchmark/results/2026-06-02-procedural-v010-final/raw.json`](benchmark/results/2026-06-02-procedural-v010-final/raw.json)
+- **Earlier 177-pair v3 set:** [`benchmark/datasets/procedural-v010-177.jsonl`](benchmark/datasets/procedural-v010-177.jsonl)
 - **Earlier bootstrap (111 pairs):** [`benchmark/datasets/procedural-v010-bootstrap-111.jsonl`](benchmark/datasets/procedural-v010-bootstrap-111.jsonl)
 
 ### What the numbers say (and don't)
 
-- **R@5 = 98.9%** is the headline. When the agent asks for a playbook the
-  layer surfaces it in the top 5 nearly always.
-- **R@1 = 44.1%** is realistic-and-low: many fix commits in the dataset share
-  near-identical error signatures (e.g. two distinct CI flakes both saying
-  "test failure on macOS"). With multiple plausible fixes for one signature,
-  picking the *exact* gold at rank 1 is partly a coin flip — the metric to
-  watch is R@5, not R@1.
-- The stratum balance improved over the v1 bootstrap (was 97% `runtime`, now
-  61% runtime / 34% test / 5% compile) after the file-touch heuristic landed
-  in v0.14.x. Test fixes (loop bounds, assertions, mocks) and compile fixes
-  (manifest tweaks, missing imports) now cleave from runtime fixes.
-- **Go n=2** is below useful sample — golang/go was not in the v3 corpus
-  for size reasons. Will land in the next iteration.
+- **R@5 = 96.5%** is the headline. The system surfaces the right playbook in
+  the top 5 results 96.5% of the time across 4 languages and 4 strata.
+- **R@1 = 48.0%** is realistic. Many fix commits share near-identical error
+  signatures ("test failure on macOS" appears across 8 commits in next.js).
+  With multiple plausible fixes for one signature, picking the *exact* gold
+  at rank 1 is partly a coin flip — the metric to watch is R@5.
+- **compile R@1 = 80%** is the strongest stratum: compile errors carry
+  highly specific signatures (`error[E0599]`, `cannot find name`), which the
+  sparse retrieval branch catches reliably.
+- **R@5 drop vs the 177-pair v3 set (98.9% → 96.5%)** is honest: next.js
+  introduced 50 TS pairs with near-duplicate "Hydration mismatch" style
+  signatures that compress retrieval headroom. Larger corpus, harder noise,
+  more realistic number. Don't cherry-pick the smaller set.
+- The v0.10.0 ров target was "200+ pairs from 20+ repos with stratum
+  coverage". Reached: 227 pairs, 20 repos, 4 strata, 4 languages.
 
 ### Like-for-like vs other systems (planned)
 
