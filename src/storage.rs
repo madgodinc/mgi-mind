@@ -925,6 +925,118 @@ pub async fn promote_from_quarantine(config: &MindConfig, id: &str) -> Result<bo
     Ok(true)
 }
 
+/// A quarantined memory entry, surfaced explicitly through the quarantine
+/// commands. Distinct from `SearchResult` because the gate reason matters
+/// here (it's the whole point of inspecting the quarantine).
+#[derive(Debug, Clone)]
+pub struct QuarantineEntry {
+    pub id: String,
+    pub library: String,
+    pub content: String,
+    pub source: Option<String>,
+    pub reason: String,
+    pub created_at: Option<String>,
+}
+
+/// List quarantined entries, newest first. `library = None` lists across all
+/// libraries; otherwise scoped. The store's `must_not quarantined=true` on
+/// normal search means this is the only surface that ever returns these.
+pub async fn quarantine_list(
+    config: &MindConfig,
+    library: Option<&str>,
+    limit: usize,
+) -> Result<Vec<QuarantineEntry>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = match library {
+        Some(lib) => quarantine_filter(lib),
+        None => Filter::must([Condition::matches("quarantined", true)]),
+    };
+
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .limit(limit as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("quarantine scroll failed")?;
+
+    let results = response
+        .result
+        .into_iter()
+        .map(|point| {
+            let payload = &point.payload;
+            let content = extract_string(payload, "content").unwrap_or_default();
+            QuarantineEntry {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                library: extract_string(payload, "library").unwrap_or_default(),
+                content: truncate_str(&content, 200),
+                source: extract_string(payload, "source"),
+                reason: extract_string(payload, "quarantine_reason").unwrap_or_default(),
+                created_at: extract_string(payload, "created_at"),
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Fetch a single quarantined entry with full (untruncated) content. Returns
+/// `None` if the id is unknown OR if the point is not actually quarantined
+/// (so callers can't use this to peek at ordinary memories through the
+/// quarantine surface — keep the surfaces honest).
+pub async fn quarantine_get(config: &MindConfig, id: &str) -> Result<Option<QuarantineEntry>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid.clone()])
+                .with_payload(true),
+        )
+        .await
+        .context("quarantine get failed")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(None);
+    };
+    let q = extract_bool(&point.payload, "quarantined").unwrap_or(false);
+    if !q {
+        return Ok(None);
+    }
+    let payload = &point.payload;
+    let content = extract_string(payload, "content").unwrap_or_default();
+    Ok(Some(QuarantineEntry {
+        id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+        library: extract_string(payload, "library").unwrap_or_default(),
+        content,
+        source: extract_string(payload, "source"),
+        reason: extract_string(payload, "quarantine_reason").unwrap_or_default(),
+        created_at: extract_string(payload, "created_at"),
+    }))
+}
+
 /// Helper to read a bool from Qdrant payload.
 fn extract_bool(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<bool> {
     payload.get(key).and_then(|v| v.kind.as_ref().and_then(|k| match k {

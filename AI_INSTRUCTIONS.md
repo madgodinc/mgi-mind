@@ -181,6 +181,7 @@ just saw, or the validation will reject the call.
 ## Your MCP tools
 
 Memory: `mind_search`, `mind_add`, `mind_provenance_add`, `mind_ingest`, `mind_history`, `mind_delete`, `mind_context`.
+Quarantine (v0.11 — entries the relevance gate filtered, hidden from `mind_search`): `mind_quarantine_list`, `mind_quarantine_show`, `mind_quarantine_promote`. Use when the user keeps re-asserting something that "should be there" but isn't.
 Libraries: `mind_create`, `mind_list`, `mind_stats`.
 Facts: `mind_fact_add`, `mind_fact_query`, `mind_fact_invalidate`.
 Procedures: `mind_learn`, `mind_recall`, `mind_procedure_outcome`.
