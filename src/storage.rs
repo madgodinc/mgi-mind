@@ -357,28 +357,31 @@ async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()>
 /// `library` (keyword) for fast per-library filtering, `created_at` (datetime)
 /// for `order_by` in `history`. Idempotent - "already exists" errors are ignored.
 async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
-    let _ = client
-        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-            collection,
-            "library",
-            FieldType::Keyword,
-        ))
-        .await;
-    let _ = client
-        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-            collection,
-            "created_at",
-            FieldType::Datetime,
-        ))
-        .await;
-    // `type` (keyword) so a search can scope to memory vs procedure (phase Д2).
-    let _ = client
-        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-            collection,
-            "type",
-            FieldType::Keyword,
-        ))
-        .await;
+    for (field, ty) in [
+        ("library", FieldType::Keyword),
+        ("created_at", FieldType::Datetime),
+        // `type` (keyword) so a search can scope to memory vs procedure (phase Д2).
+        ("type", FieldType::Keyword),
+    ] {
+        tracing::debug!(collection, field, "ensure_payload_index: start");
+        match client
+            .create_field_index(CreateFieldIndexCollectionBuilder::new(collection, field, ty))
+            .await
+        {
+            Ok(_) => tracing::debug!(collection, field, "ensure_payload_index: ok"),
+            // Idempotent: "already exists" is success. Anything else surfaces so
+            // the next infrastructure surprise lands diagnosable, not as an
+            // immortal-futex hang on a discarded error (see v0.12.2 PR).
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("already exists") || msg.contains("AlreadyExists") {
+                    tracing::debug!(collection, field, "ensure_payload_index: already exists");
+                } else {
+                    tracing::warn!(collection, field, error = %e, "ensure_payload_index: failed");
+                }
+            }
+        }
+    }
 }
 
 /// Create the memories collection with named vectors (audit #23 hybrid): a dense
@@ -438,29 +441,34 @@ pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()>
 /// datetime on `created_at` so the context briefing can `order_by` newest. All
 /// idempotent.
 async fn ensure_facts_indexes(client: &Qdrant) {
-    for field in ["subject", "predicate", "object"] {
-        let _ = client
+    let fields: &[(&str, FieldType)] = &[
+        ("subject", FieldType::Text),
+        ("predicate", FieldType::Text),
+        ("object", FieldType::Text),
+        ("valid", FieldType::Keyword),
+        ("created_at", FieldType::Datetime),
+    ];
+    for (field, ty) in fields {
+        tracing::debug!(field, "ensure_facts_index: start");
+        match client
             .create_field_index(CreateFieldIndexCollectionBuilder::new(
                 FACTS_COLLECTION,
-                field,
-                FieldType::Text,
+                *field,
+                *ty,
             ))
-            .await;
+            .await
+        {
+            Ok(_) => tracing::debug!(field, "ensure_facts_index: ok"),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("already exists") || msg.contains("AlreadyExists") {
+                    tracing::debug!(field, "ensure_facts_index: already exists");
+                } else {
+                    tracing::warn!(field, error = %e, "ensure_facts_index: failed");
+                }
+            }
+        }
     }
-    let _ = client
-        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-            FACTS_COLLECTION,
-            "valid",
-            FieldType::Keyword,
-        ))
-        .await;
-    let _ = client
-        .create_field_index(CreateFieldIndexCollectionBuilder::new(
-            FACTS_COLLECTION,
-            "created_at",
-            FieldType::Datetime,
-        ))
-        .await;
 }
 
 /// Does the existing facts collection carry a (legacy, unused) vector config?
@@ -736,8 +744,11 @@ pub async fn add_memory(
         );
     }
 
+    tracing::debug!(library, "add_memory: get_client start");
     let client = get_client(config).await?;
+    tracing::debug!(library, "add_memory: get_client done; ensure_memories_collection start");
     ensure_memories_collection(&client, config.vector_size).await?;
+    tracing::debug!(library, "add_memory: ensure_memories_collection done");
 
     // Chunk, dropping trivially short fragments.
     let chunks: Vec<String> = chunk_text(content, CHUNK_CHARS)
@@ -749,7 +760,9 @@ pub async fn add_memory(
     }
 
     // Embed every chunk in a single batched pass (audit #2).
+    tracing::debug!(library, n_chunks = chunks.len(), "add_memory: embed_passages start");
     let embeddings = embedder::embed_passages(config, &chunks).await?;
+    tracing::debug!(library, "add_memory: embed_passages done");
     for e in &embeddings {
         check_dim(e, config)?;
     }
