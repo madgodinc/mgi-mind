@@ -177,46 +177,55 @@ mgimind bench-procedural <dataset.jsonl> --output raw.json
 
 Dataset format is JSONL with fields `{error, fix, language, stratum, id?, context?}`.
 
-### Results — 2026-06-02 bootstrap (v0.14.0)
+### Results — 2026-06-02 (v0.14.x, 177-pair v3 corpus)
 
-Mined locally with `scripts/scrape_procedural_dataset.py` from 10 OSS repos
-(cargo, clap, commander.js, flask, pytest, qdrant, rust-clippy, rustlings,
-tokio, yargs) at depth 5000 commits each. 111 pairs after filtering.
+Mined locally with `scripts/scrape_procedural_dataset.py` from 19 OSS repos
+(cargo, clap, click, cobra, commander.js, express, flask, hyper, pytest,
+qdrant, requests, reqwest, rust-clippy, rustfmt, rustlings, serde, tokio,
+yargs, and one more) at depth 5000 commits each. **177 pairs** after
+filtering, stratified by file-touch heuristic (test paths → `test`,
+build manifests → `compile`, etc).
 
 ```
 config: model=multilingual-e5-base dim=768 rerank=false
-scored: 111 pairs
+scored: 177 pairs
 
 Overall:
-  R@1  = 38.7%
-  R@5  = 99.1%
+  R@1  = 44.1%
+  R@5  = 98.9%   <- headline
   R@10 = 100.0%
 
 By language:
-  py    n=26   R@1= 50.0% R@5= 96.2% R@10=100.0%
-  rust  n=75   R@1= 37.3% R@5=100.0% R@10=100.0%
-  ts    n=10   R@1= 20.0% R@5=100.0% R@10=100.0%
+  py    n=46   R@1= 41.3% R@5=100.0% R@10=100.0%
+  rust  n=110  R@1= 45.5% R@5= 98.2% R@10=100.0%
+  ts    n=19   R@1= 47.4% R@5=100.0% R@10=100.0%
+  go    n=2    R@1=  0.0% R@5=100.0% R@10=100.0%
+
+By stratum (error type):
+  compile  n=8    R@1= 50.0% R@5=100.0% R@10=100.0%
+  runtime  n=108  R@1= 48.1% R@5= 98.1% R@10=100.0%
+  test     n=61   R@1= 36.1% R@5=100.0% R@10=100.0%
 ```
 
-- **Dataset:** [`benchmark/datasets/procedural-v010-bootstrap-111.jsonl`](benchmark/datasets/procedural-v010-bootstrap-111.jsonl)
-- **Raw per-pair JSON:** [`benchmark/results/2026-06-02-procedural-bootstrap/raw.json`](benchmark/results/2026-06-02-procedural-bootstrap/raw.json)
+- **Dataset:** [`benchmark/datasets/procedural-v010-177.jsonl`](benchmark/datasets/procedural-v010-177.jsonl)
+- **Raw per-pair JSON:** [`benchmark/results/2026-06-02-procedural-v3/raw.json`](benchmark/results/2026-06-02-procedural-v3/raw.json)
+- **Earlier bootstrap (111 pairs):** [`benchmark/datasets/procedural-v010-bootstrap-111.jsonl`](benchmark/datasets/procedural-v010-bootstrap-111.jsonl)
 
 ### What the numbers say (and don't)
 
-- **R@5 = 99.1%** is the headline. When the agent asks for a playbook the
+- **R@5 = 98.9%** is the headline. When the agent asks for a playbook the
   layer surfaces it in the top 5 nearly always.
-- **R@1 = 38.7%** is realistic-and-low: many fix commits in the dataset share
+- **R@1 = 44.1%** is realistic-and-low: many fix commits in the dataset share
   near-identical error signatures (e.g. two distinct CI flakes both saying
   "test failure on macOS"). With multiple plausible fixes for one signature,
   picking the *exact* gold at rank 1 is partly a coin flip — the metric to
   watch is R@5, not R@1.
-- **TS R@1 = 20% (n=10)** reflects (a) small sample, (b) the multilingual-e5
-  embedder is weaker on JS/TS than on Rust and Python in this corpus.
-- The dataset is bootstrap-scale (111 pairs from 10 repos). The v0.10.0 target
-  is 200+ pairs from 20+ repos with better stratum coverage (currently
-  ~97% `runtime`; the scraper's last-resort symptom-sentence pattern catches
-  too much as runtime). Replacing the heuristic with `git show --stat`-based
-  file-type inference will rebalance.
+- The stratum balance improved over the v1 bootstrap (was 97% `runtime`, now
+  61% runtime / 34% test / 5% compile) after the file-touch heuristic landed
+  in v0.14.x. Test fixes (loop bounds, assertions, mocks) and compile fixes
+  (manifest tweaks, missing imports) now cleave from runtime fixes.
+- **Go n=2** is below useful sample — golang/go was not in the v3 corpus
+  for size reasons. Will land in the next iteration.
 
 ### Like-for-like vs other systems (planned)
 
