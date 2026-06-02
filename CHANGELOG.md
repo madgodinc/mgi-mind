@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.1 — bundled Qdrant works on any glibc (musl)
+
+Hotfix. `doctor --fix` now downloads the **musl** Qdrant binary
+(`qdrant-x86_64-unknown-linux-musl.tar.gz`) on Linux x64 instead of the
+gnu build. The gnu binary that 0.12.0 fetched is linked against glibc
+2.38, which is only on Ubuntu 24.10+ / Debian 13+. Every previous
+release silently failed on Ubuntu 22.04 LTS (glibc 2.35), 20.04
+(glibc 2.31), and most container images: `mgimind serve` spawned the
+binary, it died with a glibc-not-found error on stderr (which we
+swallow to `/dev/null`), and the parent reported the misleading
+"Qdrant started but not responding after 15 seconds".
+
+### Changed
+- `download_qdrant()` asset name switched to `-musl`; SHA-256 pin
+  added as `QDRANT_LINUX_X64_1_18_1_MUSL` in `integrity.rs`. The gnu
+  pin is kept for anyone consuming the constant by name, but it is
+  no longer on the install path.
+
+### Caveats
+- The "Qdrant started but not responding" error message is still
+  produced on the rare cases where the musl binary genuinely cannot
+  start (no disk, no port). A follow-up should surface the child's
+  stderr rather than discarding it, so the next failure mode lands
+  on the user diagnosable instead of mute.
+
 ## 0.12.0 — viewer wave: pagination + three live tabs
 
 Earns the minor bump with a concrete capability that wasn't there

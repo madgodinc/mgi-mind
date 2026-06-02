@@ -8,8 +8,20 @@
 pub const ORT_LINUX_X64_1_24_2: &str =
     "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6";
 /// Qdrant server archive - linux x64 (gnu), v1.18.1.
+///
+/// Note: the gnu build requires glibc 2.38 (Ubuntu 24.10+). It silently fails
+/// on every Ubuntu LTS older than 24.10 because mgimind launches it in the
+/// background and only sees "Qdrant started but not responding". Production
+/// path is the musl pin below; this gnu pin is kept for downstream tools that
+/// pick up the constant by name.
 pub const QDRANT_LINUX_X64_1_18_1: &str =
     "e359f322a65eb6662bf5ad12ae2228bc94fde77761461c4179ba12f137b8c76d";
+/// Qdrant server archive - linux x64 (musl), v1.18.1.
+///
+/// Statically linked, no glibc dependency. Default for `doctor --fix` on Linux
+/// x64 so the bundled Qdrant works on Ubuntu 22.04 LTS, Debian 12, etc.
+pub const QDRANT_LINUX_X64_1_18_1_MUSL: &str =
+    "4df4cdfa9db20fcb49b470b35d0d001a9c4ec7ac28bfb3df4f24545524271e67";
 /// Legacy embedding model (sentence-transformers/all-MiniLM-L6-v2) ONNX weights.
 pub const MODEL_MINILM_ONNX: &str =
     "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452";
@@ -59,6 +71,7 @@ mod tests {
             RERANK_BGE_BASE_TOKENIZER,
             ORT_LINUX_X64_1_24_2,
             QDRANT_LINUX_X64_1_18_1,
+            QDRANT_LINUX_X64_1_18_1_MUSL,
         ] {
             assert!(pin(h).is_some(), "default artifact must be pinned");
             assert_eq!(h.len(), 64, "sha256 hex must be 64 chars");
