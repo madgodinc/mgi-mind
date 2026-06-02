@@ -1,0 +1,20 @@
+LongMemEval — retrieval recall (R@k), zero-API
+config: model=all-MiniLM-L6-v2 dim=384 rerank=false (sessions ranked by hybrid dense+sparse)
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 85.2%
+  R@5  = 98.2%
+  R@10 = 99.4%
+
+By question type:
+  knowledge-update           n=78   R@1=94% R@5=100% R@10=100%
+  multi-session              n=133  R@1=86% R@5=99% R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=53% R@5=93% R@10=97%
+  single-session-user        n=70   R@1=86% R@5=99% R@10=100%
+  temporal-reasoning         n=133  R@1=80% R@5=96% R@10=98%
+
+Raw per-question results written to /home/madgodinc/Brain/mgi-mind-v2/benchmark/results/2026-06-02-cpu-overnight/run01_minilm_rerank_off/raw.json
+
+Note: R@k is retrieval recall (zero-API), NOT QA accuracy. Do not compare it against another system's LLM-judged QA numbers.
