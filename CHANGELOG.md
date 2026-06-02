@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.14.2 — procedural-dataset v3 (177 pairs from 19 OSS repos, stratified)
+
+Expanded the procedural-memory bench corpus from the 111-pair bootstrap
+to **177 pairs from 19 OSS repos**, and improved stratification so the
+"runtime / test / compile" buckets reflect what the fix actually
+changed instead of catching everything as runtime.
+
+### Added
+- `benchmark/datasets/procedural-v010-177.jsonl` — the v3 dataset (177
+  records). Mined locally with the updated scraper from cargo, clap,
+  click, cobra, commander.js, express, flask, hyper, pytest, qdrant,
+  requests, reqwest, rust-clippy, rustfmt, rustlings, serde, tokio,
+  yargs, and one more.
+- `benchmark/results/2026-06-02-procedural-v3/raw.json` — per-pair
+  results behind the BENCHMARKS.md numbers.
+
+### Changed
+- `scripts/scrape_procedural_dataset.py` now derives stratum from the
+  files the commit touched: `test`/`tests/`/`spec` paths → `test`,
+  build manifests (Cargo.toml, package.json, pyproject.toml, etc) →
+  `compile`, CI dirs → `ci`. The pattern-derived hint still wins when
+  the body contains an explicit compile error code (e.g. `error[E0599]`).
+- BENCHMARKS.md procedural section now points at the v3 dataset; the
+  bootstrap dataset is kept as a referenced earlier baseline.
+
+### Results — v3 vs v1 bootstrap
+
+```
+config: model=multilingual-e5-base dim=768 rerank=false
+
+                v1 (n=111)   v3 (n=177)
+R@1               38.7%        44.1%   (+5.4)
+R@5               99.1%        98.9%   (−0.2, noise)
+R@10             100.0%       100.0%
+
+stratum mix:
+  runtime          97%          61%
+  test              0%          34%
+  compile           3%           5%
+```
+
+The headline R@5 is stable across corpus shape. R@1 rose because the
+larger corpus dilutes the near-duplicate error signatures that drag
+exact-match recall on a small set. Stratum balance is the real win:
+"the system can recall a fix" is now broken out by what kind of fix.
+
 ## 0.14.1 — counterfactual A/B for retrieval policy
 
 Companion to the LongMemEval recall numbers: a CLI that takes any prior

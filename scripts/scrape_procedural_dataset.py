@@ -108,6 +108,48 @@ def infer_language(files: list[str]) -> str | None:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
+# File-based stratum inference: which kind of fix is this commit?
+TEST_PATH_HINTS = ("/test", "/tests/", "_test.", ".test.", "/spec", "_spec.", ".spec.")
+BUILD_PATH_HINTS = (
+    "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json",
+    "pyproject.toml", "setup.py", "requirements", "tsconfig",
+    "build.rs", "Makefile", "CMakeLists",
+)
+CI_PATH_HINTS = (".github/workflows", "ci/", "docker", ".gitlab")
+
+
+def infer_stratum_from_files(files: list[str], pattern_hint: str | None) -> str | None:
+    """Stratum priority: pattern-derived first, then file-based.
+
+    File-based heuristic looks at *what kind of files the fix changed*:
+      - any test-suite path  -> "test"
+      - build manifests       -> "compile"
+      - .github/.gitlab/ci    -> "ci"
+      - otherwise             -> "runtime"
+
+    If `pattern_hint` already tagged a stratum (e.g. compile via error[E0599])
+    we trust it. The file heuristic only fills in the blanks the pattern
+    couldn't decide.
+    """
+    if pattern_hint and pattern_hint != "runtime":
+        return pattern_hint
+
+    has_test = any(any(h in f for h in TEST_PATH_HINTS) for f in files)
+    has_build = any(any(h in f for h in BUILD_PATH_HINTS) for f in files)
+    has_ci = any(any(h in f for h in CI_PATH_HINTS) for f in files)
+
+    # Prefer the most specific bucket. A test-edit commit is a test fix even
+    # if it also touched build files (the actual fix lives in the test
+    # change, the manifest tweak is collateral).
+    if has_test:
+        return "test"
+    if has_build:
+        return "compile"
+    if has_ci:
+        return "ci"
+    return pattern_hint or "runtime"
+
+
 def extract_error(body: str) -> tuple[str | None, str | None]:
     """Find the first matching error signature. Returns (error, pattern_id)."""
     for name, pat in ERROR_PATTERNS:
@@ -136,11 +178,15 @@ def mine_repo(repo: Path, max_pairs: int) -> list[dict]:
         files = commit_files(repo, sha)
         lang_from_files = infer_language(files)
         if pattern_id and pattern_id in STRATUM_HINT:
-            lang_hint, stratum = STRATUM_HINT[pattern_id]
+            lang_hint, stratum_hint = STRATUM_HINT[pattern_id]
             lang = lang_hint or lang_from_files
         else:
             lang = lang_from_files
-            stratum = None
+            stratum_hint = None
+
+        # Promote stratum off the file-touch signal so we don't dump every fix
+        # into "runtime" just because the body said "broke".
+        stratum = infer_stratum_from_files(files, stratum_hint)
 
         if not lang:
             continue
