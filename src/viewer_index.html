@@ -55,6 +55,7 @@
 
 <nav>
   <button id="tab-mem" class="on" onclick="show('mem')">memories</button>
+  <button id="tab-quarantine" onclick="show('quarantine')">quarantine</button>
   <button id="tab-audit" onclick="show('audit')">audit log</button>
 </nav>
 
@@ -70,6 +71,20 @@
       <button onclick="loadMemories()">reload</button>
     </div>
     <div id="memlist"></div>
+  </section>
+
+  <section id="quarantine" class="panel">
+    <div class="controls">
+      <label>library:</label>
+      <select id="qlibsel" onchange="loadQuarantine()">
+        <option value="">(all)</option>
+      </select>
+      <label>limit:</label>
+      <input id="qlimit" type="number" min="1" max="200" value="50" onchange="loadQuarantine()" style="width:80px">
+      <button onclick="loadQuarantine()">reload</button>
+      <span class="dim">v0.11 relevance gate filtered these; not shown in mind_search</span>
+    </div>
+    <div id="qlist"></div>
   </section>
 
   <section id="audit" class="panel">
@@ -97,6 +112,10 @@
     return fetch(path, { method: 'DELETE', headers: { Authorization: 'Bearer ' + TOKEN } })
       .then(r => { if (!r.ok) throw new Error(r.status + ' ' + r.statusText); return r.json(); });
   }
+  function apiPost(path) {
+    return fetch(path, { method: 'POST', headers: { Authorization: 'Bearer ' + TOKEN } })
+      .then(r => { if (!r.ok) throw new Error(r.status + ' ' + r.statusText); return r.json(); });
+  }
   function showErr(msg) {
     const el = document.getElementById('err');
     el.textContent = String(msg);
@@ -105,11 +124,12 @@
   function clearErr() { document.getElementById('err').style.display = 'none'; }
 
   function show(tab) {
-    for (const id of ['mem', 'audit']) {
+    for (const id of ['mem', 'quarantine', 'audit']) {
       document.getElementById(id).classList.toggle('on', id === tab);
       document.getElementById('tab-' + id).classList.toggle('on', id === tab);
     }
     if (tab === 'audit') loadAudit();
+    if (tab === 'quarantine') loadQuarantine();
   }
 
   async function loadLibs() {
@@ -117,7 +137,12 @@
       clearErr();
       const libs = await api('/api/libraries');
       const sel = document.getElementById('libsel');
+      const qsel = document.getElementById('qlibsel');
       sel.innerHTML = '';
+      // Quarantine library selector starts with "(all)" so the user can see
+      // every quarantined entry without picking a library first — they may
+      // not know which library a filtered entry landed in.
+      qsel.innerHTML = '<option value="">(all)</option>';
       if (libs.length === 0) {
         const opt = document.createElement('option');
         opt.value = ''; opt.textContent = '(no libraries)';
@@ -129,8 +154,74 @@
         const opt = document.createElement('option');
         opt.value = l; opt.textContent = l;
         sel.appendChild(opt);
+        const qopt = document.createElement('option');
+        qopt.value = l; qopt.textContent = l;
+        qsel.appendChild(qopt);
       }
       loadMemories();
+    } catch (e) { showErr(e); }
+  }
+
+  async function loadQuarantine() {
+    try {
+      clearErr();
+      const lib = document.getElementById('qlibsel').value;
+      const limit = document.getElementById('qlimit').value || 50;
+      // Empty library means "all libraries" — backend treats omitted param
+      // that way. We must NOT pass library= as empty string; some servers
+      // would filter to literal "" and return nothing.
+      const qs = (lib ? ('library=' + encodeURIComponent(lib) + '&') : '') + 'limit=' + limit;
+      const rows = await api('/api/quarantine?' + qs);
+      const wrap = document.getElementById('qlist');
+      if (!rows || rows.length === 0) {
+        wrap.innerHTML = '<div class="empty">No quarantined entries' + (lib ? (' in ' + esc(lib)) : '') + '.</div>';
+        return;
+      }
+      wrap.innerHTML = '';
+      for (const r of rows) {
+        const div = document.createElement('div');
+        div.className = 'row';
+        const sourceBadge = r.source ? '<span>source: ' + esc(r.source) + '</span>' : '';
+        const reasonBadge = r.reason ? '<span class="lib">reason: ' + esc(r.reason) + '</span>' : '';
+        const libBadge = r.library ? '<span>lib: ' + esc(r.library) + '</span>' : '';
+        div.innerHTML =
+          '<div class="meta">' +
+          reasonBadge +
+          libBadge +
+          '<span>created: ' + esc(r.created_at || '') + '</span>' +
+          sourceBadge +
+          '<span class="id">' + esc(r.id) + '</span>' +
+          '</div>' +
+          '<pre>' + esc(r.content || '') + '</pre>' +
+          '<div style="margin-top:8px"><button data-id="' + esc(r.id) + '">promote to memory</button></div>';
+        // Promote is a write action — disable the button while the POST is in
+        // flight so a double-click cannot duplicate the audit event. Render
+        // any error inline so the user sees a real failure, not silence.
+        div.querySelector('button').onclick = async (ev) => {
+          const btn = ev.target;
+          if (btn.disabled) return;
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = 'promoting…';
+          try {
+            const resp = await apiPost('/api/quarantine/' + encodeURIComponent(btn.dataset.id) + '/promote');
+            if (resp && resp.ok === false) {
+              showErr('Could not promote: ' + (resp.reason || 'unknown'));
+              btn.disabled = false;
+              btn.textContent = orig;
+              return;
+            }
+            // Success: refresh the list. The promoted row drops out because
+            // the backend's quarantine filter excludes promoted points.
+            loadQuarantine();
+          } catch (e) {
+            showErr(e);
+            btn.disabled = false;
+            btn.textContent = orig;
+          }
+        };
+        wrap.appendChild(div);
+      }
     } catch (e) { showErr(e); }
   }
 

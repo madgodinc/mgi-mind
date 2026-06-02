@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.11.8 - viewer: Quarantine tab
+
+First of three UI tabs that consume the v0.11.2–v0.11.4 backend
+endpoints. Shipped alone (not as a bundle) so any layout / JS
+regression lands isolated. The other two tabs (consolidate, ingest
+recent) will follow in 0.11.9 and 0.11.10 after this one is verified
+in a real browser.
+
+### Added
+- Quarantine tab in `viewer_index.html`. Reuses the existing fetch
+  wrapper (`api()`) for GETs and adds an `apiPost()` helper for
+  promote.
+- Library dropdown defaults to `(all)` — quarantined entries don't
+  always live in the library the user expects. Limit input
+  (default 50) caps response size.
+- Row rendering: gate `reason` badge, library, source, created_at,
+  truncated content (server-side: 200 chars), plus a `promote to
+  memory` button. Button disables itself during the in-flight POST
+  so a double-click cannot duplicate the audit entry, restores on
+  failure, and triggers a list reload on success (the promoted row
+  drops out because the backend filter excludes promoted points).
+- Honest empty-state rendering (`No quarantined entries in <lib>.`)
+  instead of a blank pane.
+- Honest error rendering: if the backend returns
+  `{ok:false, reason:...}` the reason surfaces via `showErr`, the
+  button re-enables and restores its label so the user can retry.
+
+### Notes
+The other v0.11 endpoints (`/api/consolidate`,
+`/api/ingest/recent`) are unchanged and not yet wired to a tab.
+This is deliberate per the pre-commit critic ("ship one, verify,
+then ship the rest").
+
 ## 0.11.7 - `mgimind ingest-session`
 
 A manual batch command that parses a closed Claude Code transcript
