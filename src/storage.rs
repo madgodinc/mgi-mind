@@ -938,21 +938,34 @@ pub struct QuarantineEntry {
     pub created_at: Option<String>,
 }
 
-/// List quarantined entries, newest first. `library = None` lists across all
-/// libraries; otherwise scoped. The store's `must_not quarantined=true` on
-/// normal search means this is the only surface that ever returns these.
-pub async fn quarantine_list(
+/// Result of a paginated quarantine list. `next_cursor` is None when the
+/// caller has reached the end; otherwise pass it back in to get the next
+/// page. Cursor is opaque (a Qdrant point-id sentinel) — callers should not
+/// inspect it.
+#[derive(Debug, Clone)]
+pub struct QuarantinePage {
+    pub entries: Vec<QuarantineEntry>,
+    pub next_cursor: Option<String>,
+}
+
+/// List quarantined entries, newest first, with cursor-based pagination.
+/// `library = None` lists across all libraries; otherwise scoped. The store's
+/// `must_not quarantined=true` on normal search means this is the only surface
+/// that ever returns these. Pass `cursor = None` for the first page; the
+/// returned `next_cursor` (if any) feeds back in for the next page.
+pub async fn quarantine_list_page(
     config: &MindConfig,
     library: Option<&str>,
     limit: usize,
-) -> Result<Vec<QuarantineEntry>> {
+    cursor: Option<&str>,
+) -> Result<QuarantinePage> {
     let client = get_client(config).await?;
     if !client
         .collection_exists(MEMORIES_COLLECTION)
         .await
         .unwrap_or(false)
     {
-        return Ok(Vec::new());
+        return Ok(QuarantinePage { entries: Vec::new(), next_cursor: None });
     }
 
     let filter = match library {
@@ -960,25 +973,41 @@ pub async fn quarantine_list(
         None => Filter::must([Condition::matches("quarantined", true)]),
     };
 
+    // Qdrant's ordered scroll does NOT populate next_page_offset (cursor
+    // pagination is for unordered scroll only). We implement cursor manually
+    // by passing the last seen `created_at` of the previous page as
+    // `start_from` on the next call. The cursor string is the RFC3339
+    // timestamp of the last returned entry; the next call resumes strictly
+    // before it (Desc order). Fetch limit+1 to detect end-of-data without an
+    // extra round-trip — drop the extra before returning.
     let order = OrderBy {
         key: "created_at".to_string(),
         direction: Some(Direction::Desc as i32),
-        start_from: None,
+        start_from: cursor.map(|c| qdrant_client::qdrant::start_from::Value::Datetime(c.to_string()).into()),
     };
 
+    let fetch_limit = limit + 1;
+    let builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+        .filter(filter)
+        .limit(fetch_limit as u32)
+        .with_payload(true)
+        .order_by(order);
+
     let response = client
-        .scroll(
-            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
-                .filter(filter)
-                .limit(limit as u32)
-                .with_payload(true)
-                .order_by(order),
-        )
+        .scroll(builder)
         .await
         .context("quarantine scroll failed")?;
 
-    let results = response
-        .result
+    let mut points = response.result;
+    // If we got more than `limit`, there's a next page; the extra row's
+    // created_at becomes the cursor and we drop it from the returned set.
+    let next_cursor = if points.len() > limit {
+        points.pop().and_then(|p| extract_string(&p.payload, "created_at"))
+    } else {
+        None
+    };
+
+    let entries = points
         .into_iter()
         .map(|point| {
             let payload = &point.payload;
@@ -994,7 +1023,19 @@ pub async fn quarantine_list(
         })
         .collect();
 
-    Ok(results)
+    Ok(QuarantinePage { entries, next_cursor })
+}
+
+/// Backwards-compatible single-page lister. Used by the CLI/MCP surfaces
+/// where pagination doesn't make sense (one screenful is enough); the
+/// HTTP/UI surface uses `quarantine_list_page` directly.
+pub async fn quarantine_list(
+    config: &MindConfig,
+    library: Option<&str>,
+    limit: usize,
+) -> Result<Vec<QuarantineEntry>> {
+    let page = quarantine_list_page(config, library, limit, None).await?;
+    Ok(page.entries)
 }
 
 /// Fetch a single quarantined entry with full (untruncated) content. Returns

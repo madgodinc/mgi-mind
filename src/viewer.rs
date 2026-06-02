@@ -242,22 +242,38 @@ struct QuarantineQuery {
     library: Option<String>,
     #[serde(default = "default_quarantine_limit")]
     limit: usize,
+    /// Opaque cursor from a previous response's `next_cursor`. Omit for the
+    /// first page.
+    cursor: Option<String>,
 }
 
 fn default_quarantine_limit() -> usize {
     50
 }
 
+#[derive(serde::Serialize)]
+struct QuarantineListResponse {
+    entries: Vec<QuarantineRow>,
+    next_cursor: Option<String>,
+}
+
 async fn api_quarantine_list(
     State(state): State<AppState>,
     Query(q): Query<QuarantineQuery>,
     headers: HeaderMap,
-) -> Result<Json<Vec<QuarantineRow>>, Response> {
+) -> Result<Json<QuarantineListResponse>, Response> {
     let auth = AuthQuery { token: q.token.clone() };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
-    let entries = storage::quarantine_list(&state.config, q.library.as_deref(), q.limit)
-        .await
-        .map_err(internal)?
+    let page = storage::quarantine_list_page(
+        &state.config,
+        q.library.as_deref(),
+        q.limit,
+        q.cursor.as_deref(),
+    )
+    .await
+    .map_err(internal)?;
+    let entries = page
+        .entries
         .into_iter()
         .map(|e| QuarantineRow {
             id: e.id,
@@ -268,7 +284,10 @@ async fn api_quarantine_list(
             created_at: e.created_at,
         })
         .collect();
-    Ok(Json(entries))
+    Ok(Json(QuarantineListResponse {
+        entries,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.12.0 — viewer wave: pagination + three live tabs
+
+Earns the minor bump with a concrete capability that wasn't there
+before: paginated quarantine listing, with a "load more" footer in
+the UI. Without it, anyone with >50 quarantined entries simply
+couldn't see beyond the first page. The other v0.11.x viewer work
+(three live tabs over the v0.11.2–v0.11.4 endpoints) becomes the
+context, not the headline.
+
+### Added
+- Cursor-based pagination on `/api/quarantine`. Response shape is now
+  `{entries: [...], next_cursor: "<rfc3339-or-null>"}` (breaking from
+  the bare array used in 0.11.2). Pass the cursor back in the
+  `cursor=` query param to get the next page; `null` means end.
+  Implementation uses Qdrant's ordered scroll with `start_from` on
+  the `created_at` payload key, since Qdrant's `next_page_offset` is
+  populated only on unordered scrolls. We fetch limit+1 each call to
+  detect end-of-data without an extra round-trip.
+- `storage::quarantine_list_page(library, limit, cursor)` returns
+  `QuarantinePage { entries, next_cursor }`. The original
+  `quarantine_list(library, limit)` is preserved as a backwards-
+  compatible single-page wrapper for CLI/MCP, which don't paginate.
+- Viewer UI: "load more" footer appends to the quarantine pane when
+  more data is available; filter / limit / reload all reset the
+  cursor so a stale cursor against a different scope cannot leak.
+
+### Notes
+The earlier v0.11.8–v0.11.10 commits (Quarantine / Consolidate /
+Auto-ingest tabs + shared `renderMemoryRow` helper) are the working
+substrate this minor builds on. The bump itself is *not* a meta-
+ceremony for already-shipped patches; it's pegged to pagination, the
+one capability a real user can do today that they could not before.
+
 ## 0.11.10 - viewer: auto-ingest tab + shared row renderer
 
 Third and final UI tab in the v0.11.8–v0.11.10 wave. Critic flagged
