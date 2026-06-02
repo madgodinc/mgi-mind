@@ -41,10 +41,23 @@ fn session(config: &MindConfig) -> Result<&'static Mutex<Session>> {
                 model_path.display()
             );
         }
-        let session = Session::builder()
+        let mut builder = Session::builder()
             .map_err(|e| anyhow!("rerank session builder: {e}"))?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("rerank optimization level: {e}"))?
+            .map_err(|e| anyhow!("rerank optimization level: {e}"))?;
+
+        // Same opt-in pattern as embedder.rs — CUDA only when both the cargo
+        // feature is on and MGIMIND_USE_CUDA=1 at runtime.
+        #[cfg(feature = "cuda")]
+        if std::env::var("MGIMIND_USE_CUDA").ok().as_deref() == Some("1") {
+            use ort::execution_providers::CUDAExecutionProvider;
+            builder = builder
+                .with_execution_providers([CUDAExecutionProvider::default().build()])
+                .map_err(|e| anyhow!("Failed to register CUDA EP (reranker): {e}"))?;
+            eprintln!("[mgimind] reranker: CUDA execution provider registered");
+        }
+
+        let session = builder
             .commit_from_file(&model_path)
             .map_err(|e| anyhow!("load reranker ONNX: {e}"))?;
         Ok(Mutex::new(session))

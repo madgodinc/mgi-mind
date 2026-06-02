@@ -94,6 +94,66 @@ config above and publishes Δ; milestone releases run the full ablation matrix.
 Do not paste a number you did not produce on this build — borrowing another
 project's figure is exactly the overclaim this file exists to prevent.
 
+## Counterfactual A/B — retrieval policy on / off
+
+Companion benchmark to the LongMemEval recall numbers above. Measures the
+**structural value of the search-before-answer policy**: take any
+`mgimind bench` raw output, classify each question by the trigger table
+(P1 must-search, P2 should-search, P0 no-search), and report the recall an
+agent would NOT have if it didn't run retrieval at all.
+
+This is not an LLM A/B (no generation, no judge). It quantifies the recall
+ceiling the policy unlocks: ΔR@5 = with-policy R@5 − without-policy R@5.
+
+### Protocol
+
+```sh
+mgimind bench-policy <raw.json from a prior `mgimind bench`>
+```
+
+Question-type → priority mapping (LongMemEval-S):
+
+| Question type | Priority |
+|---|---|
+| single-session-user / preference / assistant, knowledge-update, multi-session | P1 must-search |
+| temporal-reasoning | P2 should-search |
+| _(none in LongMemEval-S)_ | P0 no-search |
+
+### Results — 2026-06-02 (over the v0.8.1 baseline 500q run)
+
+```
+total questions: 500
+  P1: 367
+  P2: 133
+  P0: 0
+
+WITH policy:    R@5 = 98.2% (overall)
+  P1 (n=367)    R@5 = 98.9%
+  P2 (n=133)    R@5 = 96.2%
+
+WITHOUT policy: R@5 =  0.0% (structural — no search → no retrieval hits)
+
+ΔR@5 = +98.2 pct  ← recall unlocked by the policy
+```
+
+- **Raw policy JSON:** [`benchmark/results/2026-06-02-cpu-overnight/run01_minilm_rerank_off/policy.json`](benchmark/results/2026-06-02-cpu-overnight/run01_minilm_rerank_off/policy.json)
+
+### Reading the number
+
+- The "WITHOUT policy" R@5 = 0% is by construction: an agent that never
+  searches doesn't see any candidate, so nothing can be in the top-5. The
+  full Δ goes to "what would the policy save if the agent did skip search".
+- LongMemEval-S contains no chit-chat / P0 questions (all 500 map to P1 or
+  P2). The roadmap deliberately removed the P0 tier — false negatives cost
+  more than false positives. The number you see is the **upper bound** of
+  policy value on this dataset.
+- A future dataset with explicit P0 questions ("hi", "thanks", "what time
+  is it") would cleave the gap: the policy would *not* help there, but
+  also wouldn't hurt — the trigger table says skip P0.
+- **Not an LLM accuracy measure.** A real A/B with a generation step needs
+  a like-for-like LLM-judged harness (see "Like-for-like vs other systems"
+  below).
+
 ## Procedural memory — recall@k (phase Д6)
 
 Independent benchmark from LongMemEval. Measures whether the procedural-memory
