@@ -453,7 +453,11 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let path = arg_str(args, "path")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'path'"))?;
             let library = arg_str(args, "library").unwrap_or("imported");
-            crate::cli::run_import(source, path, library).await
+            // MCP defaults to apply=false (dry-run): import via an agent is
+            // exactly the case where we want a plan-first guard. The agent can
+            // re-call with apply=true after the user OKs the plan.
+            let apply = arg_bool(args, "apply", false);
+            crate::cli::run_import(source, path, library, apply).await
         }
         "mind_session_start" => {
             let agent = arg_str(args, "agent").unwrap_or("unknown");

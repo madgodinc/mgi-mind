@@ -1474,7 +1474,8 @@ pub async fn scroll_all(
 /// `created_at` let Qdrant return the newest `limit` via `order_by` - no longer
 /// O(total memories) (audit #18, fixes the post-0.2 review's `history` finding).
 /// One memory as the viewer needs it. Full content, all metadata, no score
-/// (this isn't a search result). Returned by `list_memories`.
+/// (this isn't a search result). Returned by `list_memories` and
+/// `find_by_source`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryRecord {
     pub id: String,
@@ -1483,6 +1484,59 @@ pub struct MemoryRecord {
     pub r#type: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Filter that selects all memories in a library whose `source` payload field
+/// equals the given value. Used by md-reconcile import to find existing points
+/// for a file path.
+fn library_source_filter(library: &str, source: &str) -> Filter {
+    Filter::must([
+        Condition::matches("library", library.to_string()),
+        Condition::matches("source", source.to_string()),
+    ])
+}
+
+/// Find every memory in `library` whose `source` tag matches `source`. Returns
+/// the full record so callers can diff before deciding what to do. Unindexed
+/// scan over `source` — fine at our scale; import is a rare operation by design
+/// (escape hatch, not steady-state).
+pub async fn find_by_source(
+    config: &MindConfig,
+    library: &str,
+    source: &str,
+) -> Result<Vec<MemoryRecord>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(library_source_filter(library, source))
+                .limit(256)
+                .with_payload(true),
+        )
+        .await
+        .context("find_by_source scroll failed")?;
+    Ok(response
+        .result
+        .into_iter()
+        .map(|p| {
+            let pl = &p.payload;
+            MemoryRecord {
+                id: p.id.as_ref().map(format_point_id).unwrap_or_default(),
+                content: extract_string(pl, "content").unwrap_or_default(),
+                source: extract_string(pl, "source"),
+                r#type: extract_string(pl, "type").unwrap_or_else(|| "memory".into()),
+                created_at: extract_string(pl, "created_at").unwrap_or_default(),
+                updated_at: extract_string(pl, "updated_at").unwrap_or_default(),
+            }
+        })
+        .collect())
 }
 
 /// List memories of a single library, newest first. Returns full content
