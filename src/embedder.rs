@@ -33,10 +33,25 @@ fn session(config: &MindConfig) -> Result<&'static Mutex<Session>> {
                 model_path.display()
             );
         }
-        let session = Session::builder()
+        let mut builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("Failed to create session builder: {e}"))?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {e}"))?;
+
+        // Opt-in CUDA via env var. CPU stays the default so the standard release
+        // (built without the `cuda` feature) behaves exactly as before. The
+        // execution-provider call is only compiled in when the `cuda` cargo
+        // feature is enabled (see Cargo.toml + Dockerfile).
+        #[cfg(feature = "cuda")]
+        if std::env::var("MGIMIND_USE_CUDA").ok().as_deref() == Some("1") {
+            use ort::execution_providers::CUDAExecutionProvider;
+            builder = builder
+                .with_execution_providers([CUDAExecutionProvider::default().build()])
+                .map_err(|e| anyhow::anyhow!("Failed to register CUDA EP (embedder): {e}"))?;
+            eprintln!("[mgimind] embedder: CUDA execution provider registered");
+        }
+
+        let session = builder
             .commit_from_file(&model_path)
             .map_err(|e| anyhow::anyhow!("Failed to load ONNX model: {e}"))?;
         Ok(Mutex::new(session))
@@ -397,7 +412,13 @@ pub fn is_ort_available() -> bool {
 }
 
 /// Extract a single member from a .tar.gz into `dest` (native, audit #19).
+///
+/// Refuses to extract a symlink/hardlink entry as a regular file — that would
+/// silently produce a 0-byte file (tar symlinks carry no body), which then
+/// hangs `dlopen` if the destination is a shared library. The caller must ask
+/// for the resolved versioned path instead.
 pub fn extract_member_tar_gz(archive: &Path, member: &str, dest: &Path) -> Result<()> {
+    use tar::EntryType;
     let file = std::fs::File::open(archive)?;
     let dec = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(dec);
@@ -405,6 +426,21 @@ pub fn extract_member_tar_gz(archive: &Path, member: &str, dest: &Path) -> Resul
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().to_string();
         if path == member {
+            let etype = entry.header().entry_type();
+            if matches!(etype, EntryType::Symlink | EntryType::Link) {
+                let target = entry
+                    .link_name()
+                    .ok()
+                    .flatten()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "Refusing to extract symlink/hardlink entry '{member}' (-> '{target}') \
+                     as a regular file. Tar symlinks have no body — copying them produces \
+                     a 0-byte file that hangs dlopen. Ask for the resolved versioned \
+                     filename inside the archive."
+                );
+            }
             let mut out = std::fs::File::create(dest)?;
             std::io::copy(&mut entry, &mut out)?;
             return Ok(());
@@ -454,17 +490,26 @@ pub async fn download_ort_runtime() -> Result<()> {
             None,
         )
     } else if cfg!(target_arch = "aarch64") {
+        // The archive ships `libonnxruntime.so` as a SYMLINK to the versioned
+        // file (`libonnxruntime.so.1.24.2`). Extracting a tar symlink with
+        // `std::io::copy(&mut entry, &mut out)` yields a **0-byte regular
+        // file**, because tar symlinks have no body — only metadata in the
+        // header. `dlopen` then attempts the empty file and hangs forever on
+        // some platforms (Ubuntu 24.04 RunPod containers, observed
+        // 2026-06-02). Pull the actual versioned file by exact name.
         (
             format!("onnxruntime-linux-aarch64-{ORT_VERSION}"),
             "tgz",
-            format!("onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so"),
+            format!(
+                "onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"
+            ),
             None,
         )
     } else {
         (
             format!("onnxruntime-linux-x64-{ORT_VERSION}"),
             "tgz",
-            format!("onnxruntime-linux-x64-{ORT_VERSION}/lib/libonnxruntime.so"),
+            format!("onnxruntime-linux-x64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"),
             integrity::pin(integrity::ORT_LINUX_X64_1_24_2),
         )
     };

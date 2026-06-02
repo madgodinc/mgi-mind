@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.12.4 — download the versioned ONNX Runtime file, refuse to extract symlinks
+
+THE ROOT CAUSE of every "mgimind add hangs forever" report. The
+ONNX Runtime tarball ships `lib/libonnxruntime.so` as a **symlink**
+to `lib/libonnxruntime.so.<version>`. `extract_member_tar_gz` used
+`std::io::copy(&mut entry, &mut out)` on the symlink entry — which
+silently produces a 0-byte regular file, because tar symlinks have
+no body, only metadata in the header. `doctor --fix` then reports
+"ONNX Runtime installed" with a happy exit code, the file at
+`target/release/libonnxruntime.so` is genuinely 0 bytes, and the
+next `dlopen` on it **hangs forever** with no error visible to the
+user.
+
+On the developer's PC this bug was masked because ONNX Runtime had
+been installed manually long ago and the existing 22 MB file was
+used. Every fresh install (cloud, CI, anyone downloading the
+project) hit the empty-symlink trap.
+
+### Changed
+- `embedder::download_ort_runtime` now requests the **versioned**
+  archive path (`libonnxruntime.so.<ORT_VERSION>`) instead of the
+  symlink path (`libonnxruntime.so`). The destination filename
+  stays `libonnxruntime.so` so the rest of the codebase
+  (`ORT_DYLIB_PATH` auto-detect in `main.rs`) is unchanged.
+- `embedder::extract_member_tar_gz` now refuses any
+  `Symlink`/`Link` entry with a loud error pointing at the bug
+  class. Future archive surprises surface as a panic message
+  rather than as another infinite hang.
+
+### Why this took four bumps to find
+0.12.1 fixed glibc (real, separate bug — qdrant musl). 0.12.2 fixed
+an IPv6/IPv4 race that turned out to be misdiagnosis (the
+behaviour explained 1% of the symptom and 0% of the freshly-broken
+RunPod containers). 0.12.3 added `tracing::debug` around every
+storage `.await` in `add_memory`, which is what finally pointed at
+`embed_passages start` as the last log line before the hang —
+i.e. dlopen of the 0-byte ORT library. The library file was
+visibly 0 bytes the whole time; nobody looked.
+
 ## 0.12.3 — surface errors from idempotent index creation, add hot-path tracing
 
 Diagnostic + correctness patch on top of 0.12.2. The 0.12.2 hotfix
