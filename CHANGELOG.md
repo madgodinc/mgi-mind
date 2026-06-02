@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.4 - viewer API for "what auto-ingest wrote in this session"
+
+The headline page of the v0.12 viewer per the roadmap. The user's
+recurring complaint about auto-ingest was that they could not see
+what was written. This endpoint surfaces that feedback loop without
+the UI work that consumes it.
+
+### Added
+- `GET /api/ingest/recent?since=<ISO>&max_scan=N` — recent memories
+  whose `source` field equals `"ingest"` and whose `created_at` is at
+  or after the given RFC3339 timestamp (typically session-start). Omit
+  `since` to return the most recent `max_scan` (default 200) ingests
+  regardless of age. Returns the same `MemoryRow` shape as
+  `/api/memories` so the UI can reuse its existing memory-card.
+- `storage::recent_by_source_since(source, since_iso, max_scan)` —
+  shared primitive: server-side narrows to source-tagged points,
+  client-side cuts on the date with a lexicographic compare
+  (RFC3339-UTC sorts correctly as a string, which is how we always
+  write timestamps).
+
 ## 0.11.3 - viewer API for consolidate dry-run
 
 Continues the v0.11.2 pattern: backend HTTP surfaces land first, the

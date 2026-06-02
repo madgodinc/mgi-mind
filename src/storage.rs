@@ -1892,6 +1892,70 @@ pub async fn list_memories(
         .collect())
 }
 
+/// List recent memories whose `source` matches `source_match` (typically
+/// "ingest") and whose `created_at` is at or after `since_iso` (RFC3339).
+/// Used by the viewer UI to show "what auto-ingest wrote in this session".
+///
+/// Implementation: scroll the source-filtered subset newest-first up to
+/// `max_scan`, then drop the tail that's older than `since_iso`. The
+/// server-side filter narrows to ingest-tagged points; the client-side date
+/// cut is one string compare per row (RFC3339 sorts lexicographically when
+/// timezone is uniform UTC, which is how we write timestamps).
+pub async fn recent_by_source_since(
+    config: &MindConfig,
+    source_match: &str,
+    since_iso: &str,
+    max_scan: usize,
+) -> Result<Vec<MemoryRecord>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let filter = Filter::must([Condition::matches("source", source_match.to_string())]);
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .limit(max_scan as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("recent_by_source_since scroll failed")?;
+
+    let results: Vec<MemoryRecord> = response
+        .result
+        .into_iter()
+        .filter_map(|point| {
+            let p = &point.payload;
+            let created_at = extract_string(p, "created_at").unwrap_or_default();
+            // Inclusive lower bound, lexicographic compare (RFC3339 UTC).
+            if created_at.as_str() < since_iso {
+                return None;
+            }
+            Some(MemoryRecord {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                content: extract_string(p, "content").unwrap_or_default(),
+                source: extract_string(p, "source"),
+                r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
+                created_at,
+                updated_at: extract_string(p, "updated_at").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    Ok(results)
+}
+
 pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     if !client

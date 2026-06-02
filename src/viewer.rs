@@ -58,6 +58,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/quarantine", get(api_quarantine_list))
         .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
         .route("/api/consolidate", get(api_consolidate_dry_run))
+        .route("/api/ingest/recent", get(api_ingest_recent))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -268,6 +269,55 @@ async fn api_quarantine_list(
         })
         .collect();
     Ok(Json(entries))
+}
+
+#[derive(Deserialize)]
+struct IngestRecentQuery {
+    token: Option<String>,
+    /// RFC3339 lower bound on created_at (inclusive). Typically the
+    /// session-start ISO timestamp. If omitted, returns the most recent
+    /// `max_scan` ingest writes regardless of age.
+    since: Option<String>,
+    /// How many ingest-tagged points to scan (newest first) before applying
+    /// the `since` filter on the client. Defaults to 200 — enough for a
+    /// typical session, bounded for the browser.
+    #[serde(default = "default_ingest_scan")]
+    max_scan: usize,
+}
+
+fn default_ingest_scan() -> usize {
+    200
+}
+
+/// "What did auto-ingest write since X?" — the v0.12 viewer's headline page,
+/// the auto-ingest-feedback loop the user said they wanted most. Returns
+/// MemoryRow rows (same shape as /api/memories) so the UI can render them with
+/// the existing memory-card component.
+async fn api_ingest_recent(
+    State(state): State<AppState>,
+    Query(q): Query<IngestRecentQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MemoryRow>>, Response> {
+    let auth = AuthQuery { token: q.token.clone() };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    // Empty `since` means "no lower bound" — pass an ISO sentinel that sorts
+    // before any real timestamp. "0000-..." lexicographically precedes any
+    // RFC3339 string we'd ever write.
+    let since = q.since.as_deref().unwrap_or("0000-01-01T00:00:00Z");
+    let rows = storage::recent_by_source_since(&state.config, "ingest", since, q.max_scan)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|m| MemoryRow {
+            id: m.id,
+            content: m.content,
+            source: m.source,
+            r#type: m.r#type,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+        })
+        .collect();
+    Ok(Json(rows))
 }
 
 #[derive(Deserialize)]
