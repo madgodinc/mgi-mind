@@ -17,6 +17,7 @@ mod relevance;
 mod reranker;
 mod secrets;
 mod session;
+mod session_ingest;
 mod storage;
 mod util;
 mod vault;

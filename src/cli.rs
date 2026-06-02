@@ -244,6 +244,20 @@ pub enum Commands {
         #[command(subcommand)]
         action: QuarantineAction,
     },
+    /// Ingest a closed Claude Code transcript (`.jsonl` under
+    /// `~/.claude/projects/<encoded-cwd>/`) into long-term memory. Pulls
+    /// user/assistant text blocks (NOT tool_use / tool_result / thinking),
+    /// then routes them through the same relevance gate as live ingest —
+    /// short reactions get quarantined, paraphrases of stored content fail
+    /// the novelty check, and only the substantive material lands. Zero
+    /// LLM: no summarization, no compression. The gate IS the filter.
+    IngestSession {
+        /// Path to the transcript JSONL file.
+        path: String,
+        /// Target library (default: `sessions`).
+        #[arg(long, default_value = "sessions")]
+        library: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -460,7 +474,23 @@ pub async fn run(cli: Cli) -> Result<()> {
             QuarantineAction::Show { id } => cmd_quarantine_show(&id).await,
             QuarantineAction::Promote { id } => cmd_quarantine_promote(&id).await,
         },
+        Commands::IngestSession { path, library } => cmd_ingest_session(&path, &library).await,
     }
+}
+
+async fn cmd_ingest_session(path: &str, library: &str) -> Result<()> {
+    let config = crate::config::MindConfig::load()
+        .context("Failed to load config — run `mgimind init` first")?;
+    // Ensure target library exists (idempotent).
+    let _ = crate::storage::create_library(&config, library).await;
+    let report = crate::session_ingest::ingest_transcript(
+        &config,
+        std::path::Path::new(path),
+        library,
+    )
+    .await?;
+    print!("{}", report.render());
+    Ok(())
 }
 
 async fn cmd_quarantine_list(library: Option<&str>, limit: usize) -> Result<()> {

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.7 - `mgimind ingest-session`
+
+A manual batch command that parses a closed Claude Code transcript
+(`~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`) and routes
+its text content through the existing relevance gate. The operator
+runs it; nothing here is automatic.
+
+### Added
+- `mgimind ingest-session <transcript.jsonl> --library X` (default
+  library: `sessions`). Extracts `user.text` and `assistant.text`
+  blocks; drops `tool_use`, `tool_result`, `thinking` (not
+  user-authored claims), and service rows like `queue-operation`,
+  `ai-title`, `attachment`. Each surviving block becomes one
+  `Candidate::Memory` and goes through `ingest::run_ingest`. The v0.11
+  gate decides per-block: short reactions quarantined `too_short`;
+  rearranged-token paraphrases quarantined `low_novelty`; whatever
+  the gate's current heuristics consider worth keeping lands tagged
+  with the session id.
+- New module `src/session_ingest.rs` with five parser smoke tests
+  (string-form content, blocks-form content, service-row skipping,
+  role-tag prefix, empty-skip). No gate-integration test in this
+  release — that lives in the live ingest path's existing coverage.
+
+### Relation to `claude --resume`
+Different layer. `claude --resume <session-id>` brings the agent back
+into a past conversation so it can keep working with full context.
+`ingest-session` is the operator running a one-shot extraction on a
+closed transcript afterwards; the agent is not involved.
+
 ## 0.11.6 - mind_consolidate MCP tool (dry-run preview)
 
 Last bit of MCP/CLI symmetry for the v0.11 line. The viewer and now
