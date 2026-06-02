@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.6 - mind_consolidate MCP tool (dry-run preview)
+
+Last bit of MCP/CLI symmetry for the v0.11 line. The viewer and now
+MCP both expose consolidate as a *preview* surface; `--apply` stays on
+the CLI where the user has to type the flag explicitly. The 30th
+tool.
+
+### Added
+- `mind_consolidate` MCP tool: returns the same Report shape as
+  `mgimind consolidate` (scanned, exact dups, near dups, cold) but
+  always with `apply=false`. The text response ends with a hint
+  pointing the user at the CLI when they want to act on it. Use case:
+  the agent answers "how much duplicate memory do I have?" without
+  needing the user to drop to a terminal.
+- AI_INSTRUCTIONS.md mentions it in the tool list with the
+  preview-only posture spelled out.
+
+### Notes
+Tool count: 29 → 30. The destructive paths
+(`mind_quarantine_promote`, `mind_delete`) take a single id and are
+intentionally narrow; nothing on the MCP surface mutates the store in
+bulk.
+
 ## 0.11.5 - novelty layer in the relevance gate
 
 The v0.11.0 cheap gate is length / blacklist / decision-marker only —

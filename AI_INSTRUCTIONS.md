@@ -189,7 +189,7 @@ Sessions: `mind_session_start`, `mind_session_last`, `mind_session_end`.
 Vault: `mind_vault_get`, `mind_vault_store` (both return terminal instructions).
 Web: `mind_web` (read a page as Markdown, if the `crw` tool is installed).
 Data: `mind_import`, `mind_export`, `mind_doctor`.
-Maintenance (CLI, the user runs it): `mgimind consolidate` (merge duplicates, report stale).
+Maintenance: `mind_consolidate` (preview only — dry-run count of duplicates and cold entries; the destructive `mgimind consolidate --apply` stays on the CLI). Use `mind_consolidate` when the user asks "how much duplicate memory do I have?" before suggesting they run the CLI.
 
 Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind migrate`,
 `mgimind drop`, `mgimind backup`/`restore`. (The MCP server itself is `mgimind mcp`,
