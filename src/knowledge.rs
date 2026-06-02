@@ -73,6 +73,21 @@ pub async fn add_fact(
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
 
+    // Auto-supersession: if this predicate is declared single-valued, invalidate
+    // all prior facts with the same (subject, predicate) that carry a different
+    // object. This closes the supersession gap noted in audit #13: without it,
+    // setting "user → lives_in → Dublin" after "user → lives_in → Prague" leaves
+    // both valid, which reads as a contradiction. Multi-valued predicates
+    // (default) are left untouched — they SHOULD accumulate.
+    if config.single_valued_predicates.contains(&predicate.to_string()) {
+        let facts = query_facts(config, subject).await?;
+        for fact in &facts {
+            if fact.predicate == predicate && fact.object != object && fact.valid {
+                invalidate_fact(config, &fact.id).await?;
+            }
+        }
+    }
+
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
 

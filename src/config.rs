@@ -57,6 +57,11 @@ pub struct MindConfig {
     /// How many dense candidates to fetch and rerank before returning `limit`.
     #[serde(default = "default_rerank_top_k")]
     pub rerank_top_k: usize,
+    /// Predicates whose values should be mutually exclusive. When a single-valued
+    /// predicate is re-added with a new object, all prior facts with the same
+    /// (subject, predicate) are auto-invalidated. Defaults to empty (opt-in).
+    #[serde(default)]
+    pub single_valued_predicates: Vec<String>,
 }
 
 fn default_rerank_model() -> String {
