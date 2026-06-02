@@ -388,11 +388,14 @@ re-embedded:
 
 ## Status and audit
 
-Current version: **0.8.x**. The project went through a full code audit (27 issues):
-**21 are fully fixed and 6 are partial** (the mechanism shipped, hardening continues).
-[`AUDIT_STATUS.md`](AUDIT_STATUS.md) accounts for every issue one by one, including the
-honest gaps (for example, fact supersession is not implemented yet).
-[`CHANGELOG.md`](CHANGELOG.md) has the per-release history.
+Current version: **0.11.x** — the 0.11 line adds the v0.11.0 quarantine layer +
+best-effort retrieval policy and the v0.11.1 inspection commands on top of the
+0.10.x audit log, ephemeral viewer, and md reconcile import. The project went
+through a full code audit (27 issues): **21 are fully fixed and 6 are partial**
+(the mechanism shipped, hardening continues). [`AUDIT_STATUS.md`](AUDIT_STATUS.md)
+accounts for every issue one by one, including the honest gaps (for example,
+fact supersession is not implemented yet). [`CHANGELOG.md`](CHANGELOG.md) has
+the per-release history.
 
 ## Project layout
 
@@ -403,6 +406,13 @@ src/
   embedder.rs    ONNX embedding (model-aware pooling, prefixes, 512-token cap)
   reranker.rs    cross-encoder reranking
   knowledge.rs   knowledge-graph facts
+  procedure.rs   procedural memory (Д6): learn / recall / outcome
+  ingest.rs      auto-extract & ingest candidates (Д2)
+  relevance.rs   v0.11 relevance gate (length, blacklists, decision markers, token novelty)
+  consolidate.rs merge duplicates, report cold entries
+  md_reconcile.rs md import as reconcile with "md wins"
+  audit.rs       append-only audit log for every storage mutation
+  viewer.rs      ephemeral local HTTP viewer (axum, static frontend baked in)
   session.rs     per-agent session files
   vault.rs       encrypted secret vault (terminal only)
   mcp.rs         MCP server over stdio (hand-rolled JSON-RPC; warm in-process models)

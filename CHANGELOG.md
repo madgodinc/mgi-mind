@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.2 - viewer API for the quarantine layer
+
+The viewer (v0.10.x) renders memories and the audit log. v0.11.2 wires
+the quarantine layer into the same surface so the UI work in v0.12 can
+ship without another backend round-trip.
+
+### Added
+- `GET /api/quarantine?library=X&limit=N` — list quarantined entries
+  (mirrors the CLI/MCP). Bearer-token auth on the same channel as the
+  other endpoints.
+- `POST /api/quarantine/:id/promote` — manual promotion of a
+  quarantined entry by id. Returns `{ok: true, id}` on success,
+  `{ok: false, id, reason: "not in quarantine"}` for ordinary memory
+  ids — the surface stays honest about what it can act on. Audit log
+  records two events: the storage-level promotion (actor=relevance-gate)
+  and the UI-level action (actor=viewer, note="manual promote via
+  viewer UI"), so the trail distinguishes manual from auto-reassertion.
+
+### Notes
+The viewer frontend (`viewer_index.html`) still only renders memories
+and audit; the new endpoints are reachable today via curl. The UI work
+that consumes them is the next v0.12 deliverable.
+
 ## 0.11.1 - inspect & manage the quarantine layer
 
 Surfaces the v0.11.0 quarantine layer through CLI and MCP. The store-side

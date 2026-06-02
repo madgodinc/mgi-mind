@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -55,6 +55,8 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/memories", get(api_memories))
         .route("/api/audit", get(api_audit))
         .route("/api/memories/:id", delete(api_delete_memory))
+        .route("/api/quarantine", get(api_quarantine_list))
+        .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -232,6 +234,70 @@ async fn api_delete_memory(
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
+#[derive(Deserialize)]
+struct QuarantineQuery {
+    token: Option<String>,
+    library: Option<String>,
+    #[serde(default = "default_quarantine_limit")]
+    limit: usize,
+}
+
+fn default_quarantine_limit() -> usize {
+    50
+}
+
+async fn api_quarantine_list(
+    State(state): State<AppState>,
+    Query(q): Query<QuarantineQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<QuarantineRow>>, Response> {
+    let auth = AuthQuery { token: q.token.clone() };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    let entries = storage::quarantine_list(&state.config, q.library.as_deref(), q.limit)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|e| QuarantineRow {
+            id: e.id,
+            library: e.library,
+            content: e.content,
+            source: e.source,
+            reason: e.reason,
+            created_at: e.created_at,
+        })
+        .collect();
+    Ok(Json(entries))
+}
+
+async fn api_quarantine_promote(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let promoted = storage::promote_from_quarantine(&state.config, &id)
+        .await
+        .map_err(internal)?;
+    if !promoted {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "id": id,
+            "reason": "not in quarantine"
+        })));
+    }
+    // promote_from_quarantine writes its own audit event (actor=relevance-gate)
+    // with note "promoted from quarantine (re-asserted)". We add a second event
+    // tagged actor=viewer so the trail shows the manual UI promotion is distinct
+    // from the automatic re-assertion path.
+    audit::record(
+        audit::AuditEvent::new(audit::AuditOp::Update, "", &id)
+            .actor("viewer")
+            .note("manual promote via viewer UI"),
+    );
+    Ok(Json(serde_json::json!({"ok": true, "id": id})))
+}
+
 fn internal<E: std::fmt::Display>(e: E) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
 }
@@ -246,5 +312,15 @@ struct MemoryRow {
     r#type: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(serde::Serialize)]
+struct QuarantineRow {
+    id: String,
+    library: String,
+    content: String,
+    source: Option<String>,
+    reason: String,
+    created_at: Option<String>,
 }
 
