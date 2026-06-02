@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.11.10 - viewer: auto-ingest tab + shared row renderer
+
+Third and final UI tab in the v0.11.8–v0.11.10 wave. Critic flagged
+the copy-paste-row drift risk; resolved by extracting the renderer up
+front. The headline page per the roadmap — "what auto-ingest wrote in
+this session."
+
+### Added
+- Auto-ingest tab. `datetime-local` "since" picker + `max_scan`
+  numeric input. Naive local-time input is converted to UTC ISO via
+  `new Date(s).toISOString()` and the resolved string is rendered
+  next to the input ("querying since &lt;ISO&gt; UTC") so the user
+  can see what is actually being queried — timezone mismatches are
+  otherwise silent.
+- `max_scan` default 500 (not 200): this is the headline page per the
+  roadmap; 200 hid recent bursts during heavy auto-ingest.
+- Loading state on the reload button and result pane.
+- Empty-state ("No ingests since &lt;ISO&gt;.").
+- `renderMemoryRow(r, extra)` helper. Both the memories tab and the
+  new auto-ingest tab now go through it; a single source of truth
+  for the row markup so three tabs cannot drift in 48 hours
+  (memories carries its forget-button via the `extra` arg).
+
+### Notes
+All three v0.11 UI tabs land. Viewer surface is now complete for the
+quarantine / consolidate / auto-ingest endpoints shipped in 0.11.2 →
+0.11.4. The repo deletes + recreations earlier in this session mean
+nothing of v0.11 visible on GitHub yet — push lands after this
+commit.
+
 ## 0.11.9 - viewer: Consolidate dry-run tab + Quarantine loading state
 
 Second of three UI tabs. Pre-ship critic flagged four real issues; all

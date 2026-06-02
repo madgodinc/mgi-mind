@@ -1,6 +1,6 @@
 [package]
 name = "mgi-mind"
-version = "0.11.9"
+version = "0.11.10"
 edition = "2024"
 authors = ["Mad God Inc"]
 description = "AI-native second brain. Self-hosted, token-optimized memory for AI assistants."
