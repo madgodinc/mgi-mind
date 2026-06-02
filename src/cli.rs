@@ -139,6 +139,12 @@ pub enum Commands {
         /// Target library
         #[arg(long, default_value = "imported")]
         library: String,
+        /// Actually mutate the store. Without it: dry-run that prints the plan
+        /// (what's new / what would replace existing) and exits. md import is
+        /// an escape hatch — running it unintentionally over an automated
+        /// store is exactly what the dry-run default protects against.
+        #[arg(long)]
+        apply: bool,
     },
 
     /// Show memory statistics
@@ -356,7 +362,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             source,
             path,
             library,
-        } => cmd_import(&source, &path, &library).await,
+            apply,
+        } => cmd_import(&source, &path, &library, apply).await,
         Commands::Stats => cmd_stats().await,
         Commands::Backup { output } => cmd_backup(&output).await,
         Commands::Restore { input } => cmd_restore(&input).await,
@@ -1138,104 +1145,87 @@ pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<Str
 
 // --- Import ---
 
-async fn cmd_import(source: &str, path: &str, library: &str) -> Result<()> {
-    println!("{}", run_import(source, path, library).await?);
+/// md import is the escape hatch for hand-edits. Runs as reconcile + "md
+/// wins" — see `md_reconcile.rs` for the rationale. Default is dry-run that
+/// prints the plan; `--apply` mutates.
+async fn cmd_import(source: &str, path: &str, library: &str, apply: bool) -> Result<()> {
+    println!("{}", run_import(source, path, library, apply).await?);
     Ok(())
 }
 
-pub(crate) async fn run_import(source: &str, path: &str, library: &str) -> Result<String> {
+/// Shared by CLI `import` and MCP `mind_import`. MCP defaults to `apply=false`
+/// (dry-run is the safe default across surfaces).
+pub(crate) async fn run_import(
+    source: &str,
+    path: &str,
+    library: &str,
+    apply: bool,
+) -> Result<String> {
     use std::fmt::Write;
-    let config = crate::config::load_cached()?;
-    let dir = std::path::Path::new(path);
-
-    if !dir.exists() || !dir.is_dir() {
-        anyhow::bail!("Directory not found: {path}");
-    }
-
     match source.to_lowercase().as_str() {
         "obsidian" | "markdown" | "md" => {}
         other => anyhow::bail!("Unknown source: {other}. Supported: obsidian, markdown"),
     }
 
+    let config = crate::config::MindConfig::load()
+        .context("Failed to load config — run `mgimind init` first")?;
+
+    // Ensure the library exists; ignore "already exists" since import is
+    // typically rerun.
+    let _ = crate::storage::create_library(&config, library).await;
+
+    let root = std::path::Path::new(path);
+    let plan = crate::md_reconcile::plan(&config, library, root).await?;
+
     let mut out = String::new();
-
-    // Ensure the target library is registered (single-collection layout, #18).
-    // create_library is idempotent-friendly here: a LibraryExists error is fine.
-    if crate::storage::create_library(&config, library)
-        .await
-        .is_ok()
-    {
-        let _ = writeln!(out, "Created library '{library}'");
-    }
-
-    // Scan for .md files
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    scan_md_files(dir, &mut files)?;
-
-    let _ = writeln!(out, "Found {} markdown files in {path}", files.len());
-
-    let mut imported = 0;
-    let mut skipped = 0;
-
-    for file in &files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Skip empty files and very short ones
-        let trimmed = content.trim();
-        if trimmed.len() < 10 {
-            skipped += 1;
+    let _ = writeln!(
+        out,
+        "Reconcile plan for library '{}' from {}:",
+        plan.library,
+        plan.root.display()
+    );
+    let c = plan.counts();
+    let _ = writeln!(
+        out,
+        "  files scanned: {}  new: {}  replace: {}  unchanged: {}  skip: {}",
+        plan.files.len(),
+        c.new,
+        c.replace,
+        c.unchanged,
+        c.skip
+    );
+    for f in &plan.files {
+        if matches!(
+            f.action,
+            crate::md_reconcile::PlanAction::Skip
+                | crate::md_reconcile::PlanAction::Unchanged
+        ) {
             continue;
         }
-
-        // Use filename as source tag
-        let filename = file
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // add_memory chunks the file itself (audit #3).
-        match crate::storage::add_memory(&config, library, trimmed, Some(&filename)).await {
-            Ok(n) => imported += n,
-            Err(e) => {
-                // Per-file progress/errors go to stderr (never the stdout/MCP channel).
-                eprintln!("  Error importing {filename}: {e}");
-                skipped += 1;
-            }
-        }
-
-        if imported % 10 == 0 && imported > 0 {
-            eprint!("\r  Imported: {imported}, skipped: {skipped}");
-        }
+        let _ = writeln!(out, "  [{}] {}", f.action.as_str(), f.source);
     }
-
-    let _ = write!(
+    if !apply {
+        let _ = writeln!(
+            out,
+            "\nDry-run. Re-run with --apply to write {} new and replace {} existing.",
+            c.new, c.replace
+        );
+        return Ok(out);
+    }
+    if c.new + c.replace == 0 {
+        let _ = writeln!(
+            out,
+            "\nNothing to apply — md and Qdrant agree on every file."
+        );
+        return Ok(out);
+    }
+    let report = crate::md_reconcile::apply(&config, &plan).await?;
+    let _ = writeln!(
         out,
-        "Import complete: {imported} chunks imported, {skipped} skipped"
+        "\nApplied: {} new file(s), {} replaced, {} chunks written.",
+        report.added, report.replaced, report.chunks_written
     );
     Ok(out)
-}
-
-fn scan_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip hidden dirs like .obsidian, .trash
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if !name.starts_with('.') {
-                scan_md_files(&path, files)?;
-            }
-        } else if path.extension().is_some_and(|ext| ext == "md") {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 // --- Stats ---
