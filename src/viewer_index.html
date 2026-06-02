@@ -55,6 +55,7 @@
 
 <nav>
   <button id="tab-mem" class="on" onclick="show('mem')">memories</button>
+  <button id="tab-ingest" onclick="show('ingest')">auto-ingest</button>
   <button id="tab-quarantine" onclick="show('quarantine')">quarantine</button>
   <button id="tab-consolidate" onclick="show('consolidate')">consolidate</button>
   <button id="tab-audit" onclick="show('audit')">audit log</button>
@@ -86,6 +87,19 @@
       <span class="dim">v0.11 relevance gate filtered these; not shown in mind_search</span>
     </div>
     <div id="qlist"></div>
+  </section>
+
+  <section id="ingest" class="panel">
+    <div class="controls">
+      <label>since:</label>
+      <input id="isince" type="datetime-local" onchange="loadIngest()" style="width:200px">
+      <label>max scan:</label>
+      <input id="imaxscan" type="number" min="1" max="2000" value="500" onchange="loadIngest()" style="width:80px">
+      <button id="iload-btn" onclick="loadIngest()">reload</button>
+      <span class="dim">memories with source=ingest, newest first</span>
+    </div>
+    <div id="ingestresolved" class="dim" style="margin-bottom:8px;font-size:11px"></div>
+    <div id="ingestlist"></div>
   </section>
 
   <section id="consolidate" class="panel">
@@ -137,13 +151,67 @@
   function clearErr() { document.getElementById('err').style.display = 'none'; }
 
   function show(tab) {
-    for (const id of ['mem', 'quarantine', 'consolidate', 'audit']) {
+    for (const id of ['mem', 'ingest', 'quarantine', 'consolidate', 'audit']) {
       document.getElementById(id).classList.toggle('on', id === tab);
       document.getElementById('tab-' + id).classList.toggle('on', id === tab);
     }
     if (tab === 'audit') loadAudit();
     if (tab === 'quarantine') loadQuarantine();
     if (tab === 'consolidate') loadConsolidate();
+    if (tab === 'ingest') loadIngest();
+  }
+
+  // datetime-local returns "YYYY-MM-DDTHH:MM" with NO timezone and NO seconds.
+  // The backend wants RFC3339. We treat the local wall clock as the user's
+  // intent, build a Date in their tz, and serialize to UTC ISO. A silent
+  // mismatch here means no rows match — explicit conversion is the only
+  // way to avoid the timezone trap.
+  function localDatetimeToIso(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return d.toISOString();
+  }
+
+  async function loadIngest() {
+    const btn = document.getElementById('iload-btn');
+    const wrap = document.getElementById('ingestlist');
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'loading…';
+    wrap.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      clearErr();
+      const sinceLocal = document.getElementById('isince').value;
+      const sinceIso = localDatetimeToIso(sinceLocal);
+      // Show the resolved ISO right next to the input so the user can see
+      // what is actually being queried — the conversion is local→UTC and
+      // off-by-tz mistakes are otherwise invisible.
+      document.getElementById('ingestresolved').textContent =
+        sinceIso ? ('querying since ' + sinceIso + ' UTC') : '';
+      const maxScan = document.getElementById('imaxscan').value || 500;
+      const parts = [];
+      if (sinceIso) parts.push('since=' + encodeURIComponent(sinceIso));
+      parts.push('max_scan=' + maxScan);
+      const rows = await api('/api/ingest/recent?' + parts.join('&'));
+      if (!rows || rows.length === 0) {
+        wrap.innerHTML = '<div class="empty">No ingests' + (sinceIso ? (' since ' + esc(sinceIso)) : '') + '.</div>';
+        return;
+      }
+      wrap.innerHTML = '';
+      for (const r of rows) {
+        const div = document.createElement('div');
+        div.className = 'row';
+        div.innerHTML = renderMemoryRow(r, '');
+        wrap.appendChild(div);
+      }
+    } catch (e) {
+      showErr(e);
+      wrap.innerHTML = '';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
   }
 
   async function loadLibs() {
@@ -324,16 +392,8 @@
       for (const r of rows) {
         const div = document.createElement('div');
         div.className = 'row';
-        const sourceBadge = r.source ? '<span>source: ' + esc(r.source) + '</span>' : '';
-        div.innerHTML =
-          '<div class="meta">' +
-          '<span>' + esc(r.type || 'memory') + '</span>' +
-          '<span>created: ' + esc(r.created_at || '') + '</span>' +
-          sourceBadge +
-          '<span class="id">' + esc(r.id) + '</span>' +
-          '</div>' +
-          '<pre>' + esc(r.content || '') + '</pre>' +
-          '<div style="margin-top:8px"><button class="danger" data-id="' + esc(r.id) + '">forget</button></div>';
+        const extra = '<div style="margin-top:8px"><button class="danger" data-id="' + esc(r.id) + '">forget</button></div>';
+        div.innerHTML = renderMemoryRow(r, extra);
         div.querySelector('button.danger').onclick = async (ev) => {
           if (!confirm('Forget this memory? This deletes the point from the store. The audit log keeps a copy.')) return;
           try {
@@ -380,6 +440,23 @@
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Shared memory-row renderer for all tabs that show MemoryRow shape.
+  // Lives in one place so the three call sites (memories, auto-ingest, and
+  // any future tab) don't drift. `extra` lets a caller append a per-row
+  // button or badge (currently only memories uses it for the forget
+  // button).
+  function renderMemoryRow(r, extra) {
+    const sourceBadge = r.source ? '<span>source: ' + esc(r.source) + '</span>' : '';
+    return '<div class="meta">' +
+      '<span>' + esc(r.type || 'memory') + '</span>' +
+      '<span>created: ' + esc(r.created_at || '') + '</span>' +
+      sourceBadge +
+      '<span class="id">' + esc(r.id) + '</span>' +
+      '</div>' +
+      '<pre>' + esc(r.content || '') + '</pre>' +
+      (extra || '');
   }
 
   loadLibs();
