@@ -197,6 +197,33 @@ pub enum Commands {
         #[arg(long)]
         prune_cold: bool,
     },
+    /// Inspect the audit log of mutations (add/update/delete/library/etc).
+    /// Read-only — the log itself is append-only and never edited by hand.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
+    /// Ephemeral local viewer over the memory store. Brings up an HTTP server
+    /// on 127.0.0.1 on a random free port, prints the URL, exits on Ctrl-C.
+    /// Static frontend baked into the binary — no Node, no extra runtime.
+    Viewer {
+        /// Don't auto-open the browser. Useful when running on a headless box
+        /// over SSH or when scripting integration tests.
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuditAction {
+    /// Show the N most recent audit events (default 20).
+    List {
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Show audit events whose `target` matches the given id (memory id,
+    /// library name, etc).
+    Show { id: String },
 }
 
 #[derive(Subcommand)]
@@ -274,6 +301,11 @@ pub enum VaultAction {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    // Audit log lives under mind_home so it follows MGIMIND_HOME isolation
+    // automatically (tests + bench instances each get their own log without
+    // polluting prod).
+    crate::audit::init(Some(crate::config::mind_home().join("audit.log")));
+
     match cli.command {
         Commands::Init => cmd_init().await,
         Commands::Doctor { fix } => cmd_doctor(fix).await,
@@ -355,7 +387,76 @@ pub async fn run(cli: Cli) -> Result<()> {
             })
             .await
         }
+        Commands::Audit { action } => match action {
+            AuditAction::List { limit } => cmd_audit_list(limit).await,
+            AuditAction::Show { id } => cmd_audit_show(&id).await,
+        },
+        Commands::Viewer { no_open } => {
+            let config = crate::config::MindConfig::load()
+                .context("Failed to load config — run `mgimind init` first")?;
+            crate::viewer::run(config, !no_open).await
+        }
     }
+}
+
+async fn cmd_audit_list(limit: usize) -> Result<()> {
+    let events = crate::audit::recent(limit)?;
+    if events.is_empty() {
+        println!("No audit events yet.");
+        return Ok(());
+    }
+    for ev in &events {
+        print_audit_event(ev);
+    }
+    println!("\n{} event(s).", events.len());
+    Ok(())
+}
+
+async fn cmd_audit_show(id: &str) -> Result<()> {
+    let events = crate::audit::for_target(id)?;
+    if events.is_empty() {
+        println!("No audit events for target '{id}'.");
+        return Ok(());
+    }
+    for ev in &events {
+        print_audit_event(ev);
+    }
+    println!("\n{} event(s) for '{id}'.", events.len());
+    Ok(())
+}
+
+fn print_audit_event(ev: &crate::audit::AuditEvent) {
+    let op = serde_json::to_string(&ev.op)
+        .unwrap_or_else(|_| "?".into())
+        .trim_matches('"')
+        .to_string();
+    let lib = if ev.library.is_empty() {
+        "-".to_string()
+    } else {
+        ev.library.clone()
+    };
+    let tgt = if ev.target.is_empty() {
+        "-".to_string()
+    } else {
+        ev.target.clone()
+    };
+    println!(
+        "[{}] {:<18} lib={} target={} actor={}",
+        ev.ts, op, lib, tgt, ev.actor
+    );
+    if let Some(before) = &ev.before {
+        println!("  before: {}", first_line(before));
+    }
+    if let Some(after) = &ev.after {
+        println!("  after:  {}", first_line(after));
+    }
+    if let Some(note) = &ev.note {
+        println!("  note:   {note}");
+    }
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").to_string()
 }
 
 async fn cmd_bench(

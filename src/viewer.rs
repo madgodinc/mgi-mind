@@ -1,0 +1,250 @@
+//! Ephemeral local viewer for the memory store.
+//!
+//! `mgimind viewer` brings up an HTTP server on 127.0.0.1 on a random free port,
+//! prints the URL (with a one-shot bearer token already embedded), and exits
+//! when the user hits Ctrl-C. The static frontend is baked into the binary as
+//! a string, so there is no extra runtime artifact and no Node/npm — the
+//! viewer respects the same single-binary boundary as v0.8.0.
+//!
+//! Scope is intentionally narrow: this is an audit window, not a notes app.
+//! It shows what is in the store, what was changed (audit log), and lets the
+//! user delete a memory through a button that goes through the same
+//! audited write path as the CLI.
+
+use anyhow::{Context, Result};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Response},
+    routing::{delete, get},
+};
+use serde::Deserialize;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use uuid::Uuid;
+
+use crate::audit;
+use crate::config::MindConfig;
+use crate::storage;
+
+/// Static frontend, embedded into the binary at compile time.
+const INDEX_HTML: &str = include_str!("viewer_index.html");
+
+#[derive(Clone)]
+struct AppState {
+    config: Arc<MindConfig>,
+    /// One-shot bearer token: client must present this in either
+    /// `Authorization: Bearer <token>` or as `?token=<token>` for browser
+    /// links. The token is generated per-process and printed once at startup.
+    token: Arc<String>,
+}
+
+/// Entry point used by `Commands::Viewer`.
+pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
+    let token = Uuid::new_v4().to_string();
+    let state = AppState {
+        config: Arc::new(config),
+        token: Arc::new(token.clone()),
+    };
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/health", get(health))
+        .route("/api/libraries", get(api_libraries))
+        .route("/api/memories", get(api_memories))
+        .route("/api/audit", get(api_audit))
+        .route("/api/memories/:id", delete(api_delete_memory))
+        .with_state(state);
+
+    // Random free port: ask the OS for 0, then read what it gave us.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("Failed to bind 127.0.0.1 on a free port")?;
+    let addr = listener
+        .local_addr()
+        .context("Failed to read bound port")?;
+    let url = format!("http://{}/?token={}", addr, token);
+
+    eprintln!();
+    eprintln!("  mgimind viewer  •  audit window over the memory store");
+    eprintln!("  ───────────────────────────────────────────────────────");
+    eprintln!("  open:  {url}");
+    eprintln!("  stop:  Ctrl-C");
+    eprintln!();
+
+    if open_browser
+        && let Err(e) = open_in_browser(&url)
+    {
+        eprintln!("  (could not auto-open browser: {e})");
+    }
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("viewer server error")?;
+    eprintln!("  viewer stopped.");
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn open_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+
+    std::process::Command::new(cmd)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn {cmd}"))?;
+    Ok(())
+}
+
+// ----- Routes ----------------------------------------------------------------
+
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
+#[derive(Deserialize)]
+struct AuthQuery {
+    token: Option<String>,
+}
+
+fn check_auth(state: &AppState, headers: &HeaderMap, q: &AuthQuery) -> Result<(), StatusCode> {
+    if let Some(t) = q.token.as_deref()
+        && t == state.token.as_str()
+    {
+        return Ok(());
+    }
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(s) = auth.to_str()
+            && let Some(t) = s.strip_prefix("Bearer ")
+            && t == state.token.as_str()
+        {
+            return Ok(());
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+async fn health(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&state, &headers, &q)?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn api_libraries(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let libs = storage::list_libraries(&state.config)
+        .await
+        .map_err(internal)?;
+    Ok(Json(libs))
+}
+
+#[derive(Deserialize)]
+struct MemoriesQuery {
+    token: Option<String>,
+    library: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_limit() -> usize {
+    100
+}
+
+async fn api_memories(
+    State(state): State<AppState>,
+    Query(q): Query<MemoriesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MemoryRow>>, Response> {
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+
+    let library = q.library.unwrap_or_default();
+    if library.is_empty() {
+        return Err(
+            (StatusCode::BAD_REQUEST, "library param required").into_response(),
+        );
+    }
+    let rows = storage::list_memories(&state.config, &library, q.limit)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|m| MemoryRow {
+            id: m.id,
+            content: m.content,
+            source: m.source,
+            r#type: m.r#type,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+        })
+        .collect();
+    Ok(Json(rows))
+}
+
+async fn api_audit(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<audit::AuditEvent>>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    // Return most recent 200 — enough for an audit overview, bounded for the
+    // browser. If a user needs more, they can grep audit.log directly.
+    let events = audit::recent(200).map_err(internal)?;
+    Ok(Json(events))
+}
+
+async fn api_delete_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    // library arg is kept only for CLI/MCP signature parity; the id is the
+    // authoritative key. "viewer" tags the audit actor so the trail shows
+    // *where* the delete came from.
+    let _ = storage::delete_memory(&state.config, "", &id)
+        .await
+        .map_err(internal)?;
+    audit::record(
+        audit::AuditEvent::new(audit::AuditOp::Delete, "", &id).actor("viewer"),
+    );
+    Ok(Json(serde_json::json!({"ok": true, "id": id})))
+}
+
+fn internal<E: std::fmt::Display>(e: E) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+}
+
+// ----- DTOs ------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct MemoryRow {
+    id: String,
+    content: String,
+    source: Option<String>,
+    r#type: String,
+    created_at: String,
+    updated_at: String,
+}
+

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mgimind viewer</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --bg2: #131722;
+    --line: #1d2230;
+    --ink: #d6dbe5;
+    --dim: #6b7384;
+    --accent: #61afef;
+    --warn: #d97757;
+    --good: #98c379;
+    --bad: #e06c75;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--bg2); display: flex; align-items: center; gap: 18px; }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+  header .dim { color: var(--dim); font-size: 12px; }
+  nav { display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--bg2); }
+  nav button { background: transparent; color: var(--dim); border: 0; padding: 10px 14px; cursor: pointer; font-family: inherit; font-size: 13px; border-bottom: 2px solid transparent; }
+  nav button.on { color: var(--ink); border-color: var(--accent); }
+  main { padding: 16px 18px; max-width: 1200px; }
+  .panel { display: none; }
+  .panel.on { display: block; }
+  .row { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; background: var(--bg2); }
+  .row .meta { color: var(--dim); font-size: 12px; margin-bottom: 4px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .row .meta span.op { color: var(--accent); font-weight: 600; }
+  .row .meta span.add { color: var(--good); }
+  .row .meta span.delete { color: var(--bad); }
+  .row .meta span.lib { color: var(--warn); }
+  .row pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font: inherit; color: var(--ink); }
+  .row .id { color: var(--dim); font-size: 11px; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  select, input, button { background: var(--bg2); color: var(--ink); border: 1px solid var(--line); padding: 6px 10px; border-radius: 4px; font-family: inherit; font-size: 13px; }
+  button.danger { color: var(--bad); border-color: var(--bad); cursor: pointer; }
+  button.danger:hover { background: rgba(224, 108, 117, 0.1); }
+  .empty { color: var(--dim); padding: 24px; text-align: center; }
+  .err { color: var(--bad); padding: 12px; border: 1px solid var(--bad); border-radius: 4px; margin-bottom: 12px; }
+  details { margin-top: 4px; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 11px; }
+  details[open] summary { color: var(--ink); }
+  details pre { background: var(--bg); padding: 8px; border-radius: 4px; margin-top: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>mgimind viewer</h1>
+  <span class="dim">audit window over the memory store</span>
+</header>
+
+<nav>
+  <button id="tab-mem" class="on" onclick="show('mem')">memories</button>
+  <button id="tab-audit" onclick="show('audit')">audit log</button>
+</nav>
+
+<main>
+  <div id="err" class="err" style="display:none"></div>
+
+  <section id="mem" class="panel on">
+    <div class="controls">
+      <label>library:</label>
+      <select id="libsel" onchange="loadMemories()"></select>
+      <label>limit:</label>
+      <input id="limit" type="number" min="1" max="500" value="100" onchange="loadMemories()" style="width:80px">
+      <button onclick="loadMemories()">reload</button>
+    </div>
+    <div id="memlist"></div>
+  </section>
+
+  <section id="audit" class="panel">
+    <div class="controls">
+      <button onclick="loadAudit()">reload</button>
+      <span class="dim">most recent 200 events, append-only</span>
+    </div>
+    <div id="auditlist"></div>
+  </section>
+</main>
+
+<script>
+  // Token comes from URL ?token=... (set once at server start). Stays in
+  // memory for this tab only — every API call sends it as a Bearer header.
+  const params = new URLSearchParams(location.search);
+  const TOKEN = params.get('token') || '';
+  function api(path) {
+    return fetch(path, { headers: { Authorization: 'Bearer ' + TOKEN } })
+      .then(r => {
+        if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+        return r.json();
+      });
+  }
+  function apiDelete(path) {
+    return fetch(path, { method: 'DELETE', headers: { Authorization: 'Bearer ' + TOKEN } })
+      .then(r => { if (!r.ok) throw new Error(r.status + ' ' + r.statusText); return r.json(); });
+  }
+  function showErr(msg) {
+    const el = document.getElementById('err');
+    el.textContent = String(msg);
+    el.style.display = 'block';
+  }
+  function clearErr() { document.getElementById('err').style.display = 'none'; }
+
+  function show(tab) {
+    for (const id of ['mem', 'audit']) {
+      document.getElementById(id).classList.toggle('on', id === tab);
+      document.getElementById('tab-' + id).classList.toggle('on', id === tab);
+    }
+    if (tab === 'audit') loadAudit();
+  }
+
+  async function loadLibs() {
+    try {
+      clearErr();
+      const libs = await api('/api/libraries');
+      const sel = document.getElementById('libsel');
+      sel.innerHTML = '';
+      if (libs.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(no libraries)';
+        sel.appendChild(opt);
+        document.getElementById('memlist').innerHTML = '<div class="empty">No libraries yet. Add something via the CLI or MCP first.</div>';
+        return;
+      }
+      for (const l of libs) {
+        const opt = document.createElement('option');
+        opt.value = l; opt.textContent = l;
+        sel.appendChild(opt);
+      }
+      loadMemories();
+    } catch (e) { showErr(e); }
+  }
+
+  async function loadMemories() {
+    try {
+      clearErr();
+      const lib = document.getElementById('libsel').value;
+      const limit = document.getElementById('limit').value || 100;
+      if (!lib) return;
+      const rows = await api('/api/memories?library=' + encodeURIComponent(lib) + '&limit=' + limit);
+      const wrap = document.getElementById('memlist');
+      if (rows.length === 0) {
+        wrap.innerHTML = '<div class="empty">No memories in this library.</div>';
+        return;
+      }
+      wrap.innerHTML = '';
+      for (const r of rows) {
+        const div = document.createElement('div');
+        div.className = 'row';
+        const sourceBadge = r.source ? '<span>source: ' + esc(r.source) + '</span>' : '';
+        div.innerHTML =
+          '<div class="meta">' +
+          '<span>' + esc(r.type || 'memory') + '</span>' +
+          '<span>created: ' + esc(r.created_at || '') + '</span>' +
+          sourceBadge +
+          '<span class="id">' + esc(r.id) + '</span>' +
+          '</div>' +
+          '<pre>' + esc(r.content || '') + '</pre>' +
+          '<div style="margin-top:8px"><button class="danger" data-id="' + esc(r.id) + '">forget</button></div>';
+        div.querySelector('button.danger').onclick = async (ev) => {
+          if (!confirm('Forget this memory? This deletes the point from the store. The audit log keeps a copy.')) return;
+          try {
+            await apiDelete('/api/memories/' + encodeURIComponent(ev.target.dataset.id));
+            loadMemories();
+          } catch (e) { showErr(e); }
+        };
+        wrap.appendChild(div);
+      }
+    } catch (e) { showErr(e); }
+  }
+
+  async function loadAudit() {
+    try {
+      clearErr();
+      const events = await api('/api/audit');
+      const wrap = document.getElementById('auditlist');
+      if (events.length === 0) {
+        wrap.innerHTML = '<div class="empty">No audit events yet.</div>';
+        return;
+      }
+      wrap.innerHTML = '';
+      // newest first
+      for (const e of events.slice().reverse()) {
+        const div = document.createElement('div');
+        div.className = 'row';
+        const opClass = (e.op === 'add' ? 'add' : e.op === 'delete' ? 'delete' : 'op');
+        const before = e.before ? '<details><summary>before</summary><pre>' + esc(e.before) + '</pre></details>' : '';
+        const after = e.after ? '<details><summary>after</summary><pre>' + esc(e.after) + '</pre></details>' : '';
+        const note = e.note ? '<div class="dim" style="margin-top:4px;font-size:12px">note: ' + esc(e.note) + '</div>' : '';
+        div.innerHTML =
+          '<div class="meta">' +
+          '<span class="' + opClass + '">' + esc(e.op) + '</span>' +
+          '<span>' + esc(e.ts) + '</span>' +
+          (e.library ? '<span class="lib">lib: ' + esc(e.library) + '</span>' : '') +
+          (e.target ? '<span class="id">' + esc(e.target) + '</span>' : '') +
+          '<span class="dim">actor: ' + esc(e.actor) + '</span>' +
+          '</div>' +
+          before + after + note;
+        wrap.appendChild(div);
+      }
+    } catch (e) { showErr(e); }
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  loadLibs();
+</script>
+</body>
+</html>

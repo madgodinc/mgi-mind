@@ -1,4 +1,5 @@
 mod access;
+mod audit;
 mod bench;
 mod cli;
 mod config;
@@ -17,6 +18,7 @@ mod session;
 mod storage;
 mod util;
 mod vault;
+mod viewer;
 
 use anyhow::Result;
 use clap::Parser;
