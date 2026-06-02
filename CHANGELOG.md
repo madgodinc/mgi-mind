@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.14.3 — procedural-dataset hits the v0.10.0 ров target (227 pairs, 20 repos)
+
+Final procedural-memory dataset for the v0.10.0 roadmap milestone:
+**227 pairs from 20 OSS repos, 4 languages, 4 strata.** Headline
+R@5 = 96.5% on multilingual-e5-base + rerank=off.
+
+### Added
+- `benchmark/datasets/procedural-v010-227.jsonl` — final 227-pair set.
+  Mined from cargo, clap, click, cobra, commander.js, django, express,
+  flask, go, hyper, **next.js (+50 TS pairs)**, pytest, qdrant, requests,
+  reqwest, rust-clippy, rustfmt, rustlings, serde, tokio, yargs.
+- `benchmark/results/2026-06-02-procedural-v010-final/raw.json` — per-pair
+  raw results.
+
+### Results progression
+
+|             | bootstrap (111) | v3 (177) | final (227) |
+|---|---|---|---|
+| R@1         | 38.7%           | 44.1%    | 48.0%       |
+| **R@5**     | **99.1%**       | **98.9%**| **96.5%**   |
+| R@10        | 100.0%          | 100.0%   | 98.7%       |
+| repos       | 10              | 19       | 20          |
+| ts pairs    | 10              | 19       | 63          |
+| compile     | 3%              | 5%       | 4%          |
+| runtime     | 97%             | 61%      | 53%         |
+| test        | 0%              | 34%      | 42%         |
+
+R@5 drop 98.9% → 96.5% is the honest cost of a harder corpus: next.js
+introduced 50 TS pairs with near-duplicate "Hydration mismatch" style
+signatures that compress retrieval headroom. Don't cherry-pick the
+smaller set; the larger one is the publishable number.
+
+### What this closes from the roadmap
+
+> v0.10.0 — Д6 procedural memory как ров. Датасет — пары git+CI «упавший
+> тест → коммит-фикс» из публичных репо (объективный сигнал, не моя
+> разметка). Стратификация per-language / per-error-type (компиляция /
+> тест / рантайм), отчёт per-stratum, не одним числом.
+
+Reached: ✅ 200+ pairs ✅ 20+ repos ✅ 4 strata ✅ 4 languages ✅
+per-stratum report.
+
 ## 0.14.2 — procedural-dataset v3 (177 pairs from 19 OSS repos, stratified)
 
 Expanded the procedural-memory bench corpus from the 111-pair bootstrap
