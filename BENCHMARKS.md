@@ -94,6 +94,70 @@ config above and publishes Δ; milestone releases run the full ablation matrix.
 Do not paste a number you did not produce on this build — borrowing another
 project's figure is exactly the overclaim this file exists to prevent.
 
+## Procedural memory — recall@k (phase Д6)
+
+Independent benchmark from LongMemEval. Measures whether the procedural-memory
+layer (`mind_learn` / `mind_recall`) surfaces the right playbook when an error
+the agent has seen before comes back. Same zero-API rule: no LLM, no external
+service, the answer is "is the gold fix in the top-k results".
+
+### Protocol
+
+Each dataset pair is `(error_signature, fix_description)` from a real fix
+commit on a real OSS project. Run:
+
+1. `mind_learn(error, fix, verified=false)` into an isolated bench library.
+2. `mind_recall(error)` for the same error.
+3. Gold position = first hit whose `fix` text matches the dataset pair.
+4. R@k = fraction of pairs where the gold position is < k.
+
+```sh
+mgimind bench-procedural <dataset.jsonl> --output raw.json
+```
+
+Dataset format is JSONL with fields `{error, fix, language, stratum, id?, context?}`.
+
+### Results — 2026-06-02 bootstrap (v0.14.0)
+
+Mined locally with `scripts/scrape_procedural_dataset.py` from 10 OSS repos
+(cargo, clap, commander.js, flask, pytest, qdrant, rust-clippy, rustlings,
+tokio, yargs) at depth 5000 commits each. 111 pairs after filtering.
+
+```
+config: model=multilingual-e5-base dim=768 rerank=false
+scored: 111 pairs
+
+Overall:
+  R@1  = 38.7%
+  R@5  = 99.1%
+  R@10 = 100.0%
+
+By language:
+  py    n=26   R@1= 50.0% R@5= 96.2% R@10=100.0%
+  rust  n=75   R@1= 37.3% R@5=100.0% R@10=100.0%
+  ts    n=10   R@1= 20.0% R@5=100.0% R@10=100.0%
+```
+
+- **Dataset:** [`benchmark/datasets/procedural-v010-bootstrap-111.jsonl`](benchmark/datasets/procedural-v010-bootstrap-111.jsonl)
+- **Raw per-pair JSON:** [`benchmark/results/2026-06-02-procedural-bootstrap/raw.json`](benchmark/results/2026-06-02-procedural-bootstrap/raw.json)
+
+### What the numbers say (and don't)
+
+- **R@5 = 99.1%** is the headline. When the agent asks for a playbook the
+  layer surfaces it in the top 5 nearly always.
+- **R@1 = 38.7%** is realistic-and-low: many fix commits in the dataset share
+  near-identical error signatures (e.g. two distinct CI flakes both saying
+  "test failure on macOS"). With multiple plausible fixes for one signature,
+  picking the *exact* gold at rank 1 is partly a coin flip — the metric to
+  watch is R@5, not R@1.
+- **TS R@1 = 20% (n=10)** reflects (a) small sample, (b) the multilingual-e5
+  embedder is weaker on JS/TS than on Rust and Python in this corpus.
+- The dataset is bootstrap-scale (111 pairs from 10 repos). The v0.10.0 target
+  is 200+ pairs from 20+ repos with better stratum coverage (currently
+  ~97% `runtime`; the scraper's last-resort symptom-sentence pattern catches
+  too much as runtime). Replacing the heuristic with `git show --stat`-based
+  file-type inference will rebalance.
+
 ### Like-for-like vs other systems (planned)
 
 To compare against a system that publishes QA accuracy (e.g. Mem0), run **their**
