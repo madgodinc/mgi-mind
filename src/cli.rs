@@ -1549,10 +1549,13 @@ pub async fn download_qdrant() -> Result<()> {
                 ("qdrant-x86_64-apple-darwin", "tar.gz", None)
             }
         } else if is_x64 {
+            // musl static build runs on any glibc. The gnu build is linked
+            // against glibc 2.38 and silently fails on Ubuntu LTS 22.04 (2.35)
+            // and 20.04 (2.31), which is most servers in the wild.
             (
-                "qdrant-x86_64-unknown-linux-gnu",
+                "qdrant-x86_64-unknown-linux-musl",
                 "tar.gz",
-                crate::integrity::pin(crate::integrity::QDRANT_LINUX_X64_1_18_1),
+                crate::integrity::pin(crate::integrity::QDRANT_LINUX_X64_1_18_1_MUSL),
             )
         } else {
             ("qdrant-aarch64-unknown-linux-musl", "tar.gz", None)
