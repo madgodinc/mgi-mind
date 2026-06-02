@@ -27,6 +27,12 @@ use crate::config::MindConfig;
 /// would rather not write a redundant memory in the first place.
 const INGEST_DEDUP_THRESHOLD: f32 = 0.95;
 
+/// How many semantic neighbors to pull for the v0.11 novelty check. A handful
+/// is enough — the union of their tokens is the comparison set; pulling more
+/// shifts the baseline toward "everything is similar to something", which is
+/// the opposite of what we want.
+const NOVELTY_NEIGHBORS: u64 = 3;
+
 /// A typed extraction candidate. Agent-driven mode sends these directly (tagged
 /// JSON); the heuristic extractor produces them from raw text.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -212,8 +218,50 @@ pub async fn run_ingest(
                     source: Some("ingest"),
                     tool_name: None,
                 };
-                if let crate::relevance::Verdict::Quarantine { reason } =
-                    crate::relevance::check_cheap(&rcand, &gate_cfg)
+                let cheap_verdict = crate::relevance::check_cheap(&rcand, &gate_cfg);
+                // Second-tier novelty check (v0.11). Only runs if cheap passed.
+                // Pulls top-k semantic neighbors, tokenizes their content, and
+                // computes the share of candidate tokens that are NEW relative
+                // to the neighborhood. A low-novelty candidate adds no new
+                // tokens — it's a paraphrase of what's already stored. Note
+                // this is NOT cosine-noise filtering (that's invariant #4 — a
+                // repeat IS a confidence signal); it's a *token-overlap* check
+                // that detects "same words just rearranged".
+                let novelty_verdict = if cheap_verdict.is_accept() {
+                    match crate::storage::top_k_neighbor_content(
+                        config,
+                        Some(library),
+                        &content,
+                        NOVELTY_NEIGHBORS,
+                    )
+                    .await
+                    {
+                        Ok(neighbors) if !neighbors.is_empty() => {
+                            let neighbor_tokens: Vec<String> = neighbors
+                                .iter()
+                                .flat_map(|n| crate::relevance::tokenize(n))
+                                .collect();
+                            let novelty = crate::relevance::novelty_ratio(
+                                &content,
+                                &neighbor_tokens,
+                            );
+                            if novelty < gate_cfg.min_novelty {
+                                crate::relevance::Verdict::Quarantine {
+                                    reason: "low_novelty".into(),
+                                }
+                            } else {
+                                crate::relevance::Verdict::Accept
+                            }
+                        }
+                        // No neighbors yet (empty library, or query failed
+                        // softly) — accept, novelty cannot be assessed.
+                        _ => crate::relevance::Verdict::Accept,
+                    }
+                } else {
+                    cheap_verdict
+                };
+
+                if let crate::relevance::Verdict::Quarantine { reason } = novelty_verdict
                 {
                     // Re-assertion check: if the same content already lives in
                     // quarantine (deterministic id), this is the promotion

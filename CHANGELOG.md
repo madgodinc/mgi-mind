@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.11.5 - novelty layer in the relevance gate
+
+The v0.11.0 cheap gate is length / blacklist / decision-marker only —
+all syntactic checks. This release wires the novelty layer that the
+roadmap planned: after cheap accepts, pull the top-3 semantic
+neighbors, tokenize their content, and check the share of candidate
+tokens that are NEW. A paraphrase of stored content adds zero new
+tokens; it's quarantined under reason `"low_novelty"` so a future
+re-assertion can promote it (the same loop-breaker as for the cheap
+reasons).
+
+This is **not** cosine-noise filtering. Invariant #4 from v0.11.0
+stands: "a repeat IS a confidence signal, not noise." Cosine
+similarity reflects *meaning*; this is a *token-overlap* check —
+narrower. A semantically related but lexically distinct fact passes;
+a token-rearrangement of existing content does not.
+
+### Added
+- `storage::top_k_neighbor_content(library, content, k)` — one
+  embedding inference, returns the stored content strings of the top-k
+  neighbors. Symmetric with `nearest_score` but content instead of
+  score.
+- `ingest::run_ingest` second-tier novelty branch after `check_cheap`.
+  Falls through to Accept if there are no neighbors (empty library /
+  query failure) — novelty cannot be assessed without a baseline.
+- `NOVELTY_NEIGHBORS = 3` in `ingest.rs` — small enough that the
+  union doesn't drift toward "everything is similar to something".
+
+### Notes
+The `novelty_ratio` and `tokenize` functions in `src/relevance.rs`
+were written in 0.11.0 but unused; this release activates them
+without changing the signatures, so the unit tests already in
+0.11.0 cover the math.
+
+E2E verified: original sentence stored, paraphrase of the same
+tokens quarantined with reason=low_novelty, unrelated content
+stored.
+
 ## 0.11.4 - viewer API for "what auto-ingest wrote in this session"
 
 The headline page of the v0.12 viewer per the roadmap. The user's

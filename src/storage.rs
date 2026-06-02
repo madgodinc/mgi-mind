@@ -1366,6 +1366,51 @@ pub async fn nearest_score(
     Ok(response.result.into_iter().next().map(|p| p.score))
 }
 
+/// Top-k semantic neighbors of `content` by embedding lookup, returning only
+/// their stored content strings. The v0.11 novelty gate uses this to pull the
+/// candidate's neighborhood, tokenize it, and check whether the candidate adds
+/// any new tokens at all — a low-novelty candidate is quarantined under the
+/// "low_novelty" reason. The cost is one embedding inference (same as
+/// `nearest_score`); the upside vs `nearest_score` is full content instead of
+/// just a similarity score.
+pub async fn top_k_neighbor_content(
+    config: &MindConfig,
+    library: Option<&str>,
+    content: &str,
+    k: u64,
+) -> Result<Vec<String>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let embedding = embedder::embed_passage(config, content).await?;
+    check_dim(&embedding, config)?;
+
+    let mut q = QueryPointsBuilder::new(MEMORIES_COLLECTION)
+        .query(Query::new_nearest(VectorInput::new_dense(embedding)))
+        .using(DENSE_VEC)
+        .with_payload(true)
+        .limit(k);
+    if let Some(lib) = library {
+        q = q.filter(library_filter(lib));
+    }
+
+    let response = client
+        .query(q)
+        .await
+        .context("top_k_neighbor_content query failed")?;
+    Ok(response
+        .result
+        .into_iter()
+        .filter_map(|p| extract_string(&p.payload, "content"))
+        .collect())
+}
+
 /// Nearest neighbors of an EXISTING point, found by its stored dense vector (no
 /// re-embedding) - the engine for consolidation's near-dup detection (phase Д2).
 /// Returns `(id, cosine_score)` for up to `limit` neighbors, excluding the point
