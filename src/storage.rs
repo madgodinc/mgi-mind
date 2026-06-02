@@ -160,24 +160,47 @@ fn deterministic_id(library: &str, content: &str) -> String {
     Uuid::new_v5(&MGI_NAMESPACE, key.as_bytes()).to_string()
 }
 
+/// Deterministic id a candidate WILL get if quarantined — same formula as
+/// `deterministic_id`. Exposed so callers (ingest) can pre-compute the id and
+/// check "is this content already in quarantine?" before deciding between
+/// quarantine and promote. This is what closes the loop between the two gates:
+/// re-asserted content lands on the same id and signals promotion.
+pub fn quarantine_id_for(library: &str, content: &str) -> String {
+    deterministic_id(library, content.trim())
+}
+
 /// Filter that restricts a query to one library (audit #18).
 fn library_filter(library: &str) -> Filter {
     Filter::must([Condition::matches("library", library.to_string())])
 }
 
-/// Filter for ordinary-memory queries (phase Д6): exclude procedures so they
-/// never pollute a normal `mind_search`, optionally scoping to a library. Uses
-/// `must_not type=procedure` (NOT `must type=memory`) so the 12k legacy points
-/// that predate the `type` field are still included.
+/// Filter for ordinary-memory queries (phase Д6 / v0.11): exclude procedures
+/// (Д6) and quarantined points (v0.11) so they never pollute a normal
+/// `mind_search`. Uses `must_not type=procedure` (NOT `must type=memory`) so
+/// the 12k legacy points that predate the `type` field are still included.
+/// Same for `quarantined`: legacy points have no flag and stay visible.
 fn memory_query_filter(library: Option<&str>) -> Filter {
     let mut f = Filter {
-        must_not: vec![Condition::matches("type", TYPE_PROCEDURE.to_string())],
+        must_not: vec![
+            Condition::matches("type", TYPE_PROCEDURE.to_string()),
+            Condition::matches("quarantined", true),
+        ],
         ..Default::default()
     };
     if let Some(lib) = library {
         f.must.push(Condition::matches("library", lib.to_string()));
     }
     f
+}
+
+/// Filter for explicitly-quarantined queries (v0.11). Used when looking up
+/// whether a re-submitted candidate already lives in quarantine — that's the
+/// promotion signal: user re-asserting an earlier filtered fact.
+pub(crate) fn quarantine_filter(library: &str) -> Filter {
+    Filter::must([
+        Condition::matches("library", library.to_string()),
+        Condition::matches("quarantined", true),
+    ])
 }
 
 /// Filter that selects only procedures (phase Д6 recall).
@@ -764,6 +787,152 @@ pub async fn add_memory(
     Ok(stored)
 }
 
+/// Write a candidate that did NOT pass the relevance gate. It still goes
+/// into Qdrant — silently dropping filtered candidates causes the loop the
+/// critic flagged (user re-asserts a fact, gate filters again, user never
+/// gets it stored). Quarantined points carry `quarantined=true` so the normal
+/// search filter excludes them, but they're discoverable when the same
+/// content arrives again: that's the promotion signal.
+///
+/// Returns the deterministic id of the written point (used by the caller to
+/// audit the quarantine and to detect re-submissions on the next ingest).
+pub async fn add_quarantined(
+    config: &MindConfig,
+    library: &str,
+    content: &str,
+    source: Option<&str>,
+    reason: &str,
+) -> Result<String> {
+    if !is_registered(library) {
+        anyhow::bail!(
+            "{}",
+            crate::error::MindError::LibraryNotFound(library.to_string())
+        );
+    }
+    // Secret-scrub still applies — even a quarantined memory must never
+    // contain a key/password. Quarantine is about relevance, not safety.
+    if let Some(hit) = crate::secrets::scan(content) {
+        anyhow::bail!(
+            "Refusing to quarantine: content looks like a secret ({}). Use the vault.",
+            hit.reason
+        );
+    }
+
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    // One point per quarantined candidate (no chunking) — these are short
+    // by definition (the gate filtered them precisely because they were
+    // too short / too noisy / too lacking signal). Keeping them single-chunk
+    // makes promotion trivial later: same id → simple flag flip.
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let embedding = embedder::embed_passages(config, &[trimmed.to_string()])
+        .await?
+        .into_iter()
+        .next()
+        .context("embedder returned no vector for quarantine candidate")?;
+    check_dim(&embedding, config)?;
+
+    let id = deterministic_id(library, trimmed);
+    let now = chrono::Utc::now().to_rfc3339();
+    let hash = blake3::hash(trimmed.as_bytes()).to_hex().to_string();
+    let (s_idx, s_val) = sparse_vector(trimmed);
+
+    let vectors = NamedVectors::default()
+        .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+        .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+
+    let payload = build_payload_full(
+        trimmed,
+        &hash,
+        &now,
+        &now,
+        library,
+        source,
+        TYPE_MEMORY,
+        Some(true),
+        Some(reason),
+    );
+
+    client
+        .upsert_points(
+            UpsertPointsBuilder::new(
+                MEMORIES_COLLECTION,
+                vec![PointStruct::new(id.clone(), vectors, payload)],
+            )
+            .wait(true),
+        )
+        .await
+        .context("Failed to quarantine candidate")?;
+
+    crate::audit::record(
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, &id)
+            .actor("relevance-gate")
+            .after(truncate_for_audit(trimmed))
+            .note(format!("quarantined: {reason}")),
+    );
+
+    Ok(id)
+}
+
+/// Promote a quarantined point to ordinary memory. Called when the same
+/// content is re-submitted by the user — that's the signal "user is
+/// insistent, raise confidence". Flips `quarantined=false`, clears the
+/// reason, updates `updated_at`. Idempotent.
+pub async fn promote_from_quarantine(config: &MindConfig, id: &str) -> Result<bool> {
+    let client = get_client(config).await?;
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    // Fetch the existing point so we can confirm it's actually quarantined
+    // (and not accidentally clobber a regular memory through this API).
+    let resp = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid.clone()])
+                .with_payload(true),
+        )
+        .await
+        .context("Failed to fetch quarantine candidate")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(false);
+    };
+    let q = extract_bool(&point.payload, "quarantined").unwrap_or(false);
+    if !q {
+        return Ok(false);
+    }
+    let library = extract_string(&point.payload, "library").unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut new_payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    new_payload.insert("quarantined".into(), false.into());
+    new_payload.insert("updated_at".into(), now.into());
+    // Leave `quarantine_reason` in place as historical trail; the audit entry
+    // below records the promotion explicitly.
+    use qdrant_client::qdrant::SetPayloadPointsBuilder;
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, new_payload)
+                .points_selector(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await
+        .context("Failed to promote from quarantine")?;
+    crate::audit::record(
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Update, library, id)
+            .actor("relevance-gate")
+            .note("promoted from quarantine (re-asserted)"),
+    );
+    Ok(true)
+}
+
+/// Helper to read a bool from Qdrant payload.
+fn extract_bool(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<bool> {
+    payload.get(key).and_then(|v| v.kind.as_ref().and_then(|k| match k {
+        qdrant_client::qdrant::value::Kind::BoolValue(b) => Some(*b),
+        _ => None,
+    }))
+}
+
 /// Cap audit log lines: a single memory can be a long article. 500 chars is
 /// enough to remember what was added without ballooning the log file.
 pub(crate) fn truncate_for_audit(s: &str) -> String {
@@ -896,16 +1065,41 @@ fn build_payload(
     source: Option<&str>,
     mem_type: &str,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
+    build_payload_full(content, hash, created_at, updated_at, library, source, mem_type, None, None)
+}
+
+/// Full-form payload builder. `quarantined=Some(true)` flags a point as not
+/// surfaced in normal search (v0.11); `quarantine_reason` is the human-readable
+/// label of which relevance-gate filter rejected it. Both stay None for
+/// ordinary writes to keep the on-disk payload size unchanged for the 12k
+/// legacy points that predate v0.11.
+#[allow(clippy::too_many_arguments)]
+fn build_payload_full(
+    content: &str,
+    hash: &str,
+    created_at: &str,
+    updated_at: &str,
+    library: &str,
+    source: Option<&str>,
+    mem_type: &str,
+    quarantined: Option<bool>,
+    quarantine_reason: Option<&str>,
+) -> HashMap<String, qdrant_client::qdrant::Value> {
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("content".into(), content.into());
     payload.insert("hash".into(), hash.into());
     payload.insert("created_at".into(), created_at.into());
     payload.insert("updated_at".into(), updated_at.into());
     payload.insert("library".into(), library.into());
-    // `type` (phase Д2): defaults to "memory"; "procedure" for Д6 playbooks.
     payload.insert("type".into(), mem_type.into());
     if let Some(src) = source {
         payload.insert("source".into(), src.into());
+    }
+    if let Some(q) = quarantined {
+        payload.insert("quarantined".into(), q.into());
+    }
+    if let Some(r) = quarantine_reason {
+        payload.insert("quarantine_reason".into(), r.into());
     }
     payload
 }

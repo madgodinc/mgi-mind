@@ -218,6 +218,24 @@ pub enum Commands {
         #[arg(long)]
         no_open: bool,
     },
+    /// Auto-extract & ingest memory candidates (phase Д2). Routes filtered
+    /// candidates through the v0.11 relevance gate: clearly low-signal
+    /// items are sent to the quarantine layer (still retrievable for
+    /// re-submission), not dropped. Re-asserting a quarantined item promotes
+    /// it to ordinary memory.
+    Ingest {
+        /// Target library
+        #[arg(long, default_value = "default")]
+        library: String,
+        /// Raw text to run heuristic extraction on (backstop path).
+        /// Mutually exclusive with --memory.
+        #[arg(long)]
+        raw: Option<String>,
+        /// One or more memory candidates to ingest (agent-driven path).
+        /// Each becomes a `Candidate::Memory`. Repeatable.
+        #[arg(long, value_name = "TEXT")]
+        memory: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -403,7 +421,26 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, !no_open).await
         }
+        Commands::Ingest {
+            library,
+            raw,
+            memory,
+        } => cmd_ingest(&library, raw.as_deref(), memory).await,
     }
+}
+
+async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Result<()> {
+    let config = crate::config::MindConfig::load()
+        .context("Failed to load config — run `mgimind init` first")?;
+    // Ensure target library exists (idempotent).
+    let _ = crate::storage::create_library(&config, library).await;
+    let candidates: Vec<crate::ingest::Candidate> = memory
+        .into_iter()
+        .map(|content| crate::ingest::Candidate::Memory { content })
+        .collect();
+    let report = crate::ingest::run_ingest(&config, raw, candidates, library).await?;
+    println!("{}", report.render());
+    Ok(())
 }
 
 async fn cmd_audit_list(limit: usize) -> Result<()> {
@@ -929,6 +966,23 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     for (name, count) in &libraries {
         let _ = writeln!(out, "  {name}: {count} memories");
     }
+
+    // Best-effort retrieval prompt (v0.11). User-facing libraries (those not
+    // prefixed with `_` — system/bench/internal) are the namespaces the agent
+    // should consider searching before answering. Keep this short: it competes
+    // for tokens with the actual conversation, and the MCP `instructions`
+    // already carries the general policy.
+    let user_libs: Vec<&str> = libraries
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| !n.starts_with('_'))
+        .collect();
+    if !user_libs.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "[Before answering, consider mind_search in:]");
+        let _ = writeln!(out, "  {}", user_libs.join(", "));
+    }
+
     if crate::vault::is_vault_initialized() {
         let _ = writeln!(out);
         let _ = writeln!(out, "[Vault: {vault_summary}]");

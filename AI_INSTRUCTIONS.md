@@ -16,6 +16,38 @@ decision, a project, a preference, a name, a value, a "we did/said/use" - call
 `mind_search` first and answer from what comes back. Do not answer from your own
 guess. This is the whole point of the system.
 
+## Search triggers (when "the one rule" fires)
+
+The rule above is the principle; this is the operational checklist. MCP cannot
+enforce a search — these triggers exist so the model has explicit signals to
+override its instinct to answer from priors. Project names live in the
+namespaces returned by `mind_context` (libraries), not in a separate config.
+
+**Priority 1 - must search before answering:**
+
+| Trigger | Example | Why |
+|---|---|---|
+| Named project / library | "how's the Aurora bench going?" | name = handle for stored context |
+| Named person / handle | "what did Alrighty say about X?" | identity = stored fact |
+| Stated preference / rule | "do I prefer Go or Rust?" | preferences live in facts |
+| Decision recall | "what did we decide about the schema?" | decisions are durable notes |
+| Meta-cue about memory | "did I tell you about X?", "do you remember Y?", "have you forgotten Z?", "you already know this" | the user is explicitly testing the store |
+| Negation to verify | "isn't it X?", "it's NOT Y, right?" | falsification needs a lookup, not a guess |
+| Cross-session reference | "like last time", "as before", "the file we were editing" | by definition not in current context |
+
+**Priority 2 - should search before assuming:**
+
+| Trigger | Example |
+|---|---|
+| Unfamiliar acronym / proper noun | "fix the bug in PXK" |
+| Vague "the" referring to prior context | "fix the deploy script" |
+| User asks "what do you know about X" | "what do you know about my setup?" |
+
+If none of the above fires, answer directly — over-searching wastes tokens and
+slows the response. There is no "Priority 0 / never search" tier on purpose:
+false negatives (no search when one was needed) are more expensive than false
+positives (a redundant search).
+
 ## Session protocol (do this every session)
 
 **At the start:**
@@ -202,4 +234,4 @@ which the user wires into their AI client once; it starts Qdrant automatically.)
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v0.8.x | Apache-2.0 | Mad God Inc
+MGI-Mind v0.11 | Apache-2.0 | Mad God Inc

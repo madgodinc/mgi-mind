@@ -155,11 +155,26 @@ async fn handle_message(config: Option<&MindConfig>, msg: Value) -> Option<Value
     }
 }
 
+/// Best-effort retrieval policy. The MCP protocol gives a server no way to
+/// gate generation, so this is text the client *may* surface to the model — it
+/// is not enforcement. Phrased as triggers, not rules, so the model can apply
+/// judgment instead of mechanically calling tools on every turn.
+const RETRIEVAL_INSTRUCTIONS: &str = "\
+mgi-mind is the user's persistent memory across sessions. Before answering, \
+consider calling mind_search when the user: (1) asks about a project, person, \
+preference, or decision by name; (2) uses meta-cues like \"did I tell you\", \
+\"do you remember\", \"have you forgotten\", \"you should know\"; (3) negates \
+something to verify (\"isn't it X?\"); (4) references prior conversations. \
+Use mind_context once at session start to see what libraries exist. This is \
+best-effort guidance, not a hard requirement — the model decides when retrieval \
+is worth the round-trip.";
+
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "mgi-mind", "version": env!("CARGO_PKG_VERSION") }
+        "serverInfo": { "name": "mgi-mind", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": RETRIEVAL_INSTRUCTIONS
     })
 }
 
@@ -813,6 +828,26 @@ mod tests {
             .expect("initialize is a request");
         assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(resp["result"]["serverInfo"]["name"], "mgi-mind");
+    }
+
+    #[tokio::test]
+    async fn initialize_carries_retrieval_instructions() {
+        // The MCP `instructions` field is the only programmatic channel for
+        // best-effort "search before answer" policy. If it disappears, clients
+        // lose the only signal we have — guard it.
+        let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let resp = handle_message(None, msg).await.unwrap();
+        let instr = resp["result"]["instructions"]
+            .as_str()
+            .expect("initialize result must include `instructions`");
+        assert!(
+            instr.contains("mind_search"),
+            "instructions must mention mind_search"
+        );
+        assert!(
+            instr.contains("best-effort"),
+            "instructions must call this best-effort (no MCP enforcement)"
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ mod mcp;
 mod md_reconcile;
 mod procedure;
 mod provenance;
+mod relevance;
 mod reranker;
 mod secrets;
 mod session;

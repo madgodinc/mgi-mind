@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.11.0 - quarantine layer + relevance gate + best-effort retrieval
+
+The core problem v0.11 solves: a write-side relevance filter that silently
+drops low-signal candidates creates a loop — the user re-asserts the same
+thing, the filter drops it again, the agent never learns. The fix is a
+quarantine layer between accept and reject. Low-signal candidates are
+quarantined (kept retrievable for re-submission detection, hidden from
+ordinary `mind_search`); a re-assertion promotes them to ordinary memory.
+That breaks the loop without surrendering the filter.
+
+Paired with a best-effort retrieval policy on the read side: the MCP server
+now advertises `instructions` at `initialize`, and `mind_context` lists the
+user-facing libraries to consider before answering. Neither is enforceable
+in MCP — the client may ignore both — so the policy is phrased as triggers,
+not rules.
+
+### Added
+- **Relevance gate** (`src/relevance.rs`). Cheap, pure filters: length floor
+  (12 chars / 3 words), 8000-char cap, blacklisted paths/tools, decision
+  markers in RU + EN, novelty by token Jaccard against neighbors (not
+  cosine — repetition is a confidence signal, not noise). Verdict::Accept |
+  Quarantine{reason}. Applied in `mind_ingest` / `mgimind ingest` to
+  `Candidate::Memory`. 12 unit tests.
+- **Quarantine layer** in `src/storage.rs`. New payload flag
+  `quarantined: bool` + `quarantine_reason`. `memory_query_filter` excludes
+  quarantined points (alongside procedures), so they never surface in normal
+  search. `add_quarantined`, `promote_from_quarantine`,
+  `quarantine_id_for(library, content)` (deterministic UUIDv5 for
+  re-assertion detection). Every transition writes an audit event with
+  `actor=relevance-gate`.
+- **`mgimind ingest --library X [--raw TEXT] [--memory TEXT...]`** CLI
+  command. Previously only via MCP; now usable for smoke tests, dev debug,
+  and shell-driven imports.
+- **MCP `initialize` `instructions`** field carries the best-effort
+  retrieval policy. Phrased as triggers (named project, meta-cue about
+  memory, negation to verify, cross-session reference), not as rules.
+- **`mind_context` "Before answering, consider mind_search in:"** section
+  lists user-facing libraries (those not prefixed with `_`). Names come from
+  the namespaces themselves, not a parallel config file.
+- **`AI_INSTRUCTIONS.md` search-trigger table** (Priority 1 / Priority 2)
+  with explicit examples, including meta-cues and negation-verification.
+
+### Architectural invariants (do not relitigate without re-running the critic)
+1. MCP cannot enforce "search before answer." Any policy is best-effort.
+   Called as such in user-facing copy.
+2. A proxy in front of the model was rejected. Single point of failure
+   for every turn; contradicts the best-effort posture of the rest of the
+   stack.
+3. Quarantine is the architectural unblocker. Without it, a write-side
+   relevance gate plus a read-side retrieval policy form a loop through
+   the user.
+4. Cosine-noise filtering is out of the gate by design. "Similar to existing"
+   is a confidence signal, not low-signal.
+5. Project names live in namespaces (libraries), not in a parallel config.
+6. There is no "Priority 0 / never search" tier. False negatives are
+   more expensive than false positives.
+
+## 0.10.x - audit log + ephemeral viewer + md reconcile
+
+Shipped on `main` ahead of the version bump (the working semver was
+catching up with the work). These are the v0.11 deliverables that landed
+before the quarantine layer:
+
+- **Audit log** (`src/audit.rs`) — append-only JSONL under
+  `MGIMIND_HOME/audit.log`. Every storage mutation
+  (add/update/delete/library/quarantine/promote) writes an event with
+  actor, target, before/after, and a free-text note. Read-only via
+  `mgimind audit list / show <target>`.
+- **Ephemeral viewer** (`src/viewer.rs` + baked `viewer_index.html`) — local
+  HTTP server on 127.0.0.1 with a random free port. Static frontend baked
+  into the binary; no Node, no extra runtime. `mgimind viewer` opens the
+  browser by default; `--no-open` for headless / SSH.
+- **`mgimind import md <path> --library <name> [--apply]`** as reconcile
+  with "md wins" (`src/md_reconcile.rs`). Dry-run default that prints the
+  plan (new / replace / unchanged / skip per file). Identity by `source`,
+  not content hash, so a hand-edited file replaces its prior version
+  instead of accumulating duplicates. This is the v1.0 escape hatch for
+  hand-curated stores.
+- **First LongMemEval-S bench result** — R@5 = 98.2% on CPU
+  (all-MiniLM-L6-v2, rerank off), 1h 45min wall-clock. See `BENCHMARKS.md`
+  and `benchmark/results/2026-06-02-cpu-overnight/`. The number is the
+  baseline against which v0.12+ retrieval changes will be judged.
+
 ## Unreleased - auto-memory (Д2) and procedural memory (Д6)
 
 Memory the system helps build and curate, not just a manual store. Built on the
