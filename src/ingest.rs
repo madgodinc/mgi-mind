@@ -59,6 +59,12 @@ pub struct IngestReport {
     pub skipped_dup: usize,
     pub skipped_secret: usize,
     pub stored_procedures: usize,
+    /// Routed to the v0.11 quarantine layer (didn't pass the relevance gate
+    /// but not dropped — kept retrievable for re-submission detection).
+    pub quarantined: usize,
+    /// Existing quarantined point promoted to normal memory because the user
+    /// re-asserted it (the loop-breaker the critic flagged).
+    pub promoted: usize,
 }
 
 impl IngestReport {
@@ -83,6 +89,18 @@ impl IngestReport {
             s.push_str(&format!(
                 "\nLearned {} procedure(s).",
                 self.stored_procedures
+            ));
+        }
+        if self.quarantined > 0 {
+            s.push_str(&format!(
+                "\nQuarantined {} candidate(s) below the relevance gate (re-assert to promote).",
+                self.quarantined
+            ));
+        }
+        if self.promoted > 0 {
+            s.push_str(&format!(
+                "\nPromoted {} quarantined entry/entries on re-assertion.",
+                self.promoted
             ));
         }
         s
@@ -174,6 +192,8 @@ pub async fn run_ingest(
         ..Default::default()
     };
 
+    let gate_cfg = crate::relevance::GateConfig::default();
+
     for cand in candidates {
         match cand {
             Candidate::Memory { content } => {
@@ -181,6 +201,46 @@ pub async fn run_ingest(
                     report.skipped_secret += 1;
                     continue;
                 }
+
+                // Relevance gate (v0.11). Cheap filters first: length, blacklists,
+                // decision markers. A "Quarantine" verdict does NOT drop the
+                // candidate — it routes to the quarantine layer so a future
+                // re-assertion can promote it. Silently dropping is exactly the
+                // user-loop the critic flagged.
+                let rcand = crate::relevance::Candidate {
+                    content: &content,
+                    source: Some("ingest"),
+                    tool_name: None,
+                };
+                if let crate::relevance::Verdict::Quarantine { reason } =
+                    crate::relevance::check_cheap(&rcand, &gate_cfg)
+                {
+                    // Re-assertion check: if the same content already lives in
+                    // quarantine (deterministic id), this is the promotion
+                    // signal — user is insistent, raise confidence.
+                    let qid =
+                        crate::storage::quarantine_id_for(library, content.trim());
+                    if crate::storage::promote_from_quarantine(config, &qid)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        report.promoted += 1;
+                        continue;
+                    }
+                    // Otherwise, quarantine the candidate (write with the flag,
+                    // do not surface in ordinary search).
+                    let _ = crate::storage::add_quarantined(
+                        config,
+                        library,
+                        &content,
+                        Some("ingest"),
+                        &reason,
+                    )
+                    .await?;
+                    report.quarantined += 1;
+                    continue;
+                }
+
                 // Near-dup check (the missing audit #8 primitive): skip writing a
                 // memory that already has a very similar neighbor.
                 if let Ok(Some(score)) =
