@@ -55,7 +55,7 @@ impl Options {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Report {
     pub scanned: usize,
     pub exact_dups_removed: usize,

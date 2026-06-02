@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.3 - viewer API for consolidate dry-run
+
+Continues the v0.11.2 pattern: backend HTTP surfaces land first, the
+v0.12 UI consumes them. This release adds the "what would consolidate
+do" preview that the dry-run consolidate page will show.
+
+### Added
+- `GET /api/consolidate?library=X` — runs the same consolidation logic
+  as `mgimind consolidate` but always with `apply=false`. Returns a
+  JSON `Report` (`scanned`, `exact_dups_removed`, `near_dups_removed`,
+  `cold_candidates`, `applied=false`). The endpoint **does not** expose
+  `--apply` — destructive operations belong on the CLI where the user
+  has to type the flag explicitly. The viewer is the preview surface,
+  not the action surface.
+- `consolidate::Report` now derives `Serialize` (no behaviour change;
+  just enables the JSON response).
+
 ## 0.11.2 - viewer API for the quarantine layer
 
 The viewer (v0.10.x) renders memories and the audit log. v0.11.2 wires

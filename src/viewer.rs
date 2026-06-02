@@ -57,6 +57,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/memories/:id", delete(api_delete_memory))
         .route("/api/quarantine", get(api_quarantine_list))
         .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
+        .route("/api/consolidate", get(api_consolidate_dry_run))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -267,6 +268,37 @@ async fn api_quarantine_list(
         })
         .collect();
     Ok(Json(entries))
+}
+
+#[derive(Deserialize)]
+struct ConsolidateQuery {
+    token: Option<String>,
+    library: Option<String>,
+}
+
+/// Always dry-run. The viewer surface intentionally does NOT expose `--apply`
+/// for consolidate — destructive operations belong on the CLI where the user
+/// has to type the flag explicitly. This endpoint is the "what would happen"
+/// preview that the v0.12 UI shows before the user runs the CLI command.
+async fn api_consolidate_dry_run(
+    State(state): State<AppState>,
+    Query(q): Query<ConsolidateQuery>,
+    headers: HeaderMap,
+) -> Result<Json<crate::consolidate::Report>, Response> {
+    let auth = AuthQuery { token: q.token.clone() };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    let opts = crate::consolidate::Options {
+        apply: false,
+        library: q.library,
+        near_dup_threshold: 0.0,  // with_defaults() will fill to 0.97
+        decay_days: 0,            // with_defaults() will fill to 180
+        prune_cold: false,
+    }
+    .with_defaults();
+    let report = crate::consolidate::run(&state.config, opts)
+        .await
+        .map_err(internal)?;
+    Ok(Json(report))
 }
 
 async fn api_quarantine_promote(
