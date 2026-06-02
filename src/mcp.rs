@@ -238,7 +238,7 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     }
 }
 
-/// Map a tool name + arguments to its rendered text. All 29 tools are wired:
+/// Map a tool name + arguments to its rendered text. All 30 tools are wired:
 /// - 7 "warm" embed-path tools reuse the existing `render_*`/`build_*` helpers
 ///   + storage/knowledge functions, using the pre-loaded warm config;
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
@@ -370,6 +370,27 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                     "No quarantined entry with id '{id}' (may be a regular memory or unknown id)."
                 )),
             }
+        }
+        "mind_consolidate" => {
+            // MCP surface is dry-run only. Destructive consolidate (apply=true)
+            // stays on the CLI where the user has to type the flag explicitly.
+            // The same posture as /api/consolidate in the viewer — preview
+            // surface, not action surface.
+            let cfg = warm(true)?;
+            let library = arg_str(args, "library").map(|s| s.to_string());
+            let opts = crate::consolidate::Options {
+                apply: false,
+                library,
+                near_dup_threshold: 0.0, // with_defaults() fills to 0.97
+                decay_days: 0,           // with_defaults() fills to 180
+                prune_cold: false,
+            }
+            .with_defaults();
+            let r = crate::consolidate::run(cfg, opts).await?;
+            Ok(format!(
+                "Consolidate dry-run:\n  scanned:           {}\n  exact duplicates:  {}\n  near duplicates:   {}\n  cold candidates:   {}\n(run `mgimind consolidate --apply` in a terminal to act on this)",
+                r.scanned, r.exact_dups_removed, r.near_dups_removed, r.cold_candidates
+            ))
         }
         "mind_quarantine_promote" => {
             let cfg = warm(true)?;
@@ -531,7 +552,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
     }
 }
 
-/// The 29 tool definitions advertised by `tools/list`. Schemas are hand-written
+/// The 30 tool definitions advertised by `tools/list`. Schemas are hand-written
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
@@ -744,6 +765,16 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_consolidate",
+            "description": "Preview what `mgimind consolidate` would do — count of exact duplicates, near-duplicates, and cold (old + unused) entries. Always dry-run on the MCP surface; destructive consolidation stays on the CLI where the user types --apply explicitly. Use this when the user asks 'how much duplicate memory do I have?' or before suggesting they run the CLI command.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string", "description": "Scope to one library (omit for all)" }
+                }
+            }
+        }),
+        json!({
             "name": "mind_quarantine_list",
             "description": "List entries the v0.11 relevance gate filtered into the quarantine layer. These are not surfaced by mind_search by design — use this tool when you suspect a fact was filtered (e.g., the user keeps repeating something the gate would reject as low-signal). Newest first.",
             "inputSchema": {
@@ -844,12 +875,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_29_tools() {
+    fn exposes_all_30_tools() {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            29,
-            "tools/list must advertise exactly 29 tools"
+            30,
+            "tools/list must advertise exactly 30 tools"
         );
     }
 
@@ -916,10 +947,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_29() {
+    async fn tools_list_returns_30() {
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 29);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 30);
     }
 
     #[tokio::test]
