@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.12.2 — Qdrant client binds IPv4 explicitly, with timeouts
+
+Hotfix continuation. After 0.12.1 fixed the glibc problem, the next
+silent failure surfaced: on freshly provisioned container hosts
+(RunPod base images, most CI runners) the Qdrant client built from
+`http://localhost:6334` was deadlocking on the first RPC. The
+`mgimind serve` readiness check passed (it uses `127.0.0.1`
+literally), the `mgimind create <library>` round-trip completed, and
+then the very next call hung indefinitely with 8 futex_wait threads
+and 1 ep_poll thread on three ESTAB connections with zero bytes in
+queue. No timeout. No error. Just a frozen process.
+
+The cause: `Qdrant::from_url("http://localhost:...")` forwards to
+tonic, which does its own `ToSocketAddrs` resolution against
+`/etc/hosts`. Most modern Ubuntu container images list `::1
+localhost` before `127.0.0.1 localhost`, so hyper picks IPv6 first.
+But the bundled Qdrant is launched with
+`QDRANT__SERVICE__HOST=127.0.0.1` (IPv4-only), so the kernel
+loopback ESTABs `::1:6334` against a non-listener and the gRPC
+channel pool wedges in the HTTP/2 SETTINGS exchange forever. A
+single-shot RPC (the `collection_exists` inside `create_library`)
+happened to win the race; the moment two RPCs raced (`add` does
+`collection_exists` + `get_points` + `upsert_points`) the pool
+locked up.
+
+This isn't a "container quirk" — it's an "anyone who isn't the
+developer downloads mgimind and it hangs". The developer's own PC
+masks the bug because it ran first and qdrant landed on its
+IPv4 listener before the IPv6 race could happen; on every other
+machine the bug ships.
+
+### Changed
+- `storage::get_client` now builds the channel against `http://
+  127.0.0.1:<port>` explicitly. No more "localhost".
+- Added `connect_timeout(5s)`, `timeout(30s)`,
+  `keep_alive_while_idle()` so the next infrastructure surprise
+  surfaces as an error rather than an immortal futex hang.
+- `is_qdrant_running()` in `cli.rs` was already using `127.0.0.1`
+  literally; the client was the only one disagreeing.
+
+### Caveats
+- The 30s request timeout will affect very large batched embeds on
+  cold CPU. If a batched `add` of >100 sessions fails on slow
+  hardware, raise the per-call timeout rather than removing it.
+  Disabling the timeout returns us to the immortal-futex world.
+
 ## 0.12.1 — bundled Qdrant works on any glibc (musl)
 
 Hotfix. `doctor --fix` now downloads the **musl** Qdrant binary

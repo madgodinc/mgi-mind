@@ -141,10 +141,25 @@ pub async fn get_client(config: &MindConfig) -> Result<Arc<Qdrant>> {
     // channel connects lazily), so memoizing on first use is safe even before
     // Qdrant is up. Callers keep using `&client` - `&Arc<Qdrant>` derefs to
     // `&Qdrant`, so no call site changes.
+    //
+    // Use 127.0.0.1 literal, NOT "localhost". `Qdrant::from_url` forwards to
+    // tonic/hyper, which does its own DNS resolution against `/etc/hosts`. On
+    // most modern Ubuntu container images `/etc/hosts` lists `::1 localhost`
+    // before `127.0.0.1 localhost`, so hyper picks IPv6 first. But we spawn the
+    // bundled qdrant with `QDRANT__SERVICE__HOST=127.0.0.1` (IPv4-only), so the
+    // kernel loopback ESTABs `::1:6334` against nothing on the listener side
+    // and the gRPC channel pool wedges forever in HTTP/2 SETTINGS exchange:
+    // 8 futex_wait + 1 ep_poll threads, 3 ESTAB-with-zero-bytes connections,
+    // no timeout, no error. Forcing IPv4 keeps the client agreeing with the
+    // server's bind. The timeouts below are insurance: any future surprise
+    // surfaces as a clean error instead of an immortal futex hang.
     CLIENT
         .get_or_try_init(|| {
-            let url = format!("http://localhost:{}", config.qdrant_port);
-            let mut builder = Qdrant::from_url(&url);
+            let url = format!("http://127.0.0.1:{}", config.qdrant_port);
+            let mut builder = Qdrant::from_url(&url)
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .keep_alive_while_idle();
             // Authenticate when an API key is configured (audit #7).
             if let Some(key) = &config.qdrant_api_key {
                 builder = builder.api_key(key.clone());
