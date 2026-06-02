@@ -957,6 +957,36 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         }
     }
 
+    // v0.13 liveness check: stale "active" sessions (idle > 30 min) are zombies
+    // — they will be auto-closed on the next `session_start` of the same agent,
+    // but surfacing them here makes the leak visible the moment the user runs
+    // `doctor`. Diagnostic only; we don't auto-close from doctor (the recovery
+    // path is `session_start`, deliberately).
+    let zombies = crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
+    if zombies.is_empty() {
+        let _ = writeln!(out, "[OK]   No zombie sessions");
+    } else {
+        let _ = writeln!(
+            out,
+            "[WARN] {} zombie session(s) (active for >{} min, heartbeat stale):",
+            zombies.len(),
+            crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES
+        );
+        for z in &zombies {
+            let _ = writeln!(
+                out,
+                "       agent={} idle={}min last_active={}",
+                z.agent_sanitized,
+                z.age_minutes,
+                z.last_active_at.to_rfc3339()
+            );
+        }
+        let _ = writeln!(
+            out,
+            "       Auto-closed on next `mgimind session start --agent <agent>`."
+        );
+    }
+
     if issues == 0 && fixed == 0 {
         let _ = write!(out, "\nAll checks passed.");
     } else if fix && issues == 0 {
@@ -1275,8 +1305,30 @@ async fn cmd_session_start(agent: &str) -> Result<()> {
 }
 
 pub(crate) async fn run_session_start(agent: &str) -> Result<String> {
-    crate::session::start(agent)?;
-    Ok(format!("Session started (agent: {agent})"))
+    let report = crate::session::start(agent)?;
+    let mut out = format!("Session started (agent: {agent})");
+    if let Some(r) = report.recovered {
+        let last = r
+            .last_active_at
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let started = r
+            .started_at
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        out.push_str(&format!(
+            "\n\n⚠ Recovered an interrupted session for agent '{agent}':\n  \
+             started:     {started}\n  \
+             last active: {last}\n  \
+             It was auto-closed with a stub summary because it never received \
+             mind_session_end (kill/Ctrl-C/crash). The session file is at:\n    \
+             {}\n  \
+             If you remember what it was, you can append a real summary to that file \
+             manually — the new session is separate.",
+            r.path.display()
+        ));
+    }
+    Ok(out)
 }
 
 async fn cmd_session_last(agent: Option<&str>) -> Result<()> {
@@ -1443,6 +1495,13 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     let _ = writeln!(out, "Total memories: {total_memories}");
     let _ = writeln!(out, "KG facts:       {facts_count}");
     let _ = writeln!(out, "Sessions:       {session_count}");
+    // v0.13: surface zombie-session count alongside other stats. The number
+    // is the same one `mind_doctor` shows in detail.
+    let zombies =
+        crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
+    if !zombies.is_empty() {
+        let _ = writeln!(out, "  zombies:      {} (idle >30min, see `mgimind doctor`)", zombies.len());
+    }
     let _ = write!(out, "Vault:          {vault_summary}");
     Ok(out)
 }

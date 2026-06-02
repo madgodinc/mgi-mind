@@ -232,10 +232,18 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
     };
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    match dispatch(config, name, &args).await {
+    let result = match dispatch(config, name, &args).await {
         Ok(text) => tool_text(text, false),
         Err(e) => tool_text(format!("Error: {e}"), true),
-    }
+    };
+
+    // v0.13 liveness: stamp a heartbeat for every active session so an
+    // interrupted MCP client (Ctrl-C / kill / crash) can be detected on the
+    // next mind_session_start. Best-effort — heartbeat failures must never
+    // sabotage a successful tool call.
+    crate::session::touch_all_active();
+
+    result
 }
 
 /// Map a tool name + arguments to its rendered text. All 30 tools are wired:
