@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.13.0 — session liveness: zombie sessions auto-close on next start
+
+Closes the long-standing leak where `mind_session_end` was never reached
+because the MCP client was killed, Ctrl-C'd, or crashed. The session
+file stayed `status = active` forever; the next `session_start` of the
+same agent didn't know there had been a predecessor, and the summary
+of the previous run was lost.
+
+The fix is one field, no new MCP tools, no new files for the model to
+remember to write to.
+
+### Added
+- Per-agent heartbeat file (`sessions/.heartbeat.<agent>`). Stamped
+  with the current RFC3339 timestamp by the MCP dispatcher after every
+  `tools/call`, and on `session_start`. Cheap atomic write of a single
+  timestamp — no read-modify-write of the session body.
+- `session::touch(agent)` and `session::touch_all_active()` —
+  best-effort heartbeat updaters used by the dispatcher.
+- `session::list_zombies(idle_minutes)` returning each agent whose
+  active session has been idle longer than the threshold (default 30
+  minutes), with sanitized agent name, session file path, last activity
+  time, and minutes idle.
+- `session::DEFAULT_IDLE_THRESHOLD_MINUTES = 30`.
+
+### Changed
+- `mind_session_start` now auto-recovers a stale active session for the
+  same agent before opening a new one. The recovery is **visible**, not
+  silent: the response includes "⚠ Recovered an interrupted session for
+  agent '<x>'" with the original `started`, `last active`, file path,
+  and a hint that the user can append a real summary manually if they
+  remember what the run did. The new session is a separate file.
+- `session::start` returns a `StartReport { recovered: Option<RecoveredSession> }`
+  instead of `()`. Calling code paths (CLI `run_session_start`) surface
+  the recovery to the user.
+- Auto-close summary is reconstructed, not invented: "Auto-closed by
+  v0.13 liveness check. Last activity at <T> (idle for N min). The
+  session terminated without calling mind_session_end — usually a kill,
+  Ctrl-C, or crash. No explicit summary recorded."
+- `mind_doctor` adds a check `[OK] No zombie sessions` or `[WARN] N
+  zombie session(s)` with one line per agent. Diagnostic only — the
+  recovery path is still `session_start`, never `doctor`.
+- `mind_stats` adds a `zombies: N (idle >30min, see mgimind doctor)`
+  line when zombies exist, hidden otherwise.
+
+### Out of scope (intentionally not done)
+- No new MCP tool. The original draft proposal added
+  `mind_session_draft_append`; the strict critic round rejected it as
+  one more source of truth, one more decision point for the model,
+  and one more tool name in a roadmap whose stated principle is
+  "fewer tools, not more". The heartbeat field already gives
+  auto-recovery without those costs.
+- No per-agent override of the idle threshold yet. Defaulting to 30
+  minutes covers `claude-code` long sessions and is too generous for
+  `cursor`-style short flows, but a wrong-by-a-few-minutes auto-close
+  costs almost nothing vs. an immortal zombie.
+- `doctor` does not auto-close. Recovery happens deliberately at
+  `session_start` so the recovery message is delivered to whoever just
+  re-opened the session (the same person who'd care).
+
 ## 0.12.4 — download the versioned ONNX Runtime file, refuse to extract symlinks
 
 THE ROOT CAUSE of every "mgimind add hangs forever" report. The
