@@ -1,0 +1,148 @@
+[2m2026-06-02T20:17:54.498491Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6862, index: 0, mask: {24, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.498554Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6865, index: 3, mask: {2, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.498499Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6863, index: 1, mask: {1, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.498529Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6864, index: 2, mask: {25, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.498836Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6869, index: 7, mask: {4, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.502479Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6866, index: 4, mask: {26, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.502494Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6868, index: 6, mask: {27, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.502493Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6867, index: 5, mask: {3, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.506466Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6873, index: 11, mask: {6, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.510454Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6870, index: 8, mask: {28, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.514429Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6876, index: 14, mask: {31, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.521427Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6877, index: 15, mask: {8, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.525425Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6878, index: 16, mask: {32, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.532464Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6879, index: 17, mask: {9, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.532642Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6882, index: 20, mask: {34, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.532691Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6891, index: 29, mask: {15, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.532810Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6896, index: 34, mask: {41, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.532645Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6890, index: 28, mask: {38, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.540421Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6899, index: 37, mask: {19, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.547428Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6901, index: 39, mask: {20, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.551427Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6902, index: 40, mask: {44, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.555432Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6904, index: 42, mask: {45, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.559276Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6906, index: 44, mask: {46, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.559319Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6874, index: 12, mask: {30, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.562429Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6875, index: 13, mask: {7, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.564462Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6907, index: 45, mask: {23, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.566429Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6892, index: 30, mask: {39, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.570064Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6900, index: 38, mask: {43, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.573437Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6886, index: 24, mask: {36, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.573447Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6903, index: 41, mask: {21, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.573448Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6895, index: 33, mask: {17, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.573463Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6881, index: 19, mask: {10, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.573454Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6908, index: 46, mask: {47, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.577410Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6889, index: 27, mask: {14, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.577415Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6905, index: 43, mask: {22, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.577412Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6888, index: 26, mask: {37, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.588689Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6880, index: 18, mask: {33, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.592421Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6885, index: 23, mask: {12, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:17:54.596421Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 6887, index: 25, mask: {13, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.056043Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7009, index: 0, mask: {24, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.056461Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7011, index: 2, mask: {25, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.060434Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7013, index: 4, mask: {26, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.061426Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7010, index: 1, mask: {1, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.061448Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7015, index: 6, mask: {27, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.065430Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7017, index: 8, mask: {28, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.072495Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7012, index: 3, mask: {2, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.072511Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7014, index: 5, mask: {3, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.077425Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7016, index: 7, mask: {4, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.081430Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7022, index: 13, mask: {7, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.088424Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7023, index: 14, mask: {31, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.092431Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7025, index: 16, mask: {32, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.092539Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7033, index: 24, mask: {36, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.096438Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7034, index: 25, mask: {13, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.100433Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7035, index: 26, mask: {37, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.104423Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7029, index: 20, mask: {34, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.107429Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7037, index: 28, mask: {38, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.111425Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7038, index: 29, mask: {15, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.119426Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7042, index: 33, mask: {17, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.121707Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7043, index: 34, mask: {41, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.123938Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7050, index: 41, mask: {21, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.123992Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7052, index: 43, mask: {22, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.127429Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7054, index: 45, mask: {23, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.131485Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7020, index: 11, mask: {6, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.135433Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7021, index: 12, mask: {30, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.138807Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7024, index: 15, mask: {8, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.143758Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7036, index: 27, mask: {14, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.147460Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7046, index: 37, mask: {19, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.151427Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7049, index: 40, mask: {44, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.152801Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7053, index: 44, mask: {46, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.152828Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7055, index: 46, mask: {47, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.152830Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7026, index: 17, mask: {9, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.152878Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7032, index: 23, mask: {12, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.152829Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7039, index: 30, mask: {39, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.156408Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7048, index: 39, mask: {20, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.159423Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7051, index: 42, mask: {45, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.161413Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7047, index: 38, mask: {43, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.181419Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7028, index: 19, mask: {10, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+[2m2026-06-02T20:20:23.188422Z[0m [31mERROR[0m [2mort::logging[0m[2m:[0m pthread_setaffinity_np failed for thread: 7027, index: 18, mask: {33, }, error code: 22 error msg: Invalid argument. Specify the number of threads explicitly so the affinity is not set.
+  bench: 10/500 questions
+  bench: 20/500 questions
+  bench: 30/500 questions
+  bench: 40/500 questions
+  bench: 50/500 questions
+  bench: 60/500 questions
+  bench: 70/500 questions
+  bench: 80/500 questions
+  bench: 90/500 questions
+  bench: 100/500 questions
+  bench: 110/500 questions
+  bench: 120/500 questions
+  bench: 130/500 questions
+  bench: 140/500 questions
+  bench: 150/500 questions
+  bench: 160/500 questions
+  bench: 170/500 questions
+  bench: 180/500 questions
+  bench: 190/500 questions
+  bench: 200/500 questions
+  bench: 210/500 questions
+  bench: 220/500 questions
+  bench: 230/500 questions
+  bench: 240/500 questions
+  bench: 250/500 questions
+  bench: 260/500 questions
+  bench: 270/500 questions
+  bench: 280/500 questions
+  bench: 290/500 questions
+  bench: 300/500 questions
+  bench: 310/500 questions
+  bench: 320/500 questions
+  bench: 330/500 questions
+  bench: 340/500 questions
+  bench: 350/500 questions
+  bench: 360/500 questions
+  bench: 370/500 questions
+  bench: 380/500 questions
+  bench: 390/500 questions
+  bench: 400/500 questions
+  bench: 410/500 questions
+  bench: 420/500 questions
+  bench: 430/500 questions
+  bench: 440/500 questions
+  bench: 450/500 questions
+  bench: 460/500 questions
+  bench: 470/500 questions
+  bench: 480/500 questions
+  bench: 490/500 questions
+  bench: 500/500 questions
+LongMemEval — retrieval recall (R@k), zero-API
+config: model=all-MiniLM-L6-v2 dim=384 rerank=true (sessions ranked by hybrid dense+sparse)
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 91.6%
+  R@5  = 98.2%
+  R@10 = 99.8%
+
+By question type:
+  knowledge-update           n=78   R@1=97% R@5=100% R@10=100%
+  multi-session              n=133  R@1=92% R@5=98% R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=53% R@5=93% R@10=97%
+  single-session-user        n=70   R@1=96% R@5=99% R@10=100%
+  temporal-reasoning         n=133  R@1=91% R@5=97% R@10=100%
+
+Raw per-question results written to /root/work/results/raw.json
+
+Note: R@k is retrieval recall (zero-API), NOT QA accuracy. Do not compare it against another system's LLM-judged QA numbers.

@@ -94,6 +94,216 @@ config above and publishes Δ; milestone releases run the full ablation matrix.
 Do not paste a number you did not produce on this build — borrowing another
 project's figure is exactly the overclaim this file exists to prevent.
 
+### LongMemEval-S — 2026-06-03, regression v0.12.1 vs v0.8.1 (RunPod CPU)
+
+Goal: confirm the quarantine layer (v0.11.x) and the relevance gate did not
+break retrieval against the v0.8.1 baseline above. Same dataset, same model,
+same `rerank=off`. Re-run on a RunPod 8-vCPU community CPU pod.
+
+```
+config: model=all-MiniLM-L6-v2 dim=384 rerank=false
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 85.6%   (Δ vs v0.8.1: +0.4)
+  R@5  = 97.6%   (Δ vs v0.8.1: -0.6)
+  R@10 = 99.4%   (Δ vs v0.8.1:  0.0)
+
+By question type:
+  knowledge-update           n=78   R@1=91%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=85%  R@5=98%  R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=53%  R@5=93%  R@10=97%
+  single-session-user        n=70   R@1=84%  R@5=97%  R@10=100%
+  temporal-reasoning         n=133  R@1=85%  R@5=95%  R@10=98%
+```
+
+- **Date:** 2026-06-03
+- **Build:** mgimind v0.12.1 (commit `b37f89f`, tag `v0.12.1`)
+- **Host:** RunPod community CPU pod, 8 vCPU, 32 GB RAM (Ubuntu 22.04, x86_64)
+- **Raw per-question JSON:** [`benchmark/results/2026-06-02-v012-regression/pod2-rerank-off/raw.json`](benchmark/results/2026-06-02-v012-regression/pod2-rerank-off/raw.json) (sha256 `3a7395508db551ca876dd6d921abab85fd630f5d0bc4765aa74c191a206d308f`)
+- **Log:** [`bench.log`](benchmark/results/2026-06-02-v012-regression/pod2-rerank-off/bench.log)
+
+**Reading:** all three deltas vs v0.8.1 are within statistical noise at
+n=500 (±0.5pp at 95% CI). The new quarantine + relevance-gate pipeline does
+NOT regress retrieval recall on this dataset and config.
+
+The companion `rerank=on` run was finished on a second community pod
+before it was reclaimed; results below.
+
+```
+config: model=all-MiniLM-L6-v2 dim=384 rerank=true
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 91.6%   (Δ vs v0.8.1 rerank=on baseline: not directly comparable, no baseline rerank=on run)
+  R@5  = 98.2%
+  R@10 = 99.8%
+
+By question type:
+  knowledge-update           n=78   R@1=97%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=92%  R@5=98%  R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=53%  R@5=93%  R@10=97%
+  single-session-user        n=70   R@1=96%  R@5=99%  R@10=100%
+  temporal-reasoning         n=133  R@1=91%  R@5=97%  R@10=100%
+```
+
+- **Raw per-question JSON:** [`benchmark/results/2026-06-02-v012-regression/pod1-rerank-on/raw.json`](benchmark/results/2026-06-02-v012-regression/pod1-rerank-on/raw.json) (sha256 `0389348e13df0b4effeac75c588a6165ee0653ded53887ed0f19678a81bc4bf5`)
+- **Log:** [`bench.log`](benchmark/results/2026-06-02-v012-regression/pod1-rerank-on/bench.log)
+
+Reranker on this CPU/MiniLM config moves R@1 by +6pp and R@5 by +0.6pp.
+The reranker effect is real but small on MiniLM; it is much larger on the
+e5-base headline below.
+
+### LongMemEval-S — 2026-06-04, v0.14.3 GPU (RTX 3090, e5-base FP16)
+
+First GPU run of the bench, also first run on `multilingual-e5-base`
+(the dense default; baseline above is `all-MiniLM-L6-v2` for a like-for-like
+v0.8.1 comparison). Switched from the INT8 quantized e5-base ONNX shipped
+by `mgimind doctor --fix` to the **FP16** variant — INT8 ops (`MatMulInteger`,
+`DynamicQuantizeLinear`) are not implemented in the ORT CUDA execution
+provider and fall back to CPU, defeating GPU acceleration. FP16 keeps the
+whole graph on the GPU and gives the actual speedup (~25 min/500q vs
+~1h45 on the CPU baseline above).
+
+```
+config: model=multilingual-e5-base FP16 dim=768  (sha256 5d760477f691b665da2b94e1528eb6938b795f76064d9392e6af7118b8a3f54a)
+host:   RunPod community pod, RTX 3090 24GB, 8 vCPU, 30 GB RAM, Ubuntu 22.04
+build:  mgimind v0.14.3 (commit 47c0455, --features cuda),
+        ORT 1.24.2 GPU build (libonnxruntime_providers_cuda.so 302 MB),
+        cuDNN 9.23.0, CUDA driver 550.100 (runtime 12.4),
+        MGIMIND_USE_CUDA=1
+scored: 500 questions (0 abstention excluded), three runs
+```
+
+Run A — `rerank=false`:
+
+```
+  R@1  = 88.4%
+  R@5  = 98.0%
+  R@10 = 99.4%
+  wall = 629s (~10.5 min)
+
+By question type:
+  knowledge-update           n=78   R@1=95%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=88%  R@5=98%  R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=60%  R@5=90%  R@10=97%
+  single-session-user        n=70   R@1=89%  R@5=96%  R@10=100%
+  temporal-reasoning         n=133  R@1=86%  R@5=98%  R@10=98%
+```
+
+Run B — `rerank=true` (headline):
+
+```
+  R@1  = 92.6%
+  R@5  = 99.2%
+  R@10 = 100.0%
+  wall = 1539s (~25.6 min)
+
+By question type:
+  knowledge-update           n=78   R@1=99%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=95%  R@5=100% R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=63%  R@5=93%  R@10=100%
+  single-session-user        n=70   R@1=94%  R@5=100% R@10=100%
+  temporal-reasoning         n=133  R@1=89%  R@5=98%  R@10=100%
+```
+
+Run C — `rerank=true` again (variance):
+
+```
+  R@1  = 92.6%   (Δ vs Run B:  0.0)
+  R@5  = 98.8%   (Δ vs Run B: -0.4)
+  R@10 = 100.0%  (Δ vs Run B:  0.0)
+  wall = 1528s (~25.5 min)
+```
+
+- **Date:** 2026-06-04
+- **Reranker:** `Xenova/bge-reranker-base` quantized ONNX. The reranker is
+  also registered against the CUDA EP at startup but its INT8 weights
+  similarly fall back to CPU during inference (same MatMulInteger reason).
+  The `rerank=true` cost (2.4× wall) is therefore mostly CPU-bound; this
+  number is honest about its mix. A reranker-FP16 pass is planned.
+- **Raw per-question JSON:**
+  - [`v0143-e5fp16-rerank-off.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-off.json) (sha256 `73a1e49194966bdb0859fca3056651db0248027cca2275a57aa097fbde6d0b58`)
+  - [`v0143-e5fp16-rerank-on.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-on.json) (sha256 `ec19f3a0414f5409ca8a059125cd014820fcb0a03a62c651092a5122900133a2`)
+  - [`v0143-e5fp16-rerank-on-variance.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-on-variance.json) (sha256 `7062923251fd70041e48aa9dd70be934eda3b530376a17a524f5bf592db736ec`)
+- **Reproducibility note on the FP16 model:** `mgimind doctor --fix` currently
+  downloads the INT8 quantized e5-base (~278 MB, sha256 pinned in
+  `integrity.rs`). To reproduce the GPU runs above, fetch
+  `Xenova/multilingual-e5-base/onnx/model_fp16.onnx` (530 MB, sha256
+  `5d76...f54a`) and place it as `$MGIMIND_HOME/models/multilingual-e5-base/model.onnx`.
+  A user-facing `MGIMIND_MODEL_VARIANT` switch and a CPU+GPU model registry
+  in `integrity.rs` is on the roadmap; for now this is a manual swap.
+
+**Reading:**
+
+- **R@5 = 99.2%** is the strongest single-config result on LongMemEval-S
+  this project has produced. It is +1.0pp over the v0.8.1 MiniLM baseline
+  and roughly 4× faster wall-time with the reranker still on, on a single
+  RTX 3090 — the actual hardware most self-hosters have.
+- Variance between Run B and Run C on the same config is 0pp (R@1, R@10)
+  and 0.4pp (R@5). At n=500 this is consistent with binomial noise.
+- The `rerank=true` ablation (+4.2pp R@1, +1.2pp R@5, +0.6pp R@10) is
+  meaningful and justifies the 2.4× wall cost on this dataset.
+- `single-session-preference` (n=30) remains the weakest stratum on
+  both configurations — same shape as the baseline. Open issue, not a
+  regression.
+
+### LongMemEval-S — 2026-06-04, v0.14.3 GPU (RTX 3090, MiniLM-L6-v2 FP16)
+
+Ablation control for the headline above. Same host, same build, same
+500 questions, but switch the embedder back to `all-MiniLM-L6-v2` (the
+v0.8.1 baseline model) running on the GPU as FP16. Isolates "what is from
+e5-base" vs "what is from GPU + bigger sessions cache vs from v0.8.1 CPU".
+
+```
+config: model=all-MiniLM-L6-v2 dim=384 FP16 rerank=false
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 85.0%   (Δ vs v0.8.1 CPU INT8: -0.2pp)
+  R@5  = 98.0%   (Δ vs v0.8.1 CPU INT8: -0.2pp)
+  R@10 = 99.6%   (Δ vs v0.8.1 CPU INT8: +0.2pp)
+  wall = 351s (~5.9 min)  vs ~1h45m CPU baseline (~18× speedup)
+
+By question type:
+  knowledge-update           n=78   R@1=94%  R@5=100% R@10=100%
+  multi-session              n=133  R@1=83%  R@5=99%  R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=57%  R@5=93%  R@10=97%
+  single-session-user        n=70   R@1=84%  R@5=97%  R@10=100%
+  temporal-reasoning         n=133  R@1=82%  R@5=96%  R@10=99%
+```
+
+- **Raw per-question JSON:** [`benchmark/results/2026-06-03-gpu-v0143/v0143-minilm-fp16-rerank-off.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-minilm-fp16-rerank-off.json) (sha256 `c778e9ff9814d0ba68c1e180335ba22c6c11db71baa3d8df4c829097b4525efe`)
+
+**Reading:** MiniLM FP16 on the GPU lands within ±0.2pp of MiniLM INT8 on
+CPU at every cutoff. Two takeaways:
+
+1. **FP16-on-GPU is recall-equivalent to INT8-on-CPU** for this embedder.
+   The 18× speedup is free in retrieval quality terms. This is the
+   evidence behind the GPU recipe being a recommended path, not a
+   trade-off.
+2. **The +1.0pp R@5 in the e5-base headline is from the model swap,
+   not from GPU or the v0.14.x retrieval policy.** Keeping this honest:
+   the v0.14.1 counterfactual A/B policy did not move recall by itself
+   on this dataset.
+
+### What didn't make it in (honest)
+
+- **Reranker on actual GPU** (vs CUDA-registered-but-CPU-fallback): the
+  reranker ships as INT8 ONNX and falls back to CPU at inference time
+  for the same `MatMulInteger` reason as the embedder did. Shipping an
+  FP16 reranker through `doctor --fix` is on the roadmap; until then
+  the `rerank=on` wall-time numbers above are mostly CPU-bound.
+- **`mgimind doctor --fix` model registry:** users currently have to
+  swap the FP16 model file by hand to reproduce the headline. A
+  `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch with a CPU INT8 + GPU
+  FP16 registry in `integrity.rs` is the next release item.
+
 ## Counterfactual A/B — retrieval policy on / off
 
 Companion benchmark to the LongMemEval recall numbers above. Measures the

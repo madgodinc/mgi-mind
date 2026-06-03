@@ -1,0 +1,72 @@
+[mgimind] embedder: CUDA execution provider registered
+  bench: 10/500 questions
+  bench: 20/500 questions
+  bench: 30/500 questions
+  bench: 40/500 questions
+  bench: 50/500 questions
+  bench: 60/500 questions
+  bench: 70/500 questions
+  bench: 80/500 questions
+  bench: 90/500 questions
+  bench: 100/500 questions
+  bench: 110/500 questions
+  bench: 120/500 questions
+  bench: 130/500 questions
+  bench: 140/500 questions
+  bench: 150/500 questions
+  bench: 160/500 questions
+  bench: 170/500 questions
+  bench: 180/500 questions
+  bench: 190/500 questions
+  bench: 200/500 questions
+  bench: 210/500 questions
+  bench: 220/500 questions
+  bench: 230/500 questions
+  bench: 240/500 questions
+  bench: 250/500 questions
+  bench: 260/500 questions
+  bench: 270/500 questions
+  bench: 280/500 questions
+  bench: 290/500 questions
+  bench: 300/500 questions
+  bench: 310/500 questions
+  bench: 320/500 questions
+  bench: 330/500 questions
+  bench: 340/500 questions
+  bench: 350/500 questions
+  bench: 360/500 questions
+  bench: 370/500 questions
+  bench: 380/500 questions
+  bench: 390/500 questions
+  bench: 400/500 questions
+  bench: 410/500 questions
+  bench: 420/500 questions
+  bench: 430/500 questions
+  bench: 440/500 questions
+  bench: 450/500 questions
+  bench: 460/500 questions
+  bench: 470/500 questions
+  bench: 480/500 questions
+  bench: 490/500 questions
+  bench: 500/500 questions
+LongMemEval — retrieval recall (R@k), zero-API
+config: model=multilingual-e5-base dim=768 rerank=false (sessions ranked by hybrid dense+sparse)
+scored: 500 questions (0 abstention excluded)
+
+Overall:
+  R@1  = 88.4%
+  R@5  = 98.0%
+  R@10 = 99.4%
+
+By question type:
+  knowledge-update           n=78   R@1=95% R@5=100% R@10=100%
+  multi-session              n=133  R@1=88% R@5=98% R@10=100%
+  single-session-assistant   n=56   R@1=100% R@5=100% R@10=100%
+  single-session-preference  n=30   R@1=60% R@5=90% R@10=97%
+  single-session-user        n=70   R@1=89% R@5=96% R@10=100%
+  temporal-reasoning         n=133  R@1=86% R@5=98% R@10=98%
+
+Raw per-question results written to /root/work/results-gpu/v0143-e5fp16-rerank-off.json
+
+Note: R@k is retrieval recall (zero-API), NOT QA accuracy. Do not compare it against another system's LLM-judged QA numbers.
+wall_seconds=629
