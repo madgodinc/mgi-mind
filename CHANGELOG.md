@@ -1,22 +1,31 @@
 # Changelog
 
-## 1.0.0 — semver-stable, R@5 = 99.2% on LongMemEval-S
+## 1.0.0 — semver-stable, R@5 = 98.2% on LongMemEval-S (CPU default path)
 
 First semver-stable release. The bar from the roadmap was three things:
 
 1. The benchmark dropping a number on the wall every milestone — done
-   (LongMemEval-S baseline + v0.12.1 regression + v0.14.3 GPU headline).
+   (LongMemEval-S baseline + v0.12.1 regression + v0.14.3 GPU ablation).
 2. Procedural memory as the ров — done (Д6 dataset of 227 pairs from 20
    public repos, R@5 = 96.5% in v0.14.3).
 3. `md import/export` with the "md wins" escape hatch and an asymmetric
    "Qdrant now → md says" diff in the dry-run — done in v0.14.3 / this
    release.
 
-The headline retrieval number this tag ships against:
-**R@5 = 99.2% on LongMemEval-S, multilingual-e5-base FP16 + reranker,
-RTX 3090, 25.6 minutes wall time.** See `BENCHMARKS.md` for the raw
-per-question JSON and the three other configurations that produced
-it.
+The headline retrieval number this tag ships against is the **default
+install path** a user gets after `mgimind doctor --fix`: CPU, INT8
+all-MiniLM-L6-v2 + reranker, **R@5 = 98.2% on LongMemEval-S** (R@1 = 91.6%,
+R@10 = 99.8%). The optional GPU + FP16 e5-base recipe documented in
+`BENCHMARKS.md` and `scripts/local-bench-gpu.sh` lifts that to R@5 = 99.2%
+on an RTX 3090 in 25.6 minutes — a real +1.0pp ablation, not the face of
+the release. Putting the GPU number in the headline would sell a config
+the zero-config user does not actually run.
+
+Haystack size on this dataset is non-trivial: per-question distinct-
+session count is **median 48** (p10 = 44, p90 = 52, range 38–62), so R@10
+puts the system in the top-~20% of candidates and R@5 in the top-~10%;
+neither is a mechanical ceiling. See "How hard is the task" in
+`BENCHMARKS.md`.
 
 ### Added
 
