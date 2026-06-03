@@ -427,7 +427,9 @@ The project went through a code audit covering 27 issues. **21 are fully
 fixed, 6 are partial** — the mechanism shipped, hardening continues.
 [`AUDIT_STATUS.md`](AUDIT_STATUS.md) accounts for every issue one by one,
 including the gaps (fact supersession isn't implemented yet, for
-example). [`CHANGELOG.md`](CHANGELOG.md) has the per-release history.
+example). [`CHANGELOG.md`](CHANGELOG.md) has the per-release history,
+and [`ROADMAP.md`](ROADMAP.md) names what is committed for v1.1–v2.0
+and which directions are still **candidate** at the v3.0 horizon.
 
 ## Project layout
 
