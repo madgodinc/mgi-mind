@@ -1463,34 +1463,13 @@ pub(crate) async fn run_import(
 
     let root = std::path::Path::new(path);
     let plan = crate::md_reconcile::plan(&config, library, root).await?;
-
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Reconcile plan for library '{}' from {}:",
-        plan.library,
-        plan.root.display()
-    );
     let c = plan.counts();
-    let _ = writeln!(
-        out,
-        "  files scanned: {}  new: {}  replace: {}  unchanged: {}  skip: {}",
-        plan.files.len(),
-        c.new,
-        c.replace,
-        c.unchanged,
-        c.skip
-    );
-    for f in &plan.files {
-        if matches!(
-            f.action,
-            crate::md_reconcile::PlanAction::Skip
-                | crate::md_reconcile::PlanAction::Unchanged
-        ) {
-            continue;
-        }
-        let _ = writeln!(out, "  [{}] {}", f.action.as_str(), f.source);
-    }
+
+    // Always lead with the rendered plan — "Qdrant now → will become (md)".
+    // The asymmetric direction is the whole point of md-wins reconcile and
+    // it's the thing the user must read before flipping --apply.
+    let mut out = crate::md_reconcile::render_plan(&plan);
+
     if !apply {
         let _ = writeln!(
             out,
@@ -1500,10 +1479,6 @@ pub(crate) async fn run_import(
         return Ok(out);
     }
     if c.new + c.replace == 0 {
-        let _ = writeln!(
-            out,
-            "\nNothing to apply — md and Qdrant agree on every file."
-        );
         return Ok(out);
     }
     let report = crate::md_reconcile::apply(&config, &plan).await?;

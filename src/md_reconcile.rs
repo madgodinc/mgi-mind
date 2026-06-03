@@ -267,17 +267,22 @@ fn scan_md(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Pretty-print a plan to stdout. The intent is for the user to actually read
+/// Render a plan as a string. The intent is for the user to actually read
 /// this before passing `--apply` — so the format leads with the direction of
 /// change ("Qdrant now → md says ..."), not an abstract old-vs-new diff.
-pub fn print_plan(plan: &ReconcilePlan) {
+/// "md wins" is the rule, so the diff is asymmetric on purpose.
+pub fn render_plan(plan: &ReconcilePlan) -> String {
+    use std::fmt::Write;
     let c = plan.counts();
-    println!(
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "Reconcile plan for library '{}' from {}:",
         plan.library,
         plan.root.display()
     );
-    println!(
+    let _ = writeln!(
+        out,
         "  files scanned: {}  new: {}  replace: {}  unchanged: {}  skip: {}",
         plan.files.len(),
         c.new,
@@ -285,34 +290,43 @@ pub fn print_plan(plan: &ReconcilePlan) {
         c.unchanged,
         c.skip,
     );
-    println!();
+    let _ = writeln!(out);
     for f in &plan.files {
         if f.action == PlanAction::Skip || f.action == PlanAction::Unchanged {
             continue;
         }
-        println!("[{}] {}", f.action.as_str(), f.source);
+        let _ = writeln!(out, "[{}] {}", f.action.as_str(), f.source);
         if f.action == PlanAction::Replace {
-            // Direction: Qdrant now → will become (from md). Not a symmetric
-            // diff — the file is the authoritative correction.
             for (i, old) in f.existing.iter().enumerate() {
                 let preview = first_line(&old.content);
-                println!("   Qdrant now (#{}): {preview}", i + 1);
+                let _ = writeln!(out, "   Qdrant now (#{}): {preview}", i + 1);
             }
             let preview = first_line(&f.new_content);
-            println!("   will become (md): {preview}");
-            println!();
+            let _ = writeln!(out, "   will become (md): {preview}");
+            let _ = writeln!(out);
+        } else if f.action == PlanAction::New {
+            let preview = first_line(&f.new_content);
+            let _ = writeln!(out, "   will become (md): {preview}");
+            let _ = writeln!(out);
         }
     }
     if c.new + c.replace == 0 {
-        println!("Nothing to apply — md and Qdrant agree on every file.");
+        let _ = writeln!(out, "Nothing to apply — md and Qdrant agree on every file.");
     } else {
-        println!(
+        let _ = writeln!(
+            out,
             "Run with --apply to write {} new and replace {} existing entr{}.",
             c.new,
             c.replace,
             if c.replace == 1 { "y" } else { "ies" }
         );
     }
+    out
+}
+
+/// Backwards-compatible printer; just dumps `render_plan` to stdout.
+pub fn print_plan(plan: &ReconcilePlan) {
+    print!("{}", render_plan(plan));
 }
 
 fn first_line(s: &str) -> String {
@@ -371,5 +385,53 @@ mod tests {
         // drifted" and let md win cleanly.
         let existing = vec![rec("chunk one"), rec("chunk two")];
         assert_eq!(decide_action("chunk one", &existing), PlanAction::Replace);
+    }
+
+    #[test]
+    fn render_plan_shows_asymmetric_direction_on_replace() {
+        // Regression guard for the v1.0 contract: dry-run output MUST lead
+        // with "Qdrant now → will become (md)" so the user reading the diff
+        // sees the direction of change before deciding to --apply.
+        let plan = ReconcilePlan {
+            library: "notes".into(),
+            root: PathBuf::from("/tmp/notes"),
+            files: vec![FilePlan {
+                source: "alpha.md".into(),
+                new_content: "new body that wins".into(),
+                existing: vec![rec("old body in store")],
+                action: PlanAction::Replace,
+            }],
+        };
+        let rendered = render_plan(&plan);
+        assert!(
+            rendered.contains("Qdrant now"),
+            "plan should mention Qdrant now: {rendered}"
+        );
+        assert!(
+            rendered.contains("will become (md)"),
+            "plan should mention will become (md): {rendered}"
+        );
+        let qdrant_pos = rendered.find("Qdrant now").unwrap();
+        let md_pos = rendered.find("will become (md)").unwrap();
+        assert!(
+            qdrant_pos < md_pos,
+            "Qdrant now must appear before will become (md) for the md-wins direction"
+        );
+    }
+
+    #[test]
+    fn render_plan_empty_says_agree() {
+        let plan = ReconcilePlan {
+            library: "notes".into(),
+            root: PathBuf::from("/tmp/notes"),
+            files: vec![FilePlan {
+                source: "u.md".into(),
+                new_content: "same".into(),
+                existing: vec![rec("same")],
+                action: PlanAction::Unchanged,
+            }],
+        };
+        let rendered = render_plan(&plan);
+        assert!(rendered.contains("md and Qdrant agree"));
     }
 }
