@@ -317,35 +317,145 @@ fn l2_normalize(v: &mut [f32]) {
 
 pub fn is_model_downloaded(config: &MindConfig) -> bool {
     let model_dir = crate::config::models_dir().join(&config.model_name);
-    model_dir.join("model.onnx").exists() && model_dir.join("tokenizer.json").exists()
+    if !(model_dir.join("model.onnx").exists() && model_dir.join("tokenizer.json").exists()) {
+        return false;
+    }
+    // Variant marker: the file is "downloaded" only if it matches the requested
+    // variant. Without this a user who flips MGIMIND_MODEL_VARIANT cpu→gpu (or
+    // back) would keep the wrong file because `model.onnx` already exists.
+    let want = ModelVariant::from_env();
+    match read_variant_marker(&model_dir) {
+        Some(have) if have == want => true,
+        // No marker (legacy install) → assume CPU. If the user asked for GPU,
+        // doctor will re-download.
+        None => want == ModelVariant::Cpu,
+        Some(_) => false,
+    }
+}
+
+fn variant_marker_path(model_dir: &Path) -> std::path::PathBuf {
+    model_dir.join(".variant")
+}
+
+fn read_variant_marker(model_dir: &Path) -> Option<ModelVariant> {
+    let raw = std::fs::read_to_string(variant_marker_path(model_dir)).ok()?;
+    match raw.trim() {
+        "cpu" => Some(ModelVariant::Cpu),
+        "gpu" => Some(ModelVariant::Gpu),
+        _ => None,
+    }
+}
+
+fn write_variant_marker(model_dir: &Path, variant: ModelVariant) -> Result<()> {
+    let s = match variant {
+        ModelVariant::Cpu => "cpu",
+        ModelVariant::Gpu => "gpu",
+    };
+    std::fs::write(variant_marker_path(model_dir), s)?;
+    Ok(())
+}
+
+/// Which weight variant `doctor --fix` downloads.
+///
+/// `Cpu` = INT8-quantized ONNX (small, fast on CPU, falls back to CPU on the
+/// ORT CUDA EP because `MatMulInteger` is not implemented there).
+/// `Gpu` = FP16 ONNX (larger; the whole graph stays on the device).
+/// `Auto` = `Gpu` when the build has the `cuda` feature AND
+/// `MGIMIND_USE_CUDA=1` is set at startup, else `Cpu`. This keeps zero-config
+/// users on CPU/INT8 and gives the GPU recipe the right file without a manual
+/// swap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelVariant {
+    Cpu,
+    Gpu,
+}
+
+impl ModelVariant {
+    /// Resolve the variant from `MGIMIND_MODEL_VARIANT` (case-insensitive,
+    /// `cpu`/`gpu`/`auto`/unset). Unknown values fall back to `Cpu` with a
+    /// warning so a typo does not silently switch behaviour.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("MGIMIND_MODEL_VARIANT").ok();
+        let lower = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
+        match lower.as_deref() {
+            Some("gpu") => ModelVariant::Gpu,
+            Some("cpu") => ModelVariant::Cpu,
+            None | Some("") | Some("auto") => {
+                if cfg!(feature = "cuda")
+                    && std::env::var("MGIMIND_USE_CUDA").ok().as_deref() == Some("1")
+                {
+                    ModelVariant::Gpu
+                } else {
+                    ModelVariant::Cpu
+                }
+            }
+            Some(other) => {
+                eprintln!(
+                    "[mgimind] MGIMIND_MODEL_VARIANT={other:?} not recognised; falling back to cpu. Use cpu|gpu|auto."
+                );
+                ModelVariant::Cpu
+            }
+        }
+    }
 }
 
 /// Look up the pinned checksum for the default model's files (audit #6).
-/// Custom models have no pin (returns None → download with a warning).
-fn model_file_pin(model_name: &str, local_name: &str) -> Option<&'static str> {
-    match (model_name, local_name) {
-        ("multilingual-e5-base", "model.onnx") => integrity::pin(integrity::MODEL_E5_BASE_ONNX),
-        ("multilingual-e5-base", "tokenizer.json") => {
+/// Variant routes to the right pin: GPU = FP16, CPU = INT8. Custom models
+/// have no pin (returns None → download with a warning).
+fn model_file_pin(
+    model_name: &str,
+    variant: ModelVariant,
+    local_name: &str,
+) -> Option<&'static str> {
+    match (model_name, variant, local_name) {
+        ("multilingual-e5-base", ModelVariant::Cpu, "model.onnx") => {
+            integrity::pin(integrity::MODEL_E5_BASE_ONNX)
+        }
+        ("multilingual-e5-base", ModelVariant::Gpu, "model.onnx") => {
+            integrity::pin(integrity::MODEL_E5_BASE_ONNX_FP16)
+        }
+        ("multilingual-e5-base", _, "tokenizer.json") => {
             integrity::pin(integrity::MODEL_E5_BASE_TOKENIZER)
         }
-        ("all-MiniLM-L6-v2", "model.onnx") => integrity::pin(integrity::MODEL_MINILM_ONNX),
-        ("all-MiniLM-L6-v2", "tokenizer.json") => integrity::pin(integrity::MODEL_MINILM_TOKENIZER),
+        ("all-MiniLM-L6-v2", ModelVariant::Cpu, "model.onnx") => {
+            integrity::pin(integrity::MODEL_MINILM_ONNX)
+        }
+        ("all-MiniLM-L6-v2", ModelVariant::Gpu, "model.onnx") => {
+            // No pinned FP16 mirror yet; fall back to the CPU fp32 pin so the
+            // file is still integrity-checked rather than blindly downloaded.
+            integrity::pin(integrity::MODEL_MINILM_ONNX)
+        }
+        ("all-MiniLM-L6-v2", _, "tokenizer.json") => integrity::pin(integrity::MODEL_MINILM_TOKENIZER),
         _ => None,
     }
 }
 
 /// HuggingFace source (base URL + (remote_path, local_name) files) for a model's
 /// ONNX + tokenizer. e5 ships ONNX under the Xenova mirror (quantized = CPU-
-/// friendly); sentence-transformers models keep their own `onnx/` path. Audit #21.
-fn model_source(model_name: &str) -> (String, [(&'static str, &'static str); 2]) {
-    match model_name {
-        "multilingual-e5-base" => (
+/// friendly, FP16 = GPU-friendly); sentence-transformers models keep their own
+/// `onnx/` path. Audit #21.
+fn model_source(
+    model_name: &str,
+    variant: ModelVariant,
+) -> (String, [(&'static str, &'static str); 2]) {
+    match (model_name, variant) {
+        ("multilingual-e5-base", ModelVariant::Cpu) => (
             "https://huggingface.co/Xenova/multilingual-e5-base/resolve/main".to_string(),
             [
                 ("onnx/model_quantized.onnx", "model.onnx"),
                 ("tokenizer.json", "tokenizer.json"),
             ],
         ),
+        ("multilingual-e5-base", ModelVariant::Gpu) => (
+            "https://huggingface.co/Xenova/multilingual-e5-base/resolve/main".to_string(),
+            [
+                ("onnx/model_fp16.onnx", "model.onnx"),
+                ("tokenizer.json", "tokenizer.json"),
+            ],
+        ),
+        // sentence-transformers models: no FP16 mirror; both variants take the
+        // same fp32 file. `doctor` still records the variant in the variant
+        // marker so a later switch re-downloads when an FP16 mirror is added.
         _ => (
             format!("https://huggingface.co/sentence-transformers/{model_name}/resolve/main"),
             [
@@ -360,27 +470,46 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
     let model_dir = crate::config::models_dir().join(&config.model_name);
     std::fs::create_dir_all(&model_dir)?;
 
-    let (base_url, files) = model_source(&config.model_name);
+    let variant = ModelVariant::from_env();
+    let existing = read_variant_marker(&model_dir);
+    let variant_mismatch = existing.is_some() && existing != Some(variant);
+
+    eprintln!("  variant: {variant:?} (MGIMIND_MODEL_VARIANT)");
+    if variant_mismatch {
+        eprintln!(
+            "  variant mismatch (was {:?}, want {:?}) → re-downloading model.onnx",
+            existing, variant
+        );
+    }
+
+    let (base_url, files) = model_source(&config.model_name, variant);
 
     for (remote_path, local_name) in &files {
         let url = format!("{base_url}/{remote_path}");
         let dest = model_dir.join(local_name);
 
-        if dest.exists() {
+        // Force-redownload model.onnx if the on-disk variant doesn't match what
+        // we want; tokenizer.json is variant-agnostic so we keep it.
+        let force = variant_mismatch && *local_name == "model.onnx";
+        if dest.exists() && !force {
             eprintln!("  {local_name} already exists, skipping.");
             continue;
         }
+        if force {
+            std::fs::remove_file(&dest).ok();
+        }
 
-        let pin = model_file_pin(&config.model_name, local_name);
+        let pin = model_file_pin(&config.model_name, variant, local_name);
         if pin.is_none() {
             eprintln!(
-                "  [warn] no pinned checksum for {local_name} (custom model) - integrity not verified"
+                "  [warn] no pinned checksum for {local_name} (custom model or unmirrored variant) - integrity not verified"
             );
         }
         eprintln!("  Downloading {local_name}...");
         crate::util::download_file(&url, &dest, pin).await?;
     }
 
+    write_variant_marker(&model_dir, variant)?;
     eprintln!("  Model downloaded to {}", model_dir.display());
     Ok(())
 }
@@ -581,5 +710,29 @@ mod tests {
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6);
         assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn e5_cpu_variant_picks_int8_path_and_pin() {
+        let (_url, files) = model_source("multilingual-e5-base", ModelVariant::Cpu);
+        assert_eq!(files[0].0, "onnx/model_quantized.onnx");
+        let pin = model_file_pin("multilingual-e5-base", ModelVariant::Cpu, "model.onnx");
+        assert_eq!(pin, integrity::pin(integrity::MODEL_E5_BASE_ONNX));
+    }
+
+    #[test]
+    fn e5_gpu_variant_picks_fp16_path_and_pin() {
+        let (_url, files) = model_source("multilingual-e5-base", ModelVariant::Gpu);
+        assert_eq!(files[0].0, "onnx/model_fp16.onnx");
+        let pin = model_file_pin("multilingual-e5-base", ModelVariant::Gpu, "model.onnx");
+        assert_eq!(pin, integrity::pin(integrity::MODEL_E5_BASE_ONNX_FP16));
+        assert!(pin.is_some(), "GPU FP16 must be pinned");
+    }
+
+    #[test]
+    fn tokenizer_pin_is_variant_agnostic() {
+        let cpu = model_file_pin("multilingual-e5-base", ModelVariant::Cpu, "tokenizer.json");
+        let gpu = model_file_pin("multilingual-e5-base", ModelVariant::Gpu, "tokenizer.json");
+        assert_eq!(cpu, gpu);
     }
 }
