@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.2 — docs: bring README "Current version" line in sync with the tag
+
+Docs-only patch. README.md / README.ru.md / README.zh.md still said
+"Current version: 0.11.x" and the install snippet pinned
+`MGIMIND_TAG=v0.8.0` — both predate the 1.0 line. Readers landing on
+the project page saw three different "current" versions
+simultaneously: README 0.11.x, latest release v1.0.1, BENCHMARKS
+baseline v0.8.1. That looks like a mess even when the underlying tag
+chain is clean.
+
+All three READMEs now say `Current version: 1.0.x (semver-stable since
+v1.0.0)` and the install snippet pins `MGIMIND_TAG=v1.0.1`. Historical
+mentions of v0.8.1 in BENCHMARKS.md are left as-is on purpose — they
+are the dated "when this was measured" reference, not a claim about
+the current version.
+
+No code, no MCP-surface, no on-disk format changes.
+
 ## 1.0.1 — docs: rebalance v1.0 headline to the default install path
 
 Docs-only patch on top of v1.0.0. No code, no MCP-surface, no on-disk
