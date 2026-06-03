@@ -133,7 +133,7 @@ embedder loads), the Qdrant binary, the embedding model
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v0.8.0 curl ... | sh` — pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v1.0.1 curl ... | sh` — pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh` — just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -414,10 +414,14 @@ memories must be re-embedded:
 
 ## Status and audit
 
-Current version: **0.11.x**. The 0.11 line adds the v0.11.0 quarantine
-layer + best-effort retrieval policy and the v0.11.1 inspection commands
-on top of the 0.10.x audit log, ephemeral viewer, and md reconcile
-import.
+Current version: **1.0.x** (semver-stable since v1.0.0). Built on top
+of the 0.10.x audit log and ephemeral viewer, the 0.11.x quarantine
+layer + best-effort retrieval policy, the 0.12.x viewer wave, the
+0.13.x session liveness, and the 0.14.x procedural-memory дом
+(LongMemEval baseline + Д6 dataset of 227 pairs from 20 public repos).
+The 1.0 contract is the asymmetric "Qdrant now → md says" md reconcile
+diff, the `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch, and the
+31-tool MCP surface — these are frozen until a 2.0 bump.
 
 The project went through a code audit covering 27 issues. **21 are fully
 fixed, 6 are partial** — the mechanism shipped, hardening continues.
