@@ -51,6 +51,12 @@ mgimind bench /path/to/longmemeval_s.json --output longmemeval_s.results.json
 mgimind bench /path/to/longmemeval_s.json --limit 20
 ```
 
+For the GPU recipe, `scripts/local-bench-gpu.sh` is the one-shot
+reproduction: it downloads the ORT 1.24.2 GPU runtime, builds with
+`--features cuda`, fetches the dataset, switches the model variant to
+GPU FP16, and runs the bench. The script is what produced the v0.14.3
+GPU numbers below on a fresh box.
+
 The run prints overall and per-question-type R@1 / R@5 / R@10 and writes raw
 per-question results (gold vs retrieved, hit@k) to the `--output` file. Commit that
 raw file alongside any number you publish, so the claim is checkable.
