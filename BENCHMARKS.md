@@ -32,6 +32,20 @@ recall denominator and reported separately — they test "say you don't know", n
 retrieval. The retrieval config (model, dimension, reranking on/off) is printed in
 the report header, because the number depends on it.
 
+### How hard is the task — distinct-session distribution
+
+A recall number is only meaningful if the haystack is large enough that retrieval
+is non-trivial. For LongMemEval-S (500 questions):
+
+| Per-question haystack size (distinct sessions) | min | p10 | median | p90 | max |
+|---|---|---|---|---|---|
+| sessions                                        | 38  | 44  | **48** | 52  | 62  |
+
+Gold sessions per question: 1–6 (median 2). So R@10 puts the system in the
+top-~20% of the haystack and R@5 in the top-~10%; neither is a mechanical
+ceiling. Per-question-type haystack medians are flat (47–50), so no stratum is
+trivially easier by haystack size.
+
 ## Reproduce
 
 Datasets are public, downloaded once — **no account or service is connected** for
@@ -62,6 +76,27 @@ per-question results (gold vs retrieved, hit@k) to the `--output` file. Commit t
 raw file alongside any number you publish, so the claim is checkable.
 
 ## Results
+
+### Headline number (the one the release tag stands behind)
+
+The headline is the **default install path** a user gets after `mgimind doctor
+--fix` — CPU INT8, the model variant pinned for zero-config installs. Anything
+faster or higher is reported as an ablation below, not as the face of the
+project.
+
+| Path | Embedder | Hardware | rerank | R@1 | **R@5** | R@10 | Wall (500q) |
+|---|---|---|---|---|---|---|---|
+| **default (zero-config)** | all-MiniLM-L6-v2 INT8 | CPU 8-vCPU | on | 91.6% | **98.2%** | 99.8% | ~hours |
+| ablation: same, no rerank | all-MiniLM-L6-v2 INT8 | CPU 8-vCPU | off | 85.6% | 97.6% | 99.4% | ~hours |
+| ablation: e5-base FP16 + GPU | multilingual-e5-base FP16 | RTX 3090 | on | 92.6% | 99.2% | 100.0% | 25.6 min |
+| ablation: same, no rerank | multilingual-e5-base FP16 | RTX 3090 | off | 88.4% | 98.0% | 99.4% | 10.5 min |
+
+R@5 = 98.2% on the default CPU INT8 + reranker path is what the release tag
+stands behind. The +1.0pp R@5 to 99.2% on the e5-base FP16 + GPU recipe is a
+real and reproducible gain (raw json below, plus the
+[`local-bench-gpu.sh`](scripts/local-bench-gpu.sh) recipe), but it is an
+opt-in path on hardware most installs do not have. Putting it in the headline
+would sell a configuration the user does not actually run.
 
 ### LongMemEval-S — 2026-06-02, CPU
 
@@ -246,10 +281,11 @@ Run C — `rerank=true` again (variance):
 
 **Reading:**
 
-- **R@5 = 99.2%** is the strongest single-config result on LongMemEval-S
-  this project has produced. It is +1.0pp over the v0.8.1 MiniLM baseline
-  and roughly 4× faster wall-time with the reranker still on, on a single
-  RTX 3090 — the actual hardware most self-hosters have.
+- This config is **not the headline.** It is the best single number this
+  project has produced (+1.0pp R@5 vs the default CPU INT8 + reranker path),
+  but it requires a GPU build, FP16 weights, and `MGIMIND_USE_CUDA=1`. The
+  default install runs CPU INT8. The "Headline number" table above is the
+  zero-config user experience; this block is the ablation.
 - Variance between Run B and Run C on the same config is 0pp (R@1, R@10)
   and 0.4pp (R@5). At n=500 this is consistent with binomial noise.
 - The `rerank=true` ablation (+4.2pp R@1, +1.2pp R@5, +0.6pp R@10) is
