@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.1 — docs: rebalance v1.0 headline to the default install path
+
+Docs-only patch on top of v1.0.0. No code, no MCP-surface, no on-disk
+format changes — v1.0.0 → v1.0.1 is bit-for-bit identical at runtime.
+
+v1.0.0 shipped with R@5 = 99.2% in the release title and at the top of
+BENCHMARKS.md. That number is real, but it comes from the **opt-in
+GPU + FP16 e5-base recipe**, not the default install. A zero-config
+user who runs `mgimind doctor --fix` lands on `MGIMIND_MODEL_VARIANT=cpu`
+INT8, where the measured number is R@5 = 98.2% with the reranker on
+(R@1 = 91.6%, R@10 = 99.8%). Putting the GPU figure in the headline
+sold a configuration the user does not actually run.
+
+This patch puts the default install path on top:
+
+- BENCHMARKS.md now opens "Results" with a four-row "Headline number"
+  table — default CPU INT8 + reranker first, GPU FP16 as an ablation
+  row below.
+- BENCHMARKS.md adds a "How hard is the task" subsection in the
+  methodology: per-question distinct-session distribution on
+  LongMemEval-S is **min=38, p10=44, median=48, p90=52, max=62**, so
+  R@5 puts the system in the top ~10% and R@10 in the top ~20% of the
+  haystack. Neither cutoff is a mechanical ceiling.
+- The GPU section's reading note now reads "this is not the headline"
+  instead of "strongest single-config result".
+- CHANGELOG and the GitHub release title for v1.0.1 lead with
+  R@5 = 98.2% (CPU default); the +1.0pp GPU result is named as an
+  ablation in the next paragraph.
+
+Same data, honest framing.
+
 ## 1.0.0 — semver-stable, R@5 = 98.2% on LongMemEval-S (CPU default path)
 
 First semver-stable release. The bar from the roadmap was three things:
