@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.0.0 — semver-stable, R@5 = 99.2% on LongMemEval-S
+
+First semver-stable release. The bar from the roadmap was three things:
+
+1. The benchmark dropping a number on the wall every milestone — done
+   (LongMemEval-S baseline + v0.12.1 regression + v0.14.3 GPU headline).
+2. Procedural memory as the ров — done (Д6 dataset of 227 pairs from 20
+   public repos, R@5 = 96.5% in v0.14.3).
+3. `md import/export` with the "md wins" escape hatch and an asymmetric
+   "Qdrant now → md says" diff in the dry-run — done in v0.14.3 / this
+   release.
+
+The headline retrieval number this tag ships against:
+**R@5 = 99.2% on LongMemEval-S, multilingual-e5-base FP16 + reranker,
+RTX 3090, 25.6 minutes wall time.** See `BENCHMARKS.md` for the raw
+per-question JSON and the three other configurations that produced
+it.
+
+### Added
+
+- `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch. CPU = the INT8
+  quantized e5-base shipped before; GPU = the FP16 variant pinned at
+  `5d760477...8a3f54a`. Auto resolves to GPU when the build has the
+  `cuda` feature and `MGIMIND_USE_CUDA=1`, else CPU. Zero-config users
+  stay on CPU. `mgimind doctor --fix` now downloads the right variant
+  and writes a `.variant` marker so flipping the env causes the next
+  doctor to re-download instead of silently using the wrong file.
+- `scripts/local-bench-gpu.sh` — one-shot GPU reproduction script.
+  Downloads ORT 1.24.2 GPU runtime, builds with `--features cuda`,
+  fetches `longmemeval_s.json`, runs `doctor --fix` with the GPU
+  variant and the full bench. The recipe behind the v0.14.3 headline,
+  now repeatable on a fresh box.
+- `md_reconcile::render_plan` (promoted from `print_plan`) returns the
+  rendered plan as a string so it's reusable in CLI and MCP responses.
+  CLI `mgimind import md` now leads with this output, so the dry-run
+  shows "Qdrant now (#1): ..." → "will become (md): ..." before the
+  user flips `--apply`. The asymmetric direction is the v1.0
+  semver-stable contract for md reconcile.
+
+### Changed
+
+- BENCHMARKS.md "Reproduce" section points at `local-bench-gpu.sh`.
+- BENCHMARKS.md now carries the v0.12.1 CPU regression run (both
+  rerank=off pod2 and rerank=on pod1 — the second pod's raw.json
+  turned out to have survived the takedown despite the pod loss),
+  the v0.14.3 GPU headline (three runs), and the MiniLM-FP16-on-GPU
+  ablation that isolates "+1.0pp R@5 is from e5-base, not from GPU".
+- `mgimind doctor` reports the active model variant.
+
+### Removed / not changed (worth saying)
+
+- No breaking changes to the public MCP tool surface from 0.14.x.
+- v0.14.1 counterfactual A/B `mgimind bench-policy` is kept. The
+  honest reading (also in BENCHMARKS.md) is that LongMemEval-S
+  contains no chit-chat / P0 questions, so the metric measures an
+  upper bound for the trigger policy on this corpus; it is not a
+  bug, the dataset just doesn't separate the cases. A future dataset
+  with explicit P0 questions would split the gap.
+
 ## 0.14.3 — procedural-dataset hits the v0.10.0 ров target (227 pairs, 20 repos)
 
 Final procedural-memory dataset for the v0.10.0 roadmap milestone:
