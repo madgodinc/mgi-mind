@@ -230,13 +230,13 @@ Run C — `rerank=true` again (variance):
   - [`v0143-e5fp16-rerank-off.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-off.json) (sha256 `73a1e49194966bdb0859fca3056651db0248027cca2275a57aa097fbde6d0b58`)
   - [`v0143-e5fp16-rerank-on.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-on.json) (sha256 `ec19f3a0414f5409ca8a059125cd014820fcb0a03a62c651092a5122900133a2`)
   - [`v0143-e5fp16-rerank-on-variance.json`](benchmark/results/2026-06-03-gpu-v0143/v0143-e5fp16-rerank-on-variance.json) (sha256 `7062923251fd70041e48aa9dd70be934eda3b530376a17a524f5bf592db736ec`)
-- **Reproducibility note on the FP16 model:** `mgimind doctor --fix` currently
-  downloads the INT8 quantized e5-base (~278 MB, sha256 pinned in
-  `integrity.rs`). To reproduce the GPU runs above, fetch
-  `Xenova/multilingual-e5-base/onnx/model_fp16.onnx` (530 MB, sha256
-  `5d76...f54a`) and place it as `$MGIMIND_HOME/models/multilingual-e5-base/model.onnx`.
-  A user-facing `MGIMIND_MODEL_VARIANT` switch and a CPU+GPU model registry
-  in `integrity.rs` is on the roadmap; for now this is a manual swap.
+- **Reproducibility note on the FP16 model:** the GPU runs above use the
+  FP16 e5-base variant (`onnx/model_fp16.onnx`, 530 MB, sha256
+  `5d760477f691b665da2b94e1528eb6938b795f76064d9392e6af7118b8a3f54a`),
+  pinned in `integrity.rs` as `MODEL_E5_BASE_ONNX_FP16`. Select it with
+  `MGIMIND_MODEL_VARIANT=gpu mgimind doctor --fix` (or just `auto` with
+  `MGIMIND_USE_CUDA=1`). The `cpu` variant continues to download the
+  INT8 model (~278 MB) as the default for zero-config users.
 
 **Reading:**
 
@@ -299,10 +299,6 @@ CPU at every cutoff. Two takeaways:
   for the same `MatMulInteger` reason as the embedder did. Shipping an
   FP16 reranker through `doctor --fix` is on the roadmap; until then
   the `rerank=on` wall-time numbers above are mostly CPU-bound.
-- **`mgimind doctor --fix` model registry:** users currently have to
-  swap the FP16 model file by hand to reproduce the headline. A
-  `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch with a CPU INT8 + GPU
-  FP16 registry in `integrity.rs` is the next release item.
 
 ## Counterfactual A/B — retrieval policy on / off
 

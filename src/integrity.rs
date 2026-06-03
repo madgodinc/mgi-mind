@@ -30,11 +30,26 @@ pub const MODEL_MINILM_TOKENIZER: &str =
     "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037";
 
 /// Default embedding model (Xenova/multilingual-e5-base) quantized ONNX weights.
+/// CPU variant (INT8). Falls back to CPU on the ORT CUDA EP — `MatMulInteger`
+/// is not implemented on CUDA, so this is the wrong variant for GPU runs.
 pub const MODEL_E5_BASE_ONNX: &str =
     "df7a9a29309e3ad491e1783adf8baee710262cc06079c7cbab63c630277fac94";
-/// Default embedding model tokenizer.json.
+/// FP16 variant of the same model. Use this on GPU (`MGIMIND_MODEL_VARIANT=gpu`);
+/// the whole graph stays on the device instead of falling back to CPU.
+/// Pinned 2026-06-04 from `Xenova/multilingual-e5-base/onnx/model_fp16.onnx`
+/// (the file used in the v0.14.3 GPU R@5 = 99.2% headline run).
+pub const MODEL_E5_BASE_ONNX_FP16: &str =
+    "5d760477f691b665da2b94e1528eb6938b795f76064d9392e6af7118b8a3f54a";
+/// Default embedding model tokenizer.json. Shared between CPU/GPU variants.
 pub const MODEL_E5_BASE_TOKENIZER: &str =
     "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626";
+/// MiniLM-L6-v2 FP16 variant. Optional GPU companion to `MODEL_MINILM_ONNX`
+/// (which is fp32 — kept as the baseline file shipped from sentence-transformers).
+/// Empty until we pin the FP16 mirror; today `--variant=gpu` for MiniLM falls
+/// back to fp32 with the standard download path. Kept as a reserved slot so
+/// the eventual pin lands as a one-line change.
+#[allow(dead_code)]
+pub const MODEL_MINILM_ONNX_FP16: &str = "";
 /// Default reranker (Xenova/bge-reranker-base) quantized ONNX weights.
 pub const RERANK_BGE_BASE_ONNX: &str =
     "dd98f3e67837d23210a6b7550c08cced4f61845b940ac45be3565840a10f3244";

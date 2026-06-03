@@ -951,10 +951,11 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
     // Check embedding model
     if config::is_initialized() {
         let cfg = crate::config::load_cached()?;
+        let variant = crate::embedder::ModelVariant::from_env();
         if crate::embedder::is_model_downloaded(&cfg) {
-            let _ = writeln!(out, "[OK]   Embedding model");
+            let _ = writeln!(out, "[OK]   Embedding model ({variant:?})");
         } else {
-            let _ = writeln!(out, "[FAIL] Embedding model not downloaded");
+            let _ = writeln!(out, "[FAIL] Embedding model not downloaded (variant={variant:?})");
             if fix {
                 let _ = writeln!(out, "       Downloading model...");
                 match crate::embedder::download_model(&cfg).await {
