@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.3 — docs: ROADMAP.md (v1.1 → v2.0 committed, v3.0 candidate set)
+
+Docs-only patch. The internal roadmap that drove v0.9 → v1.0 was not in
+the repo — readers landing on the project had no way to see what was
+committed for upcoming releases, what was deliberately out of scope,
+and what was still being decided.
+
+- New `ROADMAP.md` at the repo root with five committed minors
+  (v1.1 backup, v1.2 REST + portable format + chunking, v1.3
+  bi-temporal facts + supersession, v1.4 decay, v2.0 public-launch
+  gate) and a "v3.0 horizon" section listing five candidate directions
+  (local-LLM write gate, judge-eval QA mode, cross-agent, schema
+  packs, self-wiring graph) that are **deliberately not promised** —
+  whichever crosses both a critic-checked spec and a real user pull
+  ships as v3.0; the others stay on the list or fall off.
+- Carries over the anti-roadmap unchanged (no Obsidian plugin, no
+  markdown-as-source, no 50+ MCP tools, no cloud-hosted mode where
+  mgi-mind sees user data, no marketing pumps).
+- README in all three locales now links to `ROADMAP.md` next to
+  `CHANGELOG.md`.
+
+No code, no MCP-surface, no on-disk format changes.
+
 ## 1.0.2 — docs: bring README "Current version" line in sync with the tag
 
 Docs-only patch. README.md / README.ru.md / README.zh.md still said
