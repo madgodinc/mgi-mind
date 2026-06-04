@@ -642,17 +642,17 @@ pub fn is_llama_server_installed() -> bool {
 }
 
 fn random_api_key() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-    let mut h = DefaultHasher::new();
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut h);
-    std::process::id().hash(&mut h);
-    format!("mgimind-extractor-{:x}", h.finish())
+    // Post-critic: swap SipHash (time+pid, predictable to a local
+    // attacker reading /proc/<pid>/stat) for a 128-bit cryptographically
+    // random key via the `rand` crate already pulled in for the vault
+    // module. Same call site, no new dependency.
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    format!(
+        "mgimind-extractor-{}",
+        buf.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    )
 }
 
 fn pick_port() -> u16 {
@@ -884,6 +884,30 @@ pub fn enqueue_auto_extract(config: &crate::config::MindConfig, content: &str) {
 
 // ===== Extraction =====
 
+/// Per-process cached HTTP client keyed by timeout. The common default
+/// (ExtractConfig::default().timeout = 60s) hits the cache on every
+/// call; alternate timeouts fall back to building a new client. Post-
+/// critic fix for the "Client built per /completion call leaking pool"
+/// finding.
+static HTTP_CLIENT_60S: OnceCell<reqwest::Client> = OnceCell::new();
+
+fn http_client_for(timeout: Duration) -> anyhow::Result<reqwest::Client> {
+    if timeout == Duration::from_secs(60) {
+        return Ok(HTTP_CLIENT_60S
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .expect("build 60s client")
+            })
+            .clone());
+    }
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build reqwest client")
+}
+
 #[derive(Debug, Serialize)]
 struct CompletionRequest<'a> {
     prompt: &'a str,
@@ -945,10 +969,12 @@ async fn call_completion(
         n_predict: config.max_tokens,
         stream: false,
     };
-    let client = reqwest::Client::builder()
-        .timeout(config.timeout)
-        .build()
-        .context("build reqwest client")?;
+    // Post-critic: cache the reqwest::Client across calls. Building a
+    // new client per /completion was leaking the underlying connection
+    // pool on every call. The cached client is keyed by timeout
+    // duration; the common case (default ExtractConfig.timeout = 60s)
+    // hits the cache on every call.
+    let client = http_client_for(config.timeout)?;
     let resp = client
         .post(&url)
         .bearer_auth(api_key)
