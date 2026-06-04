@@ -1,5 +1,208 @@
 # Changelog
 
+## 1.5.0 — install-mode profiles + typed external signals + active re-test pass
+
+The v1.4 → v1.5 work closes the §6 and §10 q5 / q6 questions from
+the validity-model synthesis. The duel rule (v1.4 Phase 2), doubt
+window (v1.4 Phase 3 scaffold), and STALE bench adapter (v1.4
+Phase 4 scaffold) are still calibration TBD — see "Honest limits"
+below.
+
+### v1.5 Phase 6 — install-mode profile + per-mode confidence_score
+
+Three install profiles select different anchors for the
+`confidence_score` formula (synthesis §6). Each mode's weights sum
+to 1.0 by construction:
+
+| mode | dependants | confirmations | external |
+|---|---|---|---|
+| `chat-only` (default) | 0.7 | 0.1 | 0.2 |
+| `dev-with-ci` | 0.5 | 0.15 | 0.35 |
+| `multi-tenant` | 0.4 | 0.4 | 0.2 |
+
+New CLI:
+
+- `mgimind config install-mode` — print current profile + auto-detect
+  recommendation + breakdown of inputs (`external_signals_7d`,
+  `distinct_agents_30d`).
+- `mgimind config set-install-mode <mode>` — set the profile.
+  Restart `mgimind serve` for long-lived MCP sessions to pick up.
+
+Auto-detect heuristic (`install_detect::collect`):
+`distinct_session_agents ≥ 3` → MultiTenant; otherwise
+`external_signal_count_last_7d ≥ 10` → DevWithCi; otherwise
+ChatOnly. The recommendation is informational only — `doctor`
+never auto-applies (§10 q6 mis-classification cost = silent
+quality drift).
+
+`mgimind doctor` surfaces the install-mode line:
+```
+[OK]   install-mode: chat-only (matches auto-detect)
+```
+…or, on mismatch, prints the exact `set-install-mode` line to run.
+
+### v1.5 Phase 7 — `mind_outcome` MCP tool + error-rate guardrail
+
+Generalises the procedure-only `mind_procedure_outcome` into a
+typed external-signal API working on any memory:
+
+```
+signal_type: test_passed | code_compiled | user_confirmed | cited_by
+weights:    1.0  | 0.3 | 0.7 | 0.2     (§7 anchors)
+```
+
+Per-signal options:
+- `success=false` multiplies weight by `-0.5` — failures pull the
+  score negative, not just absence of evidence.
+- `cited_by` carries a self-citation guard: only counts when the
+  citing memory has confidence ≥ 0.5.
+- Idempotent on `(memory_id, signal_type, source)`. Re-posting the
+  same CI outcome overwrites rather than inflates the log.
+
+The typed score plugs into `duel.weight_new_for_mode` via the new
+`NewFactInputs.external_signal_score: Option<f32>`. When `Some(_)`,
+it bypasses the v1.4 log2 shape and uses the signed score directly
+multiplied by the install-mode external slot weight. `None` falls
+back to v1.4 behaviour — matters because Phase 1 migration writes
+the legacy `external_signals: u32`, but the typed log stays empty
+until users post `mind_outcome` calls.
+
+Error-rate guardrail: if a fact accumulates ≥ 3 failed
+`test_passed` signals within 7 days, it gets flagged for the
+doubt window (`doubt::DOUBT_WINDOW_FLAGGED`). Only `test_passed`
+counts here — `user_confirmed` / `code_compiled` failures are
+noisier and don't trip the guardrail.
+
+`tools/list` now returns 37 tools (was 36).
+
+### v1.5 Phase 8 — active re-test pass with three §10 q5 guarantees
+
+Turns the v1.4 Phase 3 background loop scaffold (which had
+`n_processed_this_tick = 0`) into a real re-test pass. Three hard
+guarantees enforced:
+
+- **(a) never concurrent with MCP tool call** — `is_mcp_busy()`
+  checked at the OUTER wake AND between facts inside the walk. A
+  tool call starting mid-tick breaks the loop early, logs partial
+  progress, re-flags unprocessed candidates for the next tick.
+- **(b) hard per-tick cap** —
+  `select_retest_candidates(_, BACKGROUND_PER_TICK_CAP)` returns ≤
+  50, with a hard-fail assert at the end of the walk. A future
+  refactor breaking the cap panics the background task (auto-restart
+  by outer scheduling) rather than silently starving MCP.
+- **(c) load-aware cadence** — new `loadavg_multiplier()` reads
+  `/proc/loadavg` (Linux), compares 1 m load to
+  `1.5 × available_parallelism`, returns `2.0` to back off when
+  overloaded. Non-Linux returns `1.0` (no back-off, loop still
+  runs).
+
+New module `confidence` with pure formulas:
+- `confidence_score(inputs, mode) -> f32` — §6 weighted blend.
+- `decide_retest_transition(old, new, in_doubt) -> RetestTransition`
+  — §8 step 8.2 rules. `PromoteToDoubt` requires BOTH a downward
+  shift > 0.2 AND new < 0.3 (two independent reasons must agree).
+  `RecoverFromDoubt` requires already-in-doubt AND upward shift > 0.2.
+  **Mechanism 1 invariant: NEVER returns a delete verdict.**
+
+`retest_fact_step82` ties it together. Every transition writes an
+audit entry (`audit::AuditOp::RetestPromote` / `::RetestRecover`)
+with old + new `confidence_score`. `NoChange` ticks aren't logged
+(would balloon the file).
+
+Audit found that `record_edit()` had ZERO production callers, so
+the cadence was drifting to its 24 h max no matter how busy the
+graph was. Wired into:
+- `knowledge::add_fact`
+- `knowledge::set_fact_payload_field` (choke point for migrations
+  + dampening)
+- `storage::set_memory_payload_field` (choke point for outcome
+  writes)
+
+### Honest limits
+
+- **STALE bench calibration is not in v1.5.** The synthesis §11
+  named `R@k regression < 1.0 pp` as the gate; running it against
+  Mad's base requires ~$30-50 of GPU time, and that prep didn't
+  fit before this release. v1.6 will carry the calibration prereq
+  numbers.
+- **Phase 6 anchors and Phase 7 type weights are illustrative.**
+  The plan calls them out as starting points
+  (`TODO(phase-4-calibration)`). A real sweep against the bench
+  will move them.
+- **cited_by self-citation guard is stub-closured.**
+  `retest_fact_step82` passes `|_| None` for the citing-confidence
+  lookup, so the guard always blocks. Wiring it to a real read
+  of `confidence_score` payload is v1.6 step 2.
+- **`spawn_background_retest_loop` has no end-to-end integration
+  test.** Unit tests cover the pure helpers (12 in `confidence`,
+  several in `doubt`); spawning the actual tokio loop with a fake
+  Qdrant and asserting on tick behaviour is v1.6 step 3.
+- **Mac/Windows binaries are not in v1.5.** Audit flagged this as
+  "solution looking for a problem" — no GitHub issues from those
+  platforms yet. Linux + Docker only for now; contributor PRs
+  welcome.
+
+### Tests
+
+- 286 unit + 6 integration tests, 0 failed.
+- 33 new tests for v1.5 (12 confidence, 9 outcome, 6 guardrail,
+  10 install-mode, 4 typed-score in duel).
+
+### Migration notes
+
+- **Existing configs deserialise unchanged.** Pre-v1.5 `config.json`
+  without an `install_mode` field defaults to `ChatOnly`, which
+  preserves the v1.4 hardcoded weights bit-for-bit (`weight_new`
+  is now `weight_new_for_mode(_, ChatOnly)` and the 256-input
+  contract test pins this).
+- New payload slot on memories: `external_signals_v15` (JSON
+  `Vec<ExternalSignal>`). Distinct from v1.4
+  `external_signals: u32` to preserve legacy counts. v1.6 will
+  migrate.
+- Background loop starts automatically when `mgimind serve` runs
+  against an initialised config.
+
+## 1.4.0 — validity model: schema, migration, duel rule, doubt window, auto-extractor
+
+Closes phases 0-5 of the validity-model synthesis. Lands as a
+sequence of feature branches merged in dependency order
+(1 → 2 → 3 → 5 → 4) so each phase has a green CI snapshot on
+main.
+
+- **Phase 0 — schema primitives.** `Cardinality` (Single /
+  TemporalSingle / Multi) + `EntryStatus` (Active / Contested /
+  Stale / PropagationShadowed / Unknown / QuarantineCandidate) +
+  cached `dependants_count`, `confirmations_count`,
+  `confidence_score` payload fields.
+- **Phase 1 — migration + measurement.** `mgimind migrate-v14
+  dependants|cardinality|confirmations` walks the existing base
+  and computes the cached fields. Read-only by default; `--apply`
+  writes back. Parallelised via `buffer_unordered(8)`.
+- **Phase 2 — duel rule.** `entrenchment(F_old)` vs
+  `weight_new(F_new)`, resolution thresholds `DUEL_FLIP_RATIO=1.5`,
+  `DUEL_CONTESTED_RATIO=0.5`. Per-(subject, predicate) lock map
+  prevents race conditions. Quarantine path reuses the v0.11
+  promote-on-repeat API.
+- **Phase 3 — doubt window (scaffold).** State machine
+  `apply_retrieval_event`, retrieval-triggered counter,
+  inheritance flag registry. Background loop wired but with
+  `n_processed_this_tick = 0` placeholder — closed in v1.5
+  Phase 8.
+- **Phase 4 — STALE benchmark adapter (scaffold).**
+  `bench_stale.rs` with `CalibrationOverrides` struct sweeps every
+  duel/doubt constant via env vars. Bench against real data is
+  v1.6 prereq.
+- **Phase 5 — auto-extractor (opt-in feature flag).** Qwen 2.5
+  GGUF via subprocess `llama-server` + Vulkan backend.
+  Triple-backtick prompt-injection fence + sanitisation.
+  `PR_SET_PDEATHSIG` against orphans. Cached `reqwest::Client`.
+  Install sentinel `.installed-b9496` against partial installs.
+  Gated behind `--features extractor` (NOT on by default — would
+  let an auto-installed extractor write through model semantics
+  users don't know about yet).
+
+Tools/list = 36 (was 35). New: `mind_predicate`.
+
 ## 1.1.0 — tool surface consolidation (alias phase)
 
 Same shape competitors converged on: one tool per object, an `action`
