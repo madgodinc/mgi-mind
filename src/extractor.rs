@@ -999,25 +999,52 @@ pub async fn extract_facts(
     let _permit = sem.acquire().await?;
 
     let (port, api_key) = ensure_server(config.variant).await?;
+
+    // Inject the live HTTP completion as the "call" closure; the unit
+    // tests inject a stub that returns canned responses to exercise
+    // the retry-with-repair loop without spinning up llama-server.
+    run_extract_pipeline(text, |prompt: String| {
+        let api_key = api_key.clone();
+        let cfg = config.clone();
+        async move { call_completion(port, &api_key, &prompt, &cfg).await }
+    })
+    .await
+}
+
+/// Pure retry-with-repair loop, parameterised on the completion call.
+/// Lifted out of `extract_facts` so unit tests can inject a stub
+/// completion and verify the (good, bad+good, bad+bad) branches
+/// without spinning up the subprocess.
+pub async fn run_extract_pipeline<F, Fut>(
+    text: &str,
+    mut call: F,
+) -> anyhow::Result<Vec<Triple>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
     let prompt = build_prompt(text);
 
-    let first = call_completion(port, &api_key, &prompt, config).await;
-    if let Ok(raw) = first {
-        if let Some(triples) = parse_response(&raw) {
-            return Ok(triples);
-        }
-        // Retry with stricter wording — happens ~5-15% of the time
-        // per critic R2 on small models.
-        let strict_prompt = format!(
-            "{prompt}\n\nIMPORTANT: respond with a valid JSON array only. \
-             No prose, no markdown, no explanation. Just the array."
-        );
-        let second = call_completion(port, &api_key, &strict_prompt, config).await?;
-        return parse_response(&second).ok_or_else(|| {
-            anyhow::anyhow!("extractor returned non-JSON twice; dropping chunk")
-        });
+    let first = call(prompt.clone()).await;
+    let raw = match first {
+        Ok(r) => r,
+        // Server error — propagate rather than silently drop. Caller
+        // is responsible for logging/dropping the chunk.
+        Err(e) => return Err(e),
+    };
+    if let Some(triples) = parse_response(&raw) {
+        return Ok(triples);
     }
-    first.map(|_| Vec::new())
+    // Retry with stricter wording — happens ~5-15% of the time
+    // per critic R2 on small models.
+    let strict_prompt = format!(
+        "{prompt}\n\nIMPORTANT: respond with a valid JSON array only. \
+         No prose, no markdown, no explanation. Just the array."
+    );
+    let second = call(strict_prompt).await?;
+    parse_response(&second).ok_or_else(|| {
+        anyhow::anyhow!("extractor returned non-JSON twice; dropping chunk")
+    })
 }
 
 async fn call_completion(
@@ -1323,5 +1350,116 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: Triple = serde_json::from_str(&json).unwrap();
         assert_eq!(t, back);
+    }
+
+    // ===== Retry-with-repair pipeline tests =====
+    //
+    // Post-critic: tests the retry loop without spinning up the
+    // llama-server subprocess by injecting a stub completion function.
+
+    #[tokio::test]
+    async fn retry_pipeline_first_call_good_returns_triples() {
+        // Most-common happy path: first completion returns clean JSON,
+        // pipeline returns the triples without calling again.
+        let mut call_count = 0;
+        let result = run_extract_pipeline("test text", |_prompt| {
+            call_count += 1;
+            async move {
+                Ok::<_, anyhow::Error>(
+                    r#"[{"subject":"A","predicate":"uses","object":"B"}]"#.to_string(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].subject, "A");
+        assert_eq!(call_count, 1, "good first response must not trigger retry");
+    }
+
+    #[tokio::test]
+    async fn retry_pipeline_first_bad_second_good_returns_triples() {
+        // Retry path: first completion is non-JSON, second is clean.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let calls2 = calls.clone();
+        let result = run_extract_pipeline("test text", move |_prompt| {
+            let n = {
+                let mut g = calls2.lock().unwrap();
+                *g += 1;
+                *g
+            };
+            async move {
+                if n == 1 {
+                    Ok::<_, anyhow::Error>(
+                        "Sorry, I cannot extract anything from this.".to_string(),
+                    )
+                } else {
+                    Ok::<_, anyhow::Error>(
+                        r#"[{"subject":"X","predicate":"is","object":"Y"}]"#.to_string(),
+                    )
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].object, "Y");
+        let n = *calls.lock().unwrap();
+        assert_eq!(n, 2, "bad first must trigger one retry");
+    }
+
+    #[tokio::test]
+    async fn retry_pipeline_both_bad_returns_error() {
+        // Both calls return non-JSON garbage. Pipeline returns Err so
+        // the caller can log + drop the chunk. Better silent miss than
+        // poisoned graph.
+        let result = run_extract_pipeline("test text", |_prompt| async move {
+            Ok::<_, anyhow::Error>("no JSON here".to_string())
+        })
+        .await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("non-JSON twice"));
+    }
+
+    #[tokio::test]
+    async fn retry_pipeline_propagates_first_call_error() {
+        // If the HTTP call itself fails (timeout, refused), the
+        // pipeline propagates the error. Retry only handles bad
+        // parse output, not server failures.
+        let result = run_extract_pipeline("test text", |_prompt| async move {
+            Err::<String, _>(anyhow::anyhow!("connection refused"))
+        })
+        .await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("connection refused"),
+            "expected server error to propagate: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_pipeline_second_call_error_propagates() {
+        // First call parses as garbage; second call errors. The error
+        // from the second call propagates out.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let calls2 = calls.clone();
+        let result = run_extract_pipeline("test text", move |_prompt| {
+            let n = {
+                let mut g = calls2.lock().unwrap();
+                *g += 1;
+                *g
+            };
+            async move {
+                if n == 1 {
+                    Ok::<String, anyhow::Error>("garbage".to_string())
+                } else {
+                    Err::<String, _>(anyhow::anyhow!("server crashed mid-retry"))
+                }
+            }
+        })
+        .await;
+        assert!(result.is_err());
     }
 }
