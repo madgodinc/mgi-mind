@@ -195,6 +195,25 @@ pub enum Commands {
         what: ConfigCmd,
     },
 
+    /// v1.5 Phase 7: record a typed external-signal outcome on any
+    /// memory. Closes the CLI gap — `mind_outcome` was MCP-only
+    /// before. Useful for debugging guardrail / confidence_score
+    /// behaviour from a terminal.
+    Outcome {
+        /// Target memory id.
+        memory_id: String,
+        /// Signal type: test_passed | code_compiled | user_confirmed | cited_by.
+        signal_type: String,
+        /// Whether the signal was positive (default true) or negative.
+        #[arg(long, default_value_t = true, value_name = "BOOL")]
+        success: bool,
+        /// Stable source identifier used for idempotency (default
+        /// `cli` so the dedup key is well-defined; pass a meaningful
+        /// value like `ci.github.com/run/N` or `user-mad` in real use).
+        #[arg(long, default_value = "cli")]
+        source: String,
+    },
+
     /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
     /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
     Bench {
@@ -412,10 +431,20 @@ pub enum ExtractorCmd {
 
 #[derive(Subcommand)]
 pub enum AuditAction {
-    /// Show the N most recent audit events (default 20).
+    /// Show the N most recent audit events (default 20). Optional
+    /// filters trim the list before display.
     List {
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Only events whose `op` matches the given variant
+        /// (snake_case). Examples: `retest_promote`,
+        /// `retest_recover`, `fact_add`. See AuditOp in source.
+        #[arg(long, value_name = "OP")]
+        op: Option<String>,
+        /// Only events newer than this many hours ago. 24 = last
+        /// day, 168 = last week. Omit for "all time".
+        #[arg(long, value_name = "HOURS")]
+        since_hours: Option<i64>,
     },
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
@@ -584,6 +613,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
         Commands::Config { what } => cmd_config(what).await,
+        Commands::Outcome {
+            memory_id,
+            signal_type,
+            success,
+            source,
+        } => cmd_outcome(&memory_id, &signal_type, success, &source).await,
         Commands::MigrateV14 { what } => match what {
             MigrateV14Cmd::Dependants { threshold, apply } => {
                 cmd_migrate_v14_dependants(threshold, apply).await
@@ -624,7 +659,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Commands::Audit { action } => match action {
-            AuditAction::List { limit } => cmd_audit_list(limit).await,
+            AuditAction::List {
+                limit,
+                op,
+                since_hours,
+            } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
         },
         Commands::Viewer { no_open } => {
@@ -745,10 +784,43 @@ async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Re
     Ok(())
 }
 
-async fn cmd_audit_list(limit: usize) -> Result<()> {
-    let events = crate::audit::recent(limit)?;
+async fn cmd_audit_list(
+    limit: usize,
+    op_filter: Option<&str>,
+    since_hours: Option<i64>,
+) -> Result<()> {
+    // When filters are present we have to load all, filter, then
+    // truncate — `recent(limit)` would skip relevant events outside
+    // the first N. For "no filters" path we keep the fast `recent`
+    // call so a typical `mgimind audit list` stays cheap.
+    let events = if op_filter.is_some() || since_hours.is_some() {
+        let cutoff = since_hours.map(|h| chrono::Utc::now() - chrono::Duration::hours(h));
+        let all = crate::audit::load_all()?;
+        let filtered: Vec<crate::audit::AuditEvent> = all
+            .into_iter()
+            .filter(|ev| match op_filter {
+                None => true,
+                Some(want) => serde_json::to_string(&ev.op)
+                    .map(|s| s.trim_matches('"') == want)
+                    .unwrap_or(false),
+            })
+            .filter(|ev| match cutoff {
+                None => true,
+                Some(c) => chrono::DateTime::parse_from_rfc3339(&ev.ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                    .unwrap_or(false),
+            })
+            .collect();
+        // Take the most recent `limit` from the tail (load_all is
+        // append-order so the tail is newest).
+        let take_from = filtered.len().saturating_sub(limit);
+        filtered[take_from..].to_vec()
+    } else {
+        crate::audit::recent(limit)?
+    };
+
     if events.is_empty() {
-        println!("No audit events yet.");
+        println!("No audit events matching filters.");
         return Ok(());
     }
     for ev in &events {
@@ -1298,17 +1370,24 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         // mis-classification cost is silent quality drift).
         let detect_inputs = crate::install_detect::collect(&cfg).await;
         let recommendation = crate::install_mode::recommend(detect_inputs);
+        let weights = cfg.install_mode.weights();
         if recommendation == cfg.install_mode {
             let _ = writeln!(
                 out,
-                "[OK]   install-mode: {} (matches auto-detect)",
-                cfg.install_mode.as_str()
+                "[OK]   install-mode: {} [d={:.2} c={:.2} e={:.2}] (matches auto-detect)",
+                cfg.install_mode.as_str(),
+                weights.dependants,
+                weights.confirmations,
+                weights.external,
             );
         } else {
             let _ = writeln!(
                 out,
-                "[INFO] install-mode: {} (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
+                "[INFO] install-mode: {} [d={:.2} c={:.2} e={:.2}] (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
                 cfg.install_mode.as_str(),
+                weights.dependants,
+                weights.confirmations,
+                weights.external,
                 recommendation.as_str(),
                 recommendation.as_str()
             );
@@ -1805,6 +1884,38 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     }
     let _ = writeln!(out, "Total memories: {total_memories}");
     let _ = writeln!(out, "KG facts:       {facts_count}");
+
+    // v1.6.1: distribution of dependants_count + confidence_score
+    // across facts. Reads the same payload fields v1.5 retest_fact_step82
+    // consumes. O(facts) scan — fine at 12k, may need bounding past 100k.
+    if facts_count > 0 {
+        match crate::knowledge::list_top_dependants_facts(config, facts_count as usize).await {
+            Ok(pairs) if !pairs.is_empty() => {
+                let dep_counts: Vec<u32> = pairs.iter().map(|(_, c)| *c).collect();
+                let stats = percentiles_u32(&dep_counts);
+                let _ = writeln!(
+                    out,
+                    "  dependants:   min={} p50={} p90={} p99={} max={} mean={:.2}",
+                    stats.min, stats.p50, stats.p90, stats.p99, stats.max, stats.mean
+                );
+                let with_deps = dep_counts.iter().filter(|&&n| n > 0).count();
+                let _ = writeln!(
+                    out,
+                    "                {with_deps}/{} facts have ≥1 dependant ({:.1}%)",
+                    pairs.len(),
+                    100.0 * with_deps as f64 / pairs.len() as f64,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // v1.5 Phase 8 in-process registry counts.
+    let inherited = crate::doubt::inherited_count();
+    let flagged = crate::doubt::doubt_window_flag_count();
+    let _ = writeln!(out, "  in-doubt:     {flagged} flagged for retest");
+    let _ = writeln!(out, "  inherited:    {inherited} (cleared on session end)");
+
     let _ = writeln!(out, "Sessions:       {session_count}");
     // v0.13: surface zombie-session count alongside other stats. The number
     // is the same one `mind_doctor` shows in detail.
@@ -1815,6 +1926,37 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     }
     let _ = write!(out, "Vault:          {vault_summary}");
     Ok(out)
+}
+
+struct DistU32 {
+    min: u32,
+    p50: u32,
+    p90: u32,
+    p99: u32,
+    max: u32,
+    mean: f64,
+}
+
+fn percentiles_u32(values: &[u32]) -> DistU32 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let mean = sorted.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+    let p = |q: f64| -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let idx = ((q * (n as f64 - 1.0)).round() as usize).min(n - 1);
+        sorted[idx]
+    };
+    DistU32 {
+        min: sorted[0],
+        p50: p(0.5),
+        p90: p(0.9),
+        p99: p(0.99),
+        max: sorted[n - 1],
+        mean,
+    }
 }
 
 async fn cmd_stats() -> Result<()> {
@@ -2143,7 +2285,14 @@ async fn cmd_config_install_mode_show() -> Result<()> {
     let config = crate::config::MindConfig::load().with_context(|| {
         "config not initialised — run `mgimind init` first".to_string()
     })?;
-    println!("install-mode: {}", config.install_mode.as_str());
+    let weights = config.install_mode.weights();
+    println!(
+        "install-mode: {} [dependants={:.2} confirmations={:.2} external={:.2}]",
+        config.install_mode.as_str(),
+        weights.dependants,
+        weights.confirmations,
+        weights.external,
+    );
 
     let inputs = crate::install_detect::collect(&config).await;
     let recommendation = crate::install_mode::recommend(inputs);
@@ -2184,6 +2333,35 @@ async fn cmd_config_install_mode_set(mode_str: &str) -> Result<()> {
         old.as_str(),
         new_mode.as_str()
     );
+    Ok(())
+}
+
+// ===== v1.5 Phase 7 + v1.6.1: outcome command handler =====
+
+async fn cmd_outcome(
+    memory_id: &str,
+    signal_type_str: &str,
+    success: bool,
+    source: &str,
+) -> Result<()> {
+    let signal_type =
+        crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown signal_type '{signal_type_str}' — expected one of: \
+                 test_passed, code_compiled, user_confirmed, cited_by"
+            )
+        })?;
+    let cfg = crate::config::MindConfig::load().with_context(|| {
+        "config not initialised — run `mgimind init` first".to_string()
+    })?;
+    let signal = crate::outcome::ExternalSignal {
+        signal_type,
+        success,
+        source: source.to_string(),
+        ts: chrono::Utc::now().to_rfc3339(),
+    };
+    let summary = crate::outcome::record(&cfg, memory_id, signal).await?;
+    println!("{summary}");
     Ok(())
 }
 
