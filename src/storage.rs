@@ -1827,6 +1827,56 @@ pub async fn list_procedures_for_backfill(config: &MindConfig) -> Result<Vec<(St
     Ok(out)
 }
 
+/// v1.5 Phase 6 step 6.2: scroll every procedure and return its
+/// `last_used` timestamp (RFC3339), if present. The install-mode
+/// detector counts procedures with `last_used` inside a recent
+/// window as a proxy for external-signal frequency.
+///
+/// Returns an empty vec when the collection doesn't exist yet
+/// (fresh install). Procedures without `last_used` are skipped —
+/// they have never been re-used so they don't count toward the
+/// signal-frequency proxy.
+pub async fn list_procedure_last_used(config: &MindConfig) -> Result<Vec<String>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![Condition::matches("type", "procedure".to_string())],
+        ..Default::default()
+    };
+
+    let mut out = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            if let Some(ts) = extract_string(&point.payload, "last_used") {
+                if !ts.is_empty() {
+                    out.push(ts);
+                }
+            }
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
 /// Set a payload field on a memory by id. Phase 1.3 uses this to write
 /// `confirmations_count` back into procedure points (and possibly other
 /// memory types in a future revision). The shape mirrors
