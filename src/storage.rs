@@ -1783,6 +1783,78 @@ pub async fn recall_procedures(
         .collect())
 }
 
+/// Scroll all procedures (memories with `type=procedure`) for Phase 1.3
+/// backfill. Returns `(point_id, success_count)` pairs — Phase 1.3 uses
+/// the success_count as the derivable confirmation signal. Failures are
+/// not subtracted here (Phase 4 will calibrate whether net-positive vs
+/// raw-positive performs better as a confirmation count).
+pub async fn list_procedures_for_backfill(config: &MindConfig) -> Result<Vec<(String, i64)>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![Condition::matches("type", "procedure".to_string())],
+        ..Default::default()
+    };
+
+    let mut out = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let id = point.id.as_ref().map(format_point_id).unwrap_or_default();
+            let succ = extract_int(&point.payload, "success_count").unwrap_or(0);
+            out.push((id, succ));
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Set a payload field on a memory by id. Phase 1.3 uses this to write
+/// `confirmations_count` back into procedure points (and possibly other
+/// memory types in a future revision). The shape mirrors
+/// `knowledge::set_fact_payload_field` but lives over MEMORIES_COLLECTION.
+pub async fn set_memory_payload_field(
+    config: &MindConfig,
+    memory_id: &str,
+    field: &str,
+    value: String,
+) -> Result<()> {
+    use qdrant_client::qdrant::SetPayloadPointsBuilder;
+    let client = get_client(config).await?;
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert(field.into(), value.into());
+    let point_id: qdrant_client::qdrant::PointId = memory_id.to_string().into();
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
+                .points_selector(PointsIdsList {
+                    ids: vec![point_id],
+                })
+                .wait(true),
+        )
+        .await
+        .context("Failed to set memory payload field")?;
+    Ok(())
+}
+
 /// Record the outcome of reusing a procedure: bump success or fail count and
 /// stamp `last_used`. A failure (`worked = false`) raises fail_count so recall
 /// can demote a fix that stopped working - the store self-corrects instead of

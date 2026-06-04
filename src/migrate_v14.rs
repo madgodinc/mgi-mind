@@ -350,8 +350,62 @@ pub async fn run_confirmations(
     config: &MindConfig,
     apply: bool,
 ) -> Result<(usize, DistributionSummary)> {
-    let _ = (config, apply); // implementation lands in step 1.3
-    Ok((0, DistributionSummary::from_counts(&[])))
+    // Phase 1.3 backfill covers one derivable signal in this commit:
+    // procedure success_count. Procedures store success_count natively
+    // (`mind_procedure_outcome(worked=true)` bumps it), so we lift that
+    // count into a `confirmations_count` field on the same point — the
+    // Phase 2 ranking layer reads `confirmations_count` uniformly across
+    // memory types without caring whether the source was a procedure
+    // outcome or, in a future commit, multi-source provenance.
+    //
+    // Memories without a derivable signal stay at 0 and accumulate going
+    // forward. Forging confirmations from old data would contaminate the
+    // Phase 4 calibration baseline (synthesis §5: single-source decay
+    // matters precisely because we can't fake independence).
+    //
+    // Multi-source provenance backfill is deliberately not in this
+    // commit. Detecting it cleanly requires walking the provenance
+    // history per memory, which is a heavier operation and a separate
+    // signal class; if Phase 4 calibration shows confirmation weight
+    // matters more than the formula assumes, a follow-up commit on this
+    // branch adds it.
+
+    let procs = crate::storage::list_procedures_for_backfill(config).await?;
+    if procs.is_empty() {
+        eprintln!("  no procedures found — nothing to backfill (other memory types stay at 0).");
+        return Ok((0, DistributionSummary::from_counts(&[])));
+    }
+    eprintln!("  found {} procedures with success_count history.", procs.len());
+
+    // Only procedures with success_count > 0 actually carry confirmation
+    // signal. The rest stay at 0 (would be an honest no-op even if
+    // written).
+    let with_signal: Vec<(String, i64)> = procs
+        .into_iter()
+        .filter(|(_, succ)| *succ > 0)
+        .collect();
+
+    let counts: Vec<u32> = with_signal.iter().map(|(_, s)| *s as u32).collect();
+    let summary = DistributionSummary::from_counts(&counts);
+
+    if apply {
+        eprintln!(
+            "  writing confirmations_count to {} procedures...",
+            with_signal.len()
+        );
+        for (id, succ) in &with_signal {
+            crate::storage::set_memory_payload_field(
+                config,
+                id,
+                "confirmations_count",
+                succ.to_string(),
+            )
+            .await?;
+        }
+        eprintln!("  done.");
+    }
+
+    Ok((with_signal.len(), summary))
 }
 
 // Used in step 1.2 to render the cardinality proposal file. Kept here
