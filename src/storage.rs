@@ -25,6 +25,9 @@ use crate::embedder;
 /// `created_at` instead of scrolling everything.
 pub const MEMORIES_COLLECTION: &str = "memories";
 pub const FACTS_COLLECTION: &str = "_kg_facts";
+/// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
+/// Lazily created on first cardinality registration; absent predicate = Multi.
+pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -342,7 +345,7 @@ fn is_collection_exists_error<E: std::fmt::Display>(e: &E) -> bool {
 /// collections with no vector config - points are pure payload. Used for facts,
 /// which are looked up by exact/lexical payload match, never by vector.
 /// Idempotent: a concurrent "already exists" is treated as success.
-async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
+pub(crate) async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
     match client
         .create_collection(CreateCollectionBuilder::new(name))
         .await
