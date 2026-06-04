@@ -56,6 +56,14 @@ pub enum AuditOp {
     Ingest,
     /// Consolidation merged or pruned memories.
     Consolidate,
+    /// v1.5 Phase 8: background re-test pass promoted a fact to the
+    /// doubt window. `before` = old confidence_score, `after` = new.
+    /// `note` = "promote_to_doubt".
+    RetestPromote,
+    /// v1.5 Phase 8: background re-test pass recovered a fact from the
+    /// doubt window. `before` = old confidence_score, `after` = new.
+    /// `note` = "recover_from_doubt".
+    RetestRecover,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
