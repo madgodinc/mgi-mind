@@ -267,6 +267,157 @@ pub fn uninstall(variant: ExtractorVariant) -> Result<bool> {
     }
 }
 
+// ===== llama-server subprocess + HTTP client (step 5.3) =====
+//
+// Architecture choice (driven by critic round, see PR #8 description):
+//
+// - Use upstream llama.cpp prebuilt `llama-server` binary, downloaded as
+//   a Vulkan-enabled tarball into `$MGIMIND_HOME/bin/extractor/`. Same
+//   pattern as bundled Qdrant — pin sha256, fail-closed verify, no C++
+//   toolchain on user's machine, no CUDA driver requirement (Vulkan
+//   works across NVIDIA / AMD / Intel iGPU).
+//
+// - Spawn the server as a subprocess on first extraction call, keep it
+//   alive in the warm mgimind process (mind_extractor=long-running);
+//   shut it down at mgimind mcp exit. Localhost-only `127.0.0.1` HTTP,
+//   bearer token randomised per process start.
+//
+// - Each extraction is one /completion HTTP call with hard timeout
+//   (60s default). On timeout / non-JSON output / schema-mismatch, we
+//   retry once with a stricter prompt; on second failure, drop the
+//   memory and log — better silent miss than poisoned graph.
+//
+// - Tokio integration: extraction runs inside spawn_blocking with a
+//   semaphore capping concurrent calls to 1 (synthesis §10 q5
+//   guarantee a + critic R3). This prevents an ingest burst from
+//   starving the mind_search hot path.
+//
+// **Status: scaffold.** The actual subprocess management + HTTP call
+// land as a separate commit on this branch once the surface contract
+// here is reviewable.
+
+use std::time::Duration;
+
+/// Extracted subject-predicate-object triple from a chunk of text.
+/// Emitted by `extract_facts`; consumed by the auto-ingest pipeline
+/// that writes triples into the knowledge graph via `mind_fact_add`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Triple {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
+
+/// Configuration for an extraction call. The defaults are chosen to
+/// match the Phase 5 quality test: Vulkan inference of Qwen 2.5 3B
+/// Q4_K_M at temp 0.1, single-turn, 300 token cap.
+#[derive(Debug, Clone)]
+pub struct ExtractConfig {
+    pub variant: ExtractorVariant,
+    pub temperature: f32,
+    pub max_tokens: u32,
+    pub timeout: Duration,
+}
+
+impl Default for ExtractConfig {
+    fn default() -> Self {
+        Self {
+            variant: ExtractorVariant::Default,
+            temperature: 0.1,
+            max_tokens: 300,
+            timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+/// The prompt template the extractor uses. Chosen during the Phase 5
+/// quality test as the simplest prompt that gives clean JSON on both
+/// English and Russian input. Returns predicates in English snake_case
+/// regardless of input language so the knowledge graph stays
+/// canonical.
+///
+/// Quality observations from the test (commit Phase 5 scaffold):
+/// - Simple declarative sentences: ~80% clean triples
+/// - Sentences with dates / causality: ~20% structural errors
+///   (timestamps incorrectly placed as subject). v1.5 work targets
+///   this through few-shot examples in the prompt.
+pub fn build_prompt(text: &str) -> String {
+    format!(
+        "Extract subject-predicate-object triples from this text. \
+         Output ONLY a JSON array of objects with keys \"subject\", \
+         \"predicate\", \"object\". Use English predicates with \
+         underscores (e.g. \"lives_in\", \"is_a\", \"uses\"). \
+         No explanation, no markdown fences. Text: {text}"
+    )
+}
+
+/// Parse the model's response into a list of triples. Tolerant of the
+/// most common malformations seen during the quality test:
+/// - Markdown fences (```json ... ```) — stripped before parsing.
+/// - Array-of-arrays instead of array-of-objects — caller logs and
+///   triggers the retry-with-repair loop.
+/// - Predicates in Russian — passed through unmodified for now;
+///   normalisation lives in a separate post-process step.
+///
+/// Returns None on irrecoverable malformation; the caller is expected
+/// to retry with a stricter prompt on None.
+pub fn parse_response(raw: &str) -> Option<Vec<Triple>> {
+    // Strip markdown fences and trim.
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    // Find the JSON array body.
+    let start = cleaned.find('[')?;
+    let end = cleaned.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    let body = &cleaned[start..=end];
+
+    // Try as Vec<Triple> first.
+    if let Ok(triples) = serde_json::from_str::<Vec<Triple>>(body) {
+        return Some(triples);
+    }
+
+    // Fallback: array-of-arrays [["S","P","O"], ...].
+    if let Ok(arrays) = serde_json::from_str::<Vec<Vec<String>>>(body) {
+        let triples: Vec<Triple> = arrays
+            .into_iter()
+            .filter_map(|a| {
+                if a.len() == 3 {
+                    Some(Triple {
+                        subject: a[0].clone(),
+                        predicate: a[1].clone(),
+                        object: a[2].clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !triples.is_empty() {
+            return Some(triples);
+        }
+    }
+
+    None
+}
+
+/// Extract S-P-O triples from a chunk of text.
+///
+/// **Scaffold note.** The subprocess + HTTP wiring lands in a follow-up
+/// commit. For now this is the contract the auto-ingest pipeline
+/// codes against.
+pub async fn extract_facts(_config: &ExtractConfig, _text: &str) -> anyhow::Result<Vec<Triple>> {
+    anyhow::bail!(
+        "extractor::extract_facts not yet wired — subprocess + HTTP land in the next commit on the Phase 5 branch"
+    )
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
@@ -409,5 +560,101 @@ mod tests {
         assert!(s.contains("MB on disk"));
         assert!(s.contains("MB RAM"));
         assert!(s.contains("3B"));
+    }
+
+    // ===== Prompt + parser tests =====
+
+    #[test]
+    fn build_prompt_includes_text_and_schema() {
+        let p = build_prompt("Aurora is a dashboard.");
+        assert!(p.contains("Aurora is a dashboard."));
+        assert!(p.contains("subject"));
+        assert!(p.contains("predicate"));
+        assert!(p.contains("object"));
+        assert!(p.contains("JSON array"));
+    }
+
+    #[test]
+    fn parse_response_handles_clean_json_array_of_objects() {
+        let raw = r#"[
+            {"subject": "Mad", "predicate": "uses", "object": "Rust"},
+            {"subject": "Mad", "predicate": "lives_in", "object": "Almaty"}
+        ]"#;
+        let triples = parse_response(raw).unwrap();
+        assert_eq!(triples.len(), 2);
+        assert_eq!(triples[0].subject, "Mad");
+        assert_eq!(triples[0].predicate, "uses");
+        assert_eq!(triples[0].object, "Rust");
+    }
+
+    #[test]
+    fn parse_response_strips_markdown_fences() {
+        let raw = "```json\n[{\"subject\":\"a\",\"predicate\":\"b\",\"object\":\"c\"}]\n```";
+        let triples = parse_response(raw).unwrap();
+        assert_eq!(triples.len(), 1);
+    }
+
+    #[test]
+    fn parse_response_handles_array_of_arrays_fallback() {
+        // Observed during quality test on Russian input — model
+        // returned [["S","P","O"], ...] instead of [{...}, ...]. We
+        // accept the malformation rather than retrying on a
+        // structurally valid (if non-canonical) response.
+        let raw = r#"[
+            ["Mad", "uses", "Rust"],
+            ["Mad", "lives_in", "Almaty"]
+        ]"#;
+        let triples = parse_response(raw).unwrap();
+        assert_eq!(triples.len(), 2);
+        assert_eq!(triples[1].subject, "Mad");
+        assert_eq!(triples[1].predicate, "lives_in");
+    }
+
+    #[test]
+    fn parse_response_drops_malformed_inner_arrays() {
+        // Array-of-arrays with wrong arity inside one element — that
+        // element is dropped but the rest of the valid ones pass.
+        let raw = r#"[
+            ["Mad", "uses", "Rust"],
+            ["only", "two"],
+            ["Mad", "lives_in", "Almaty"]
+        ]"#;
+        let triples = parse_response(raw).unwrap();
+        assert_eq!(triples.len(), 2);
+    }
+
+    #[test]
+    fn parse_response_returns_none_on_irrecoverable() {
+        assert!(parse_response("not json").is_none());
+        assert!(parse_response("").is_none());
+        assert!(parse_response("[").is_none());
+    }
+
+    #[test]
+    fn parse_response_ignores_text_before_array() {
+        // Models often prefix their JSON with explanation. We tolerate
+        // it by finding the first '[' and last ']'.
+        let raw = "Here are the triples:\n```json\n[{\"subject\":\"x\",\"predicate\":\"y\",\"object\":\"z\"}]\n```";
+        let triples = parse_response(raw).unwrap();
+        assert_eq!(triples.len(), 1);
+    }
+
+    #[test]
+    fn extract_config_default_uses_3b_variant() {
+        let cfg = ExtractConfig::default();
+        assert_eq!(cfg.variant, ExtractorVariant::Default);
+        assert_eq!(cfg.temperature, 0.1);
+    }
+
+    #[test]
+    fn triple_serde_round_trips() {
+        let t = Triple {
+            subject: "A".into(),
+            predicate: "B".into(),
+            object: "C".into(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Triple = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
     }
 }

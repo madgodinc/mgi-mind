@@ -79,6 +79,19 @@ pub const EXTRACTOR_QWEN_1_5B_Q4_K_M: &str =
 pub const EXTRACTOR_QWEN_3B_Q4_K_M: &str =
     "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d";
 
+/// llama.cpp Vulkan-enabled prebuilt binary archive for Linux x86_64
+/// (build b9496). Vulkan was chosen as the GPU backend because it works
+/// on both NVIDIA and AMD without a separate per-vendor build, and the
+/// upstream llama.cpp project does NOT ship a CUDA-Linux prebuilt — only
+/// CUDA-Windows. Vulkan keeps us prebuilt-only across platforms.
+///
+/// On a single-binary distribution model, `mgimind extractor install`
+/// downloads this tarball, extracts the `llama-server` binary + its
+/// shared libraries into `$MGIMIND_HOME/bin/extractor/`, and pins this
+/// hash for fail-closed verification.
+pub const LLAMA_CPP_LINUX_VULKAN_B9496: &str =
+    "e4956d4945b4929cf412e9954712267f58d8d179c44f8b6b65d372c4725a5350";
+
 /// Treat the placeholder/empty as "no pin available".
 pub fn pin(hash: &str) -> Option<&str> {
     if hash.is_empty() || hash == "PIN_ME" {
