@@ -175,6 +175,42 @@ where
     score
 }
 
+/// v1.5 Phase 7 step 7.3: error-rate guardrail threshold.
+/// Number of recent failed `test_passed` signals that flips a fact
+/// into the doubt window. Three failures means the claim is
+/// consistently contradicted by deterministic signals — stronger
+/// evidence than any conversational repetition.
+pub const ERROR_RATE_FAIL_THRESHOLD: usize = 3;
+
+/// v1.5 Phase 7 step 7.3: lookback window for the guardrail.
+/// 7 days mirrors the Step 6.2 install-mode auto-detect window —
+/// "recent enough to act on" without overreacting to a single bad
+/// CI run from a year ago.
+pub const ERROR_RATE_WINDOW_DAYS: i64 = 7;
+
+/// v1.5 Phase 7 step 7.3: pure error-rate check.
+///
+/// Returns true when the signal log contains at least
+/// `ERROR_RATE_FAIL_THRESHOLD` failed `test_passed` entries with
+/// timestamps within `ERROR_RATE_WINDOW_DAYS` of `now`. Callers
+/// (mind_outcome handler, background re-test loop) react by forcing
+/// the fact into the doubt window — never delete; Mechanism 1
+/// invariant says the loser keeps its trace.
+pub fn should_promote_to_doubt_window(
+    signals: &[ExternalSignal],
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let cutoff = now - chrono::Duration::days(ERROR_RATE_WINDOW_DAYS);
+    let recent_failures = signals
+        .iter()
+        .filter(|s| s.signal_type == OutcomeSignal::TestPassed && !s.success)
+        .filter_map(|s| chrono::DateTime::parse_from_rfc3339(&s.ts).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .filter(|dt| *dt >= cutoff)
+        .count();
+    recent_failures >= ERROR_RATE_FAIL_THRESHOLD
+}
+
 /// v1.5 Phase 7 step 7.1: high-level mind_outcome handler.
 ///
 /// Reads the existing signal log on `memory_id`, appends `new_signal`,
@@ -198,8 +234,24 @@ pub async fn record(
     existing.push(new_signal.clone());
     let deduped = dedup_keep_latest(existing);
     crate::storage::write_external_signals(config, memory_id, &deduped).await?;
+
+    // v1.5 Phase 7 step 7.3 — error-rate guardrail. After every
+    // outcome write we re-check whether the recent failure count
+    // crossed the threshold. If yes, the fact gets flagged for the
+    // doubt window via the Phase 3 registry. Doing this check after
+    // write (not before) means a single `mind_outcome` call can
+    // both record AND promote, eliminating a stale-read window.
+    let guardrail_msg = if should_promote_to_doubt_window(&deduped, chrono::Utc::now()) {
+        crate::doubt::flag_for_doubt_window(memory_id);
+        format!(
+            " ⚠ guardrail triggered: ≥{ERROR_RATE_FAIL_THRESHOLD} failed test_passed signals in last {ERROR_RATE_WINDOW_DAYS}d — flagged for doubt window."
+        )
+    } else {
+        String::new()
+    };
+
     Ok(format!(
-        "Recorded {type_name} (success={}) on {memory_id} from source '{}' — {} distinct signal(s) now logged.",
+        "Recorded {type_name} (success={}) on {memory_id} from source '{}' — {} distinct signal(s) now logged.{guardrail_msg}",
         new_signal.success,
         new_signal.source,
         deduped.len(),
@@ -371,5 +423,102 @@ mod tests {
         ];
         let deduped = dedup_keep_latest(signals);
         assert_eq!(deduped.len(), 3, "distinct keys must not collapse");
+    }
+
+    // --- v1.5 Phase 7 step 7.3: error-rate guardrail ---
+
+    fn now_for_test() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-06-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// Exactly 3 recent failed test_passed signals → promote.
+    /// The threshold is inclusive (>=).
+    #[test]
+    fn guardrail_promotes_at_threshold() {
+        let signals = vec![
+            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-06-04T09:00:00Z"),
+        ];
+        assert!(should_promote_to_doubt_window(&signals, now_for_test()));
+    }
+
+    /// 2 recent failed test_passed signals → no promotion (just below
+    /// threshold, signal still ambiguous).
+    #[test]
+    fn guardrail_does_not_promote_below_threshold() {
+        let signals = vec![
+            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
+        ];
+        assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
+    }
+
+    /// Failed test_passed signals older than the window do not count.
+    /// 30 days back is well outside the 7-day window.
+    #[test]
+    fn guardrail_ignores_signals_outside_window() {
+        let signals = vec![
+            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-05-05T11:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-05-05T10:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-05-05T09:00:00Z"),
+        ];
+        assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
+    }
+
+    /// Failed user_confirmed or code_compiled signals do NOT trigger
+    /// the guardrail — only test_passed counts. User opinion and
+    /// compile success are noisier signals; only deterministic test
+    /// failures pass the bar for forced doubt-window promotion.
+    #[test]
+    fn guardrail_only_counts_test_passed_failures() {
+        let signals = vec![
+            sig(OutcomeSignal::UserConfirmed, false, "user-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::UserConfirmed, false, "user-2", "2026-06-04T10:00:00Z"),
+            sig(OutcomeSignal::UserConfirmed, false, "user-3", "2026-06-04T09:00:00Z"),
+            sig(OutcomeSignal::CodeCompiled, false, "cargo-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::CodeCompiled, false, "cargo-2", "2026-06-04T10:00:00Z"),
+            sig(OutcomeSignal::CodeCompiled, false, "cargo-3", "2026-06-04T09:00:00Z"),
+        ];
+        assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
+    }
+
+    /// Successful test_passed signals do NOT trigger the guardrail —
+    /// only `success = false` failures count. A passing test confirms
+    /// the fact, the opposite of what the guardrail watches for.
+    #[test]
+    fn guardrail_only_counts_failures_not_successes() {
+        let signals = vec![
+            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::TestPassed, true, "ci-2", "2026-06-04T10:00:00Z"),
+            sig(OutcomeSignal::TestPassed, true, "ci-3", "2026-06-04T09:00:00Z"),
+        ];
+        assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
+    }
+
+    /// Mixed log: 3 recent failures + 100 older successes → promote.
+    /// The guardrail does not "net out" successes against failures
+    /// inside the window; the §3 Mechanism 2 contract is that recent
+    /// failure evidence triggers a re-test pass regardless of
+    /// historical successes. If the historical pattern is real, the
+    /// re-test will resurface it.
+    #[test]
+    fn guardrail_ignores_historical_successes_when_recent_failures_exist() {
+        let mut signals = vec![
+            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
+            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-06-04T09:00:00Z"),
+        ];
+        for i in 0..100 {
+            signals.push(sig(
+                OutcomeSignal::TestPassed,
+                true,
+                &format!("history-ci-{i}"),
+                "2026-05-05T00:00:00Z",
+            ));
+        }
+        assert!(should_promote_to_doubt_window(&signals, now_for_test()));
     }
 }

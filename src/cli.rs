@@ -1259,6 +1259,20 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
             );
         }
 
+        // v1.5 Phase 7 step 7.3: surface the error-rate guardrail count.
+        // ≥3 failed test_passed signals in last 7 days promotes a fact
+        // here. The Phase 8 background loop will consume the flag and
+        // apply the doubt-window state transition.
+        let flagged = crate::doubt::doubt_window_flag_count();
+        if flagged == 0 {
+            let _ = writeln!(out, "[OK]   No facts flagged by error-rate guardrail");
+        } else {
+            let _ = writeln!(
+                out,
+                "[INFO] {flagged} fact(s) flagged for doubt window by error-rate guardrail"
+            );
+        }
+
         // v1.5 Phase 6 step 6.4: surface the install-mode profile and
         // the auto-detect recommendation. The line is informational —
         // doctor never auto-applies the recommendation (§10 q6
