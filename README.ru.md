@@ -2,6 +2,8 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
+**[Последний релиз: v1.6.3](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.3)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+
 Локальная долговременная память для ИИ-ассистентов. Один бинарник на Rust,
 локальная векторная БД Qdrant, локальные ONNX-модели. Говорит по MCP, так
 что Claude Code и другие ассистенты читают и пишут память сами. Также
