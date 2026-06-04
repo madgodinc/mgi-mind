@@ -382,12 +382,36 @@ pub async fn retest_fact_step82(
     let typed_signals = crate::storage::read_external_signals(config, fact_id)
         .await
         .unwrap_or_default();
+    // v1.6 step 2: cited_by chain following.
+    //
+    // For every cited_by signal in the typed log, look up the citing
+    // memory's cached confidence_score from its payload. Self-citation
+    // guard then unblocks when the citing memory's own confidence is
+    // ≥ CITED_BY_MIN_CITING_CONFIDENCE (0.5). Without this map the
+    // closure returns None for every id and the guard always blocks,
+    // which is what v1.5 shipped.
+    //
+    // One batched get_points covers all distinct citing ids in the
+    // current fact's log. Cited memories are in the MEMORIES_COLLECTION
+    // (not the facts collection) because mind_outcome operates on
+    // memory ids.
+    let citing_confidence_map = if typed_signals.is_empty() {
+        std::collections::HashMap::<String, f32>::new()
+    } else {
+        let citing_ids: std::collections::HashSet<&str> = typed_signals
+            .iter()
+            .filter(|s| s.signal_type == crate::outcome::OutcomeSignal::CitedBy)
+            .map(|s| s.source.as_str())
+            .collect();
+        fetch_citing_confidences(&client, &citing_ids).await
+    };
+
     let external_signal_score = if typed_signals.is_empty() {
         None
     } else {
         Some(crate::outcome::compute_external_signal_score(
             &typed_signals,
-            |_citing_id| None, // §7 self-citation guard — no chain following in v1.5
+            |citing_id| citing_confidence_map.get(citing_id).copied(),
         ))
     };
 
@@ -449,6 +473,57 @@ pub async fn retest_fact_step82(
     .await?;
 
     Ok(transition)
+}
+
+/// v1.6 step 2: batched read of `confidence_score` payload for a
+/// set of citing memory ids. Returns a HashMap so the synchronous
+/// closure inside `compute_external_signal_score` can look up
+/// values without re-entering async context.
+///
+/// Citing ids live in the MEMORIES_COLLECTION (not facts) because
+/// `mind_outcome` operates on memory ids. A citing memory without
+/// a cached confidence_score (e.g. pre-v1.5 entries that never went
+/// through the retest pass) is simply absent from the map —
+/// `compute_external_signal_score` blocks it the same way it would
+/// have under the v1.5 stub. This is the conservative default:
+/// unknown citing confidence → cited_by signal does not count.
+///
+/// Single-ID best-effort: if one fetch fails the whole map is empty.
+/// That degrades to v1.5 behaviour (always-block guard) — never
+/// crashes the retest loop.
+async fn fetch_citing_confidences(
+    client: &qdrant_client::Qdrant,
+    citing_ids: &std::collections::HashSet<&str>,
+) -> std::collections::HashMap<String, f32> {
+    let mut out = std::collections::HashMap::with_capacity(citing_ids.len());
+    if citing_ids.is_empty() {
+        return out;
+    }
+    let pids: Vec<qdrant_client::qdrant::PointId> =
+        citing_ids.iter().map(|id| id.to_string().into()).collect();
+    let Ok(resp) = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(
+                crate::storage::MEMORIES_COLLECTION,
+                pids,
+            )
+            .with_payload(true),
+        )
+        .await
+    else {
+        return out;
+    };
+    for point in resp.result {
+        let Some(pid) = point.id.as_ref().map(crate::storage::format_point_id) else {
+            continue;
+        };
+        if let Some(raw) = crate::storage::extract_string_pub(&point.payload, "confidence_score") {
+            if let Ok(score) = raw.parse::<f32>() {
+                out.insert(pid, score);
+            }
+        }
+    }
+    out
 }
 
 async fn read_doubt_count(config: &MindConfig, fact_id: &str) -> u32 {
