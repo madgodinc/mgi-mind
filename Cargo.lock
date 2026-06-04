@@ -1493,6 +1493,7 @@ dependencies = [
  "hex",
  "once_cell",
  "ort",
+ "parking_lot",
  "qdrant-client",
  "rand 0.8.6",
  "regex",

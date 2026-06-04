@@ -210,12 +210,51 @@ fn fact_id(subject: &str, predicate: &str, object: &str) -> String {
     Uuid::new_v5(&FACT_NAMESPACE, key.as_bytes()).to_string()
 }
 
+// Post-critic (PR #5 race): per-(subject, predicate) lock map so
+// concurrent add_fact calls on the same axis don't see each other's
+// upsert-mid-flight. Without this, two concurrent add_fact on the
+// same `(subject, predicate)` could observe an inconsistent set of
+// existing facts in find_facts_by_subject_predicate, start parallel
+// duels, and write conflicting status flags.
+//
+// Locks are tokio::sync::Mutex<()> so they're hold-across-await safe.
+// The outer map is parking_lot::Mutex (sync; only acquired briefly
+// to look up or insert the per-key Arc); critical section is short.
+//
+// Memory: the lock map grows monotonically per distinct
+// (subject, predicate) pair. In practice the number of unique pairs
+// is bounded by the knowledge graph size; for ~12k memories with
+// ~100 unique predicates and ~1000 unique subjects, the map holds
+// ~thousands of entries — bounded. A future eviction policy could
+// drop entries with zero outstanding waiters, but for v1.4 the
+// trade-off is correctness over heap minimisation.
+use std::sync::Arc;
+
+static SUBJECT_PREDICATE_LOCKS: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let key = format!("{subject}\u{0}{predicate}");
+    let mut map = SUBJECT_PREDICATE_LOCKS.lock();
+    map.entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 pub async fn add_fact(
     config: &MindConfig,
     subject: &str,
     predicate: &str,
     object: &str,
 ) -> Result<String> {
+    // Post-critic (PR #5): acquire per-(subject, predicate) lock so
+    // concurrent add_fact on the same axis cannot race the duel.
+    // Held until the end of add_fact (including the upsert + dampen
+    // sequence below), ensuring atomic outcome per axis.
+    let lock = lock_for_subject_predicate(subject, predicate);
+    let _guard = lock.lock().await;
+
     let client = storage::get_client(config).await?;
     storage::ensure_facts_collection(&client).await?;
 
