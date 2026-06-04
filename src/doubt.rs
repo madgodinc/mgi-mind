@@ -686,7 +686,12 @@ pub fn spawn_background_retest_loop_with_cadence(
     config: crate::config::MindConfig,
     initial_cadence_seconds: u64,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    // v1.6.4 Windows fix (#23): the loop body owns large local state
+    // (MindConfig clone, candidate vector, payload HashMaps). On
+    // Windows the default thread stack is 1 MB — the future overflows.
+    // Box::pin moves the future to the heap so the task stack only
+    // holds the pinned pointer, not the entire 50-fact walk's locals.
+    tokio::spawn(Box::pin(async move {
         let mut cadence = initial_cadence_seconds;
         eprintln!(
             "mgimind: background doubt-window re-test loop started (default cadence {}s)",
@@ -763,7 +768,7 @@ pub fn spawn_background_retest_loop_with_cadence(
                 cadence
             );
         }
-    })
+    }))
 }
 
 // ===== Inheritance flag — per-process registry =====
