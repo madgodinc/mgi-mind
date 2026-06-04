@@ -95,6 +95,14 @@ pub enum EntryStatus {
     Stale,
     PropagationShadowed,
     Unknown,
+    /// Post-critic addition (PR #5 round 2): the duel rule rejected a
+    /// weak challenger and moved it to candidate state. Distinct from
+    /// `Contested` (both stay live, awaiting fresh observations) — a
+    /// QuarantineCandidate is *waiting for promote-on-repeat*. Phase 4
+    /// STALE bench reads this to distinguish "correctly rejected weak
+    /// fact" from "live contested both visible" — collapsing them was
+    /// the architectural hole the critic flagged.
+    QuarantineCandidate,
 }
 
 impl Default for EntryStatus {
@@ -113,6 +121,7 @@ impl EntryStatus {
             EntryStatus::Stale => "stale",
             EntryStatus::PropagationShadowed => "propagation_shadowed",
             EntryStatus::Unknown => "unknown",
+            EntryStatus::QuarantineCandidate => "quarantine_candidate",
         }
     }
 
@@ -126,6 +135,9 @@ impl EntryStatus {
                 Some(EntryStatus::PropagationShadowed)
             }
             "unknown" => Some(EntryStatus::Unknown),
+            "quarantine_candidate" | "quarantine-candidate" | "candidate" => {
+                Some(EntryStatus::QuarantineCandidate)
+            }
             _ => None,
         }
     }
@@ -198,12 +210,51 @@ fn fact_id(subject: &str, predicate: &str, object: &str) -> String {
     Uuid::new_v5(&FACT_NAMESPACE, key.as_bytes()).to_string()
 }
 
+// Post-critic (PR #5 race): per-(subject, predicate) lock map so
+// concurrent add_fact calls on the same axis don't see each other's
+// upsert-mid-flight. Without this, two concurrent add_fact on the
+// same `(subject, predicate)` could observe an inconsistent set of
+// existing facts in find_facts_by_subject_predicate, start parallel
+// duels, and write conflicting status flags.
+//
+// Locks are tokio::sync::Mutex<()> so they're hold-across-await safe.
+// The outer map is parking_lot::Mutex (sync; only acquired briefly
+// to look up or insert the per-key Arc); critical section is short.
+//
+// Memory: the lock map grows monotonically per distinct
+// (subject, predicate) pair. In practice the number of unique pairs
+// is bounded by the knowledge graph size; for ~12k memories with
+// ~100 unique predicates and ~1000 unique subjects, the map holds
+// ~thousands of entries — bounded. A future eviction policy could
+// drop entries with zero outstanding waiters, but for v1.4 the
+// trade-off is correctness over heap minimisation.
+use std::sync::Arc;
+
+static SUBJECT_PREDICATE_LOCKS: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let key = format!("{subject}\u{0}{predicate}");
+    let mut map = SUBJECT_PREDICATE_LOCKS.lock();
+    map.entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 pub async fn add_fact(
     config: &MindConfig,
     subject: &str,
     predicate: &str,
     object: &str,
 ) -> Result<String> {
+    // Post-critic (PR #5): acquire per-(subject, predicate) lock so
+    // concurrent add_fact on the same axis cannot race the duel.
+    // Held until the end of add_fact (including the upsert + dampen
+    // sequence below), ensuring atomic outcome per axis.
+    let lock = lock_for_subject_predicate(subject, predicate);
+    let _guard = lock.lock().await;
+
     let client = storage::get_client(config).await?;
     storage::ensure_facts_collection(&client).await?;
 
@@ -222,29 +273,64 @@ pub async fn add_fact(
             .unwrap_or_else(|| now.clone());
 
     // v1.4 Phase 0 step 3+4: cardinality-aware conflict detection.
-    // Look up the predicate's registered cardinality (default Multi when
-    // unregistered) and check the existing facts for this (subject,
-    // predicate) pair. If the cardinality admits conflict and an existing
-    // *different-object* fact is on record, flag this write as `Contested`
-    // (EntryStatus). The Phase 2 duel rule resolves the contestation; for
-    // now the write still goes through, both facts stay live, and `mgimind
-    // doctor` surfaces the pending count.
+    // Phase 2 step 2.2 extends this to a full duel resolution: when a
+    // contradiction is found, we either flip (dampen the loser, write
+    // new as Active), contest (both stay live), or quarantine the
+    // newcomer. Outcome is computed by `duel::resolve_against_existing`
+    // and acted on below.
     //
-    // Step 4 extends the original boolean conflict_pending into the wider
-    // EntryStatus enum so Phase 3 can also write `PropagationShadowed`
-    // (Type II conflict from STALE) and Phase 2 can write `Stale` on a
-    // duel loser without overloading the boolean. New facts default to
-    // `Active` unless a Type I conflict is detected at write time.
+    // Backward-compat: the path used by `mind_fact(action="add")` and
+    // the legacy `mind_fact_add` MCP tool runs through this updated
+    // `add_fact`. Existing callers see no signature change; behaviour
+    // change is the introduction of duel outcomes for Single /
+    // TemporalSingle predicates.
     let cardinality = get_cardinality(config, predicate).await?;
-    let status = if cardinality.admits_conflict() {
-        let existing = find_facts_by_subject_predicate(config, subject, predicate).await?;
-        if detect_conflict(&existing, object, cardinality) {
-            EntryStatus::Contested
-        } else {
-            EntryStatus::Active
+    let existing = if cardinality.admits_conflict() {
+        find_facts_by_subject_predicate(config, subject, predicate).await?
+    } else {
+        Vec::new()
+    };
+
+    // Run the duel scaffold only when there's an actual contradiction.
+    // detect_conflict already filters re-assertions of the same object
+    // and Multi predicates.
+    let (status, loser_to_dampen) = if cardinality.admits_conflict()
+        && detect_conflict(&existing, object, cardinality)
+    {
+        // Phase 2 v0: a brand-new fact has no diversity history yet, so
+        // we treat it as a single live observation with no external
+        // signals. The duel weight comes from `from_live_session=true,
+        // diverse_confirmations=1, external_signals=0`. Phase 4
+        // calibration may revise these defaults; they are the
+        // honest "first-mention" weights.
+        let new_inputs = crate::duel::NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 1,
+            external_signals: 0,
+        };
+        let (outcome, loser) = crate::duel::resolve_against_existing(
+            config,
+            &existing,
+            new_inputs,
+            cardinality,
+        )
+        .await?;
+        match outcome {
+            crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
+            crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
+            // Quarantine: the duel says the fresh fact is too weak to
+            // unseat the entrenched one. Post-critic (round 2): use the
+            // dedicated EntryStatus::QuarantineCandidate to distinguish
+            // "weak rejected, waiting promote-on-repeat" from "live
+            // contested both visible." Earlier interim collapsed both
+            // to Contested, which prevented STALE bench from measuring
+            // the difference.
+            crate::duel::DuelOutcome::Quarantine => {
+                (EntryStatus::QuarantineCandidate, None)
+            }
         }
     } else {
-        EntryStatus::Active
+        (EntryStatus::Active, None)
     };
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
@@ -264,6 +350,16 @@ pub async fn add_fact(
         .upsert_points(UpsertPointsBuilder::new(storage::FACTS_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to add fact")?;
+
+    // Phase 2 step 2.3: if the duel produced a Flip, dampen the loser
+    // *after* the winner is in the store. Doing it after the upsert
+    // means the read of `find_facts_by_subject_predicate` always sees
+    // either the new winner alone (after dampening) or both temporarily
+    // (between upsert and dampen) — never a state where the loser is
+    // dampened but the winner isn't yet recorded.
+    if let Some(loser_id) = loser_to_dampen {
+        crate::duel::dampen_loser(config, &loser_id).await?;
+    }
 
     Ok(id)
 }
