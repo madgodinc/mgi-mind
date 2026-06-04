@@ -634,32 +634,45 @@ $30-50. This is the *measurement* that closes the loop, not the
 didn't, the formulas need another iteration before publication.
 
 **Defense, honestly.** The v1 synthesis claimed a "structural moat"
-out of the four-discipline reading. That claim was overstated. The
-real situation:
+out of the four-discipline reading. A later prior-art search
+(critic round 4) showed even that reframing was over-confident: the
+four mechanisms are not novel. STALE (May 2026) benchmarks exactly
+this problem; arxiv 2503.16814 uses the word "entrenchment" on LLM
+reasoning and documents the same ossification mode; SAVER
+(2604.08401) describes the echo mechanism; the March 2026 survey
+(arxiv 2603.07670) lists external validation, uncertainty
+quantification with decay, adversarial probing, and expiration
+policies as open future work. The mechanisms in this synthesis are
+the field's open agenda, not a private discovery.
 
-- **Layer 1 (timestamp) is real defense.** The files in
-  `~/Brain/ideas/` were committed to a private git repo on 2026-06-04
-  (commits `6fef735`, `f6be7c8`, `17125c1`, `33bf7a7`, `df3ead2`, and
-  the present commit). mem0 cannot retroactively claim they had this
-  synthesis in early June.
-- **Layer 2 (Apache-2.0 working implementation) is the real
-  product defense.** Once the code ships, anyone can copy the method;
-  the working implementation against a real base is the
-  first-mover advantage. Copying without understanding produces a
-  broken implementation, but a $24M team can hire someone who reads
-  all four backing disciplines the moment the shipped code shows the
-  approach is viable.
-- **Layer 3 is not a moat — it is *speed*.** The four-discipline
-  reading is why I can ship this *first*. It is not why nobody else
-  will ship something similar later. Reframing this honestly changes
-  the planning calculus: aim for the speed advantage to convert into
-  a shipped, used, talked-about product before the speed advantage
-  evaporates. Don't bank on "they can't catch up."
+What remains real:
 
-Patent decision deferred. The formulas are not crystallised; there is
-nothing concrete to claim yet. Once Section 10 question 2 (diversity)
-or question 4 (active re-test specifics) lands on a non-obvious
-formula, the question becomes worth revisiting. Not before.
+- **Layer 1 (timestamp) is a record, not a moat.** The
+  `~/Brain/ideas/` private commits (`6fef735` → `4edaf52`,
+  2026-06-04) are the audit trail of how the synthesis took its
+  current shape, including the prior-art correction. They do not
+  establish priority over the four cited papers; they establish
+  authorship of *this implementation* of mechanisms the field
+  already named.
+- **Layer 2 (Apache-2.0 working implementation) is the actual
+  contribution.** The cited papers describe; mem0 / Zep /
+  supermemory ship products without these mechanisms; nothing in
+  the prior-art search shows a working, local, open-source memory
+  layer that implements the four mechanisms together and reports
+  numbers on a recognised benchmark. That gap — between described
+  and shipped — is the lane. It is narrower than "I invented
+  this" but it exists, and it is testable: a working
+  implementation either lands STALE numbers above the published
+  baselines or it does not.
+- **Layer 3 is speed, and now finite.** The four-discipline reading
+  is why this implementation can ship soon. It is not why nobody
+  else will ship something similar later. With STALE published and
+  the survey openly listing the agenda, the window is shorter than
+  the v1 synthesis assumed. Aim for the speed advantage to convert
+  into a shipped, used, cited project before the window closes.
+
+No patent path was ever in the active plan; the prior-art search
+makes the question moot anyway.
 
 ---
 
