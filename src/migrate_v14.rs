@@ -200,11 +200,12 @@ pub enum ProposalConfidence {
 
 /// Walk all facts and count dependants per fact.
 ///
-/// **Dependant definition** (Phase 1 operational): memory `M` depends on
-/// fact `F` if cosine(embed(M.content), embed(F.subject + " " + F.predicate
-/// + " " + F.object)) ≥ `threshold`. This is the conservative line in
-/// MiniLM space at our chunking; 0.7 is the default. Phase 4 may revise
-/// the threshold based on calibration.
+/// **Dependant definition** (Phase 1 operational).
+/// Memory `M` depends on fact `F` when the cosine similarity between
+/// `embed(M.content)` and `embed(F.subject + " " + F.predicate + " " + F.object)`
+/// is at least `threshold`. This is the conservative line in MiniLM space at
+/// our chunking; 0.7 is the default. Phase 4 may revise the threshold based on
+/// calibration.
 ///
 /// Returns a map `fact_id → dependants_count` and the distribution summary
 /// printed at the end of the run.
@@ -488,7 +489,7 @@ mod tests {
         // decile), ratio = 100 — far above the 5x threshold so the
         // recommendation must be logarithmic.
         let mut data: Vec<u32> = vec![1; 80];
-        data.extend(std::iter::repeat(100).take(20));
+        data.extend(std::iter::repeat_n(100, 20));
         let s = DistributionSummary::from_counts(&data);
         assert_eq!(s.max, 100);
         assert!(
