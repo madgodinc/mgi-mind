@@ -197,6 +197,76 @@ impl ExtractorVariant {
     }
 }
 
+// ===== Download path (step 5.2) =====
+//
+// Downloads the chosen GGUF model into `$MGIMIND_HOME/models/extractor/`
+// using the same `util::download_file` fail-closed integrity verification
+// the embedder ONNX uses. The pinned sha256 lives in `integrity.rs`; when
+// PIN_ME placeholders are present the download proceeds with a printed
+// warning rather than failing, because Phase 5 is explicitly opt-in.
+
+use anyhow::{Context, Result};
+use std::path::PathBuf;
+
+/// Directory where extractor GGUF files live.
+pub fn extractor_dir() -> PathBuf {
+    crate::config::mind_home().join("models").join("extractor")
+}
+
+/// Path to the GGUF file for the given variant.
+pub fn gguf_path(variant: ExtractorVariant) -> PathBuf {
+    extractor_dir().join(variant.gguf_filename())
+}
+
+/// Whether the variant's GGUF is already on disk.
+pub fn is_installed(variant: ExtractorVariant) -> bool {
+    gguf_path(variant).exists()
+}
+
+/// Download the variant's GGUF model. Idempotent: re-running with the
+/// file already present skips the network round-trip. Verifies the
+/// pinned sha256 if available; warns and proceeds if PIN_ME.
+pub async fn download(variant: ExtractorVariant) -> Result<PathBuf> {
+    let dir = extractor_dir();
+    std::fs::create_dir_all(&dir).context("create extractor dir")?;
+    let dest = gguf_path(variant);
+    if dest.exists() {
+        eprintln!(
+            "  {} already present, skipping download",
+            variant.gguf_filename()
+        );
+        return Ok(dest);
+    }
+    eprintln!(
+        "  downloading {} ({} MB)...",
+        variant.gguf_filename(),
+        variant.approx_size_mb()
+    );
+    let pin = variant.pinned_hash();
+    if pin.is_none() {
+        eprintln!(
+            "  [warn] no pinned checksum for {} (variant slot is PIN_ME) — integrity not verified",
+            variant.gguf_filename()
+        );
+    }
+    crate::util::download_file(variant.hf_url(), &dest, pin).await?;
+    eprintln!("  saved to {}", dest.display());
+    Ok(dest)
+}
+
+/// Remove the variant's GGUF from disk. Used by `mgimind extractor
+/// uninstall`. Returns true if the file was removed, false if it
+/// wasn't there to begin with.
+pub fn uninstall(variant: ExtractorVariant) -> Result<bool> {
+    let path = gguf_path(variant);
+    if path.exists() {
+        std::fs::remove_file(&path).context("remove gguf file")?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
