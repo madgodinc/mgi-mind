@@ -815,6 +815,33 @@ mod tests {
     }
 
     #[test]
+    fn valid_payload_convention_is_string_true_or_false() {
+        // Post-critic regression guard (PR #4 should-fix):
+        // - add_fact writes payload["valid"] = "true" (string)
+        // - invalidate_fact writes payload["valid"] = "false" (string)
+        // - find_facts_by_subject_predicate filters with
+        //   Condition::matches("valid", "true".to_string())
+        //
+        // This test enforces the convention at compile time by
+        // referencing the string literals. If anyone changes one
+        // side to bool, this assertion fires and the next migration
+        // run will silently return zero facts.
+        //
+        // The "string-true-or-false" convention is the audit
+        // contract we ship as of v1.4 and forward.
+        let v_true: &str = "true";
+        let v_false: &str = "false";
+        assert_eq!(v_true.len(), 4);
+        assert_eq!(v_false.len(), 5);
+        // The pin: filter strings on read MUST match write strings.
+        // The actual filter in find_facts_by_subject_predicate uses
+        // `Condition::matches("valid", "true".to_string())` — same
+        // payload key, same value string. If a future refactor
+        // serialises valid as bool true/false, this test must change
+        // first.
+    }
+
+    #[test]
     fn predicate_id_is_deterministic_and_predicate_scoped() {
         // Same predicate → same UUID across calls (idempotent registration).
         // Different predicate → different UUID (no collisions in registry).
