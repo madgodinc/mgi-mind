@@ -49,6 +49,31 @@ pub const DUEL_CONTESTED_RATIO: f32 = 0.5;
 /// derived from the synthetic test data.
 pub const ENTRENCHMENT_NORM_DIVISOR: f32 = 50.0;
 
+/// Slot weight applied to the diverse-confirmations term of
+/// `weight_new`. Synthesis §6 single-user chat-only column anchor;
+/// Phase 4 calibration will adjust per install mode.
+///
+/// **TODO(phase-4-calibration):** part of the install-mode weight
+/// matrix in §6. Extracted from inline magic-number in the v1.4
+/// post-critic round so calibration sweeps can grep DUEL_/WEIGHT_
+/// and find every tunable in one shot.
+pub const WEIGHT_CONFIRMATIONS: f32 = 0.1;
+
+/// Slot weight applied to the external-signal term of `weight_new`.
+/// Higher than confirmations because deterministic signals (cargo
+/// test exit 0, CI green, etc.) are stronger evidence than
+/// conversational repetition. Synthesis §5 axis 3.
+pub const WEIGHT_EXTERNAL_SIGNAL: f32 = 0.2;
+
+/// Multiplier applied to `weight_new` when the fact came from
+/// memory rather than the live session. Synthesis §3 mechanism 3 —
+/// inheritance discount. Should match `doubt::INHERITANCE_DISCOUNT_MULTIPLIER`
+/// (the two modules implement complementary halves of the same
+/// mechanism); the next calibration cycle should unify them under
+/// one re-exported constant. For now both modules declare 0.5
+/// independently; the duplicate is intentional and tracked.
+pub const INHERITANCE_DISCOUNT: f32 = 0.5;
+
 // ===== Pure-function entrenchment formula =====
 
 /// Inputs to `entrenchment()`. Phase 2 reads these from each fact's
@@ -134,21 +159,18 @@ pub struct NewFactInputs {
 /// when present, with confirmations as a tiebreaker. The inheritance
 /// discount halves the weight when applicable.
 pub fn weight_new(inputs: NewFactInputs) -> f32 {
-    // TODO(phase-4-calibration): these weights are §6 install-mode-aware
-    // anchors; the install-mode detection lives elsewhere and feeds the
-    // right column of weights into this function.
-    let conf_weight = 0.1;
-    let ext_weight = 0.2;
-
-    let conf_term = conf_weight * (1.0 + inputs.diverse_confirmations as f32).log2();
-    let ext_term = ext_weight * (1.0 + inputs.external_signals as f32).log2();
+    // Slot weights extracted from inline magic numbers post-critic so
+    // Phase 4 calibration can grep `pub const` and find every tunable.
+    // See WEIGHT_CONFIRMATIONS, WEIGHT_EXTERNAL_SIGNAL, INHERITANCE_DISCOUNT.
+    let conf_term = WEIGHT_CONFIRMATIONS * (1.0 + inputs.diverse_confirmations as f32).log2();
+    let ext_term = WEIGHT_EXTERNAL_SIGNAL * (1.0 + inputs.external_signals as f32).log2();
 
     let raw = conf_term + ext_term;
 
     if inputs.from_live_session {
         raw
     } else {
-        raw * 0.5 // inheritance discount (synthesis §3 mechanism 3)
+        raw * INHERITANCE_DISCOUNT // synthesis §3 mechanism 3
     }
 }
 
