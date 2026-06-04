@@ -1370,17 +1370,24 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         // mis-classification cost is silent quality drift).
         let detect_inputs = crate::install_detect::collect(&cfg).await;
         let recommendation = crate::install_mode::recommend(detect_inputs);
+        let weights = cfg.install_mode.weights();
         if recommendation == cfg.install_mode {
             let _ = writeln!(
                 out,
-                "[OK]   install-mode: {} (matches auto-detect)",
-                cfg.install_mode.as_str()
+                "[OK]   install-mode: {} [d={:.2} c={:.2} e={:.2}] (matches auto-detect)",
+                cfg.install_mode.as_str(),
+                weights.dependants,
+                weights.confirmations,
+                weights.external,
             );
         } else {
             let _ = writeln!(
                 out,
-                "[INFO] install-mode: {} (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
+                "[INFO] install-mode: {} [d={:.2} c={:.2} e={:.2}] (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
                 cfg.install_mode.as_str(),
+                weights.dependants,
+                weights.confirmations,
+                weights.external,
                 recommendation.as_str(),
                 recommendation.as_str()
             );
@@ -2215,7 +2222,14 @@ async fn cmd_config_install_mode_show() -> Result<()> {
     let config = crate::config::MindConfig::load().with_context(|| {
         "config not initialised — run `mgimind init` first".to_string()
     })?;
-    println!("install-mode: {}", config.install_mode.as_str());
+    let weights = config.install_mode.weights();
+    println!(
+        "install-mode: {} [dependants={:.2} confirmations={:.2} external={:.2}]",
+        config.install_mode.as_str(),
+        weights.dependants,
+        weights.confirmations,
+        weights.external,
+    );
 
     let inputs = crate::install_detect::collect(&config).await;
     let recommendation = crate::install_mode::recommend(inputs);
