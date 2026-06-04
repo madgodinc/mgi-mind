@@ -160,6 +160,15 @@ pub enum Commands {
     /// stays warm for the session - no daemon, no Unix socket, no Node wrapper.
     Mcp,
 
+    /// v1.4 Phase 5: install, inspect, or uninstall the local LLM auto-extractor
+    /// (Qwen 2.5 family GGUF). The extractor populates the knowledge graph
+    /// automatically from new memories via background extraction.
+    #[cfg(feature = "extractor")]
+    Extractor {
+        #[command(subcommand)]
+        what: ExtractorCmd,
+    },
+
     /// Migrate legacy per-library collections into the single `memories`
     /// collection (audit #18). Idempotent; re-embeds from stored content.
     Migrate {
@@ -329,6 +338,34 @@ pub enum MigrateV14Cmd {
         /// Write the counts back. Read-only without this flag.
         #[arg(long)]
         apply: bool,
+    },
+}
+
+#[cfg(feature = "extractor")]
+#[derive(Subcommand)]
+pub enum ExtractorCmd {
+    /// Install the llama-server binary + chosen Qwen 2.5 GGUF model.
+    /// Idempotent; safe to re-run. Default variant is the 3B model.
+    Install {
+        /// Variant to download: `lite` (Qwen 1.5B, ~990 MB), `default`
+        /// (Qwen 3B, ~1.93 GB). Both download the same llama-server binary.
+        #[arg(long, default_value = "default")]
+        variant: String,
+    },
+    /// Show what's installed and whether the server is running.
+    Info,
+    /// Shut down the running llama-server subprocess (does not remove
+    /// the binary or model). Server restarts on the next extraction call.
+    Unload,
+    /// Remove the llama-server binary and both GGUF variants from disk.
+    Uninstall,
+    /// Run a one-shot extraction on a piece of text from the command
+    /// line. Useful for smoke-testing the install without going through
+    /// the auto-ingest pipeline.
+    Test {
+        text: String,
+        #[arg(long, default_value = "default")]
+        variant: String,
     },
 }
 
@@ -502,6 +539,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
+        #[cfg(feature = "extractor")]
+        Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
         Commands::MigrateV14 { what } => match what {
             MigrateV14Cmd::Dependants { threshold, apply } => {
@@ -2011,4 +2050,61 @@ async fn cmd_stop() -> Result<()> {
     std::fs::remove_file(&pid_path)?;
     println!("Qdrant stopped.");
     Ok(())
+}
+
+// ===== v1.4 Phase 5: extractor command handler =====
+
+#[cfg(feature = "extractor")]
+async fn cmd_extractor(what: ExtractorCmd) -> Result<()> {
+    match what {
+        ExtractorCmd::Install { variant } => {
+            let v = crate::extractor::ExtractorVariant::parse(&variant)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
+                })?;
+            println!("Installing extractor: {}", v.describe());
+            let warn = v.multilingual_warning();
+            if !warn.is_empty() {
+                println!("{warn}");
+            }
+            crate::extractor::install(v).await?;
+            Ok(())
+        }
+        ExtractorCmd::Info => {
+            print!("{}", crate::extractor::info());
+            Ok(())
+        }
+        ExtractorCmd::Unload => {
+            crate::extractor::shutdown_server();
+            println!("llama-server shut down.");
+            Ok(())
+        }
+        ExtractorCmd::Uninstall => {
+            crate::extractor::shutdown_server();
+            crate::extractor::uninstall_all()?;
+            println!("Extractor uninstalled.");
+            Ok(())
+        }
+        ExtractorCmd::Test { text, variant } => {
+            let v = crate::extractor::ExtractorVariant::parse(&variant)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
+                })?;
+            let cfg = crate::extractor::ExtractConfig {
+                variant: v,
+                ..crate::extractor::ExtractConfig::default()
+            };
+            println!("Extracting from: {text}\n");
+            let triples = crate::extractor::extract_facts(&cfg, &text).await?;
+            if triples.is_empty() {
+                println!("No triples extracted.");
+            } else {
+                println!("Extracted {} triple(s):", triples.len());
+                for t in &triples {
+                    println!("  ({}, {}, {})", t.subject, t.predicate, t.object);
+                }
+            }
+            Ok(())
+        }
+    }
 }
