@@ -654,80 +654,102 @@ fn pick_port() -> u16 {
 
 /// Start the llama-server subprocess for the given variant. Returns
 /// the existing handle if a server is already running. Idempotent.
+///
+/// Implementation note: the mutex is acquired in two short critical
+/// sections (peek-existing / install-new-handle), never held across
+/// the .await for health-check polling. This is required for the
+/// function future to be Send — the auto-extract spawn_blocking
+/// path in ingest.rs depends on it.
 async fn ensure_server(variant: ExtractorVariant) -> anyhow::Result<(u16, String)> {
     let slot = LLAMA_SERVER.get_or_init(|| Mutex::new(None));
+
+    // Critical section 1: existing handle peek.
     {
-        let mut guard = slot
+        let guard = slot
             .lock()
             .map_err(|_| anyhow::anyhow!("llama-server mutex poisoned"))?;
         if let Some(h) = guard.as_ref() {
             return Ok((h.port, h.api_key.clone()));
         }
+    }
 
-        // Cold start.
-        let server_path = llama_server_path();
-        if !server_path.exists() {
-            anyhow::bail!(
-                "extractor server binary missing: {} (run `mgimind extractor install`)",
-                server_path.display()
-            );
-        }
-        let gguf = gguf_path(variant);
-        if !gguf.exists() {
-            anyhow::bail!(
-                "extractor model missing: {} (run `mgimind extractor install`)",
-                gguf.display()
-            );
-        }
-        let port = pick_port();
-        let api_key = random_api_key();
-        let lib_dir = server_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+    // Cold-start preflight.
+    let server_path = llama_server_path();
+    if !server_path.exists() {
+        anyhow::bail!(
+            "extractor server binary missing: {} (run `mgimind extractor install`)",
+            server_path.display()
+        );
+    }
+    let gguf = gguf_path(variant);
+    if !gguf.exists() {
+        anyhow::bail!(
+            "extractor model missing: {} (run `mgimind extractor install`)",
+            gguf.display()
+        );
+    }
+    let port = pick_port();
+    let api_key = random_api_key();
+    let lib_dir = server_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
 
-        let mut cmd = std::process::Command::new(&server_path);
-        cmd.arg("-m")
-            .arg(&gguf)
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--api-key")
-            .arg(&api_key)
-            .arg("-ngl")
-            .arg("99")
-            .arg("--ctx-size")
-            .arg("4096")
-            .env("LD_LIBRARY_PATH", &lib_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+    let mut cmd = std::process::Command::new(&server_path);
+    cmd.arg("-m")
+        .arg(&gguf)
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--api-key")
+        .arg(&api_key)
+        .arg("-ngl")
+        .arg("99")
+        .arg("--ctx-size")
+        .arg("4096")
+        .env("LD_LIBRARY_PATH", &lib_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
-        let child = cmd
-            .spawn()
-            .context("failed to spawn llama-server subprocess")?;
+    let child = cmd
+        .spawn()
+        .context("failed to spawn llama-server subprocess")?;
 
+    // Critical section 2: install the handle. Drop the guard before
+    // any await so the future stays Send.
+    {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama-server mutex poisoned"))?;
         *guard = Some(LlamaServerHandle {
             child,
             port,
             api_key: api_key.clone(),
         });
+    }
 
-        // Wait for server readiness — poll /health up to 30s.
-        let url = format!("http://127.0.0.1:{port}/health");
-        let client = reqwest::Client::new();
-        for _ in 0..60 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    return Ok((port, api_key));
-                }
+    // Wait for server readiness — poll /health up to 30s. No mutex
+    // held across .await.
+    let url = format!("http://127.0.0.1:{port}/health");
+    let client = reqwest::Client::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return Ok((port, api_key));
             }
         }
-        // Failed health check — shut down the subprocess.
-        *guard = None;
-        anyhow::bail!("llama-server failed to become ready within 30s");
     }
+    // Failed health check — shut down the subprocess via the global
+    // slot drop semantics.
+    {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama-server mutex poisoned"))?;
+        *guard = None;
+    }
+    anyhow::bail!("llama-server failed to become ready within 30s");
 }
 
 /// Shut down the llama-server subprocess if running. Called by
