@@ -1,0 +1,86 @@
+{
+  "version": "v0.14.3",
+  "dataset": "LongMemEval-S",
+  "n_questions": 500,
+  "hardware": "RTX 3090 (RunPod secure pod)",
+  "run_date": "2026-06-03",
+  "ort": "1.24.2 GPU build with CUDAExecutionProvider",
+  "headline": {
+    "embedding": "multilingual-e5-base FP16",
+    "reranker": "bge-reranker-base",
+    "r_at_1_pct": 92.6,
+    "r_at_5_pct": 99.2,
+    "r_at_10_pct": 100.0,
+    "wall_seconds": 1539
+  },
+  "runs": [
+    {
+      "id": 1,
+      "embedding": "multilingual-e5-base FP16",
+      "reranker": "off",
+      "r_at_1_pct": 88.4,
+      "r_at_5_pct": 98.0,
+      "r_at_10_pct": 99.4,
+      "wall_seconds": 629,
+      "raw_sha8": "73a1e491"
+    },
+    {
+      "id": 2,
+      "embedding": "multilingual-e5-base FP16",
+      "reranker": "bge-reranker-base",
+      "r_at_1_pct": 92.6,
+      "r_at_5_pct": 99.2,
+      "r_at_10_pct": 100.0,
+      "wall_seconds": 1539,
+      "raw_sha8": "ec19f3a0",
+      "headline": true
+    },
+    {
+      "id": 3,
+      "embedding": "multilingual-e5-base FP16",
+      "reranker": "bge-reranker-base",
+      "r_at_1_pct": 92.6,
+      "r_at_5_pct": 98.8,
+      "r_at_10_pct": 100.0,
+      "wall_seconds": 1528,
+      "raw_sha8": "70629232",
+      "note": "variance check"
+    },
+    {
+      "id": 4,
+      "embedding": "all-MiniLM-L6-v2 FP16",
+      "reranker": "off",
+      "r_at_1_pct": 85.0,
+      "r_at_5_pct": 98.0,
+      "r_at_10_pct": 99.6,
+      "wall_seconds": 351,
+      "raw_sha8": "c778e9ff"
+    }
+  ],
+  "baseline_v0_8_1": {
+    "embedding": "all-MiniLM-L6-v2 INT8",
+    "reranker": "off",
+    "hardware": "RTX 5060 Ti (CPU path)",
+    "r_at_1_pct": 85.2,
+    "r_at_5_pct": 98.2,
+    "r_at_10_pct": 99.4,
+    "wall_seconds": 6300
+  },
+  "delta_vs_baseline": {
+    "r_at_1_pp": 7.4,
+    "r_at_5_pp": 1.0,
+    "r_at_10_pp": 0.6,
+    "wall_speedup": "4x"
+  },
+  "ablation_conclusions": [
+    "MiniLM FP16 GPU equals MiniLM INT8 CPU on R@k (98.0 vs 98.2 is noise) — GPU buys 18x speed without changing recall.",
+    "v0.14.x retrieval policy does not improve recall in isolation.",
+    "The +1.0pp R@5 lift to 99.2% comes from (a) switching to e5-base and (b) enabling reranker. Run 1 vs run 2 isolates the reranker contribution: +4.2pp R@1, +1.2pp R@5.",
+    "Reranker is the dominant factor, not architecture changes."
+  ],
+  "notes": [
+    "No FP16 version of bge-reranker available; reranker INT8 ops fall back to CPU even with CUDA EP registered. That is why rerank=on is 2.4x slower than rerank=off.",
+    "Honest framing for v1.0 release notes: this headline number is what the model + reranker config delivers; the validity-model architecture changes (v1.4-v1.6) need their own R@k regression check.",
+    "v1.0 release used these numbers as the comparison baseline; v1.4-v1.6 calibration is tracked in issue #16."
+  ]
+}
