@@ -407,15 +407,254 @@ pub fn parse_response(raw: &str) -> Option<Vec<Triple>> {
     None
 }
 
-/// Extract S-P-O triples from a chunk of text.
+// ===== llama-server lifecycle =====
+
+use once_cell::sync::OnceCell;
+use std::process::{Child, Stdio};
+use std::sync::Mutex;
+use tokio::sync::Semaphore;
+
+/// Process-global handle to the llama-server subprocess. Started on
+/// first extraction call, kept alive for the lifetime of the warm
+/// mgimind process, shut down on Drop or explicit `shutdown_server()`.
+static LLAMA_SERVER: OnceCell<Mutex<Option<LlamaServerHandle>>> = OnceCell::new();
+
+/// Semaphore capping concurrent extractions to 1 — single
+/// llama-server can only process one request at a time, queueing on
+/// the client side prevents the tokio runtime from piling up
+/// background-blocking tasks during ingest bursts (critic R3).
+static EXTRACTION_SEMAPHORE: OnceCell<Semaphore> = OnceCell::new();
+
+pub(crate) struct LlamaServerHandle {
+    pub child: Child,
+    pub port: u16,
+    pub api_key: String,
+}
+
+impl Drop for LlamaServerHandle {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Path to the llama-server binary inside `$MGIMIND_HOME/bin/extractor/`.
+/// Step 5.4 install command places it there after downloading the
+/// Vulkan tarball.
+pub fn llama_server_path() -> PathBuf {
+    crate::config::mind_home()
+        .join("bin")
+        .join("extractor")
+        .join("llama-server")
+}
+
+/// Whether the llama-server binary is on disk and executable.
+pub fn is_llama_server_installed() -> bool {
+    llama_server_path().exists()
+}
+
+fn random_api_key() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::SystemTime;
+    let mut h = DefaultHasher::new();
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut h);
+    std::process::id().hash(&mut h);
+    format!("mgimind-extractor-{:x}", h.finish())
+}
+
+fn pick_port() -> u16 {
+    // Try-bind a TCP listener to ask the OS for a free port, then
+    // immediately drop the listener and let llama-server bind it.
+    // Brief race window between drop and bind is acceptable for a
+    // single-process local-only deployment.
+    use std::net::TcpListener;
+    TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .unwrap_or(8080)
+}
+
+/// Start the llama-server subprocess for the given variant. Returns
+/// the existing handle if a server is already running. Idempotent.
+async fn ensure_server(variant: ExtractorVariant) -> anyhow::Result<(u16, String)> {
+    let slot = LLAMA_SERVER.get_or_init(|| Mutex::new(None));
+    {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama-server mutex poisoned"))?;
+        if let Some(h) = guard.as_ref() {
+            return Ok((h.port, h.api_key.clone()));
+        }
+
+        // Cold start.
+        let server_path = llama_server_path();
+        if !server_path.exists() {
+            anyhow::bail!(
+                "extractor server binary missing: {} (run `mgimind extractor install`)",
+                server_path.display()
+            );
+        }
+        let gguf = gguf_path(variant);
+        if !gguf.exists() {
+            anyhow::bail!(
+                "extractor model missing: {} (run `mgimind extractor install`)",
+                gguf.display()
+            );
+        }
+        let port = pick_port();
+        let api_key = random_api_key();
+        let lib_dir = server_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let mut cmd = std::process::Command::new(&server_path);
+        cmd.arg("-m")
+            .arg(&gguf)
+            .arg("--host")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--api-key")
+            .arg(&api_key)
+            .arg("-ngl")
+            .arg("99")
+            .arg("--ctx-size")
+            .arg("4096")
+            .env("LD_LIBRARY_PATH", &lib_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let child = cmd
+            .spawn()
+            .context("failed to spawn llama-server subprocess")?;
+
+        *guard = Some(LlamaServerHandle {
+            child,
+            port,
+            api_key: api_key.clone(),
+        });
+
+        // Wait for server readiness — poll /health up to 30s.
+        let url = format!("http://127.0.0.1:{port}/health");
+        let client = reqwest::Client::new();
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok(resp) = client.get(&url).send().await {
+                if resp.status().is_success() {
+                    return Ok((port, api_key));
+                }
+            }
+        }
+        // Failed health check — shut down the subprocess.
+        *guard = None;
+        anyhow::bail!("llama-server failed to become ready within 30s");
+    }
+}
+
+/// Shut down the llama-server subprocess if running. Called by
+/// `mgimind extractor unload` and on warm-process shutdown.
+pub fn shutdown_server() {
+    let Some(slot) = LLAMA_SERVER.get() else { return };
+    let Ok(mut guard) = slot.lock() else { return };
+    *guard = None; // Drop runs kill+wait
+}
+
+/// Whether the server is currently running in this process.
+pub fn is_server_running() -> bool {
+    LLAMA_SERVER
+        .get()
+        .and_then(|s| s.lock().ok().map(|g| g.is_some()))
+        .unwrap_or(false)
+}
+
+// ===== Extraction =====
+
+#[derive(Debug, Serialize)]
+struct CompletionRequest<'a> {
+    prompt: &'a str,
+    temperature: f32,
+    n_predict: u32,
+    stream: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionResponse {
+    content: String,
+}
+
+/// Extract S-P-O triples from a chunk of text. Wraps the model call in
+/// the semaphore + retry-with-repair loop + hard timeout.
 ///
-/// **Scaffold note.** The subprocess + HTTP wiring lands in a follow-up
-/// commit. For now this is the contract the auto-ingest pipeline
-/// codes against.
-pub async fn extract_facts(_config: &ExtractConfig, _text: &str) -> anyhow::Result<Vec<Triple>> {
-    anyhow::bail!(
-        "extractor::extract_facts not yet wired — subprocess + HTTP land in the next commit on the Phase 5 branch"
-    )
+/// On success: returns a (possibly empty) list of triples. On failure
+/// after retry: returns an error and the caller is expected to log
+/// and drop the chunk — silent miss is better than poisoned graph.
+pub async fn extract_facts(
+    config: &ExtractConfig,
+    text: &str,
+) -> anyhow::Result<Vec<Triple>> {
+    let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
+    let _permit = sem.acquire().await?;
+
+    let (port, api_key) = ensure_server(config.variant).await?;
+    let prompt = build_prompt(text);
+
+    let first = call_completion(port, &api_key, &prompt, config).await;
+    if let Ok(raw) = first {
+        if let Some(triples) = parse_response(&raw) {
+            return Ok(triples);
+        }
+        // Retry with stricter wording — happens ~5-15% of the time
+        // per critic R2 on small models.
+        let strict_prompt = format!(
+            "{prompt}\n\nIMPORTANT: respond with a valid JSON array only. \
+             No prose, no markdown, no explanation. Just the array."
+        );
+        let second = call_completion(port, &api_key, &strict_prompt, config).await?;
+        return parse_response(&second).ok_or_else(|| {
+            anyhow::anyhow!("extractor returned non-JSON twice; dropping chunk")
+        });
+    }
+    first.map(|_| Vec::new())
+}
+
+async fn call_completion(
+    port: u16,
+    api_key: &str,
+    prompt: &str,
+    config: &ExtractConfig,
+) -> anyhow::Result<String> {
+    let url = format!("http://127.0.0.1:{port}/completion");
+    let body = CompletionRequest {
+        prompt,
+        temperature: config.temperature,
+        n_predict: config.max_tokens,
+        stream: false,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(config.timeout)
+        .build()
+        .context("build reqwest client")?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .context("POST /completion failed")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("llama-server returned {status}: {text}");
+    }
+    let body: CompletionResponse = resp.json().await.context("parse /completion response")?;
+    Ok(body.content)
 }
 
 // ===== Tests =====
