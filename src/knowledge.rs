@@ -144,6 +144,22 @@ pub async fn add_fact(
             .await
             .unwrap_or_else(|| now.clone());
 
+    // v1.4 Phase 0 step 3: cardinality-aware conflict detection.
+    // Look up the predicate's registered cardinality (default Multi when
+    // unregistered) and check the existing facts for this (subject,
+    // predicate) pair. If the cardinality admits conflict and an existing
+    // *different-object* fact is on record, flag this write as
+    // `conflict_pending`. The Phase 2 duel rule resolves the flag; for now
+    // the write still goes through, both facts stay live, and `mgimind
+    // doctor` surfaces the pending count.
+    let cardinality = get_cardinality(config, predicate).await?;
+    let conflict_pending = if cardinality.admits_conflict() {
+        let existing = find_facts_by_subject_predicate(config, subject, predicate).await?;
+        detect_conflict(&existing, object, cardinality)
+    } else {
+        false
+    };
+
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("subject".into(), subject.into());
     payload.insert("predicate".into(), predicate.into());
@@ -152,6 +168,9 @@ pub async fn add_fact(
     payload.insert("updated_at".into(), now.into());
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
+    if conflict_pending {
+        payload.insert("conflict_pending".into(), "true".into());
+    }
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
@@ -258,6 +277,233 @@ pub async fn invalidate_fact(config: &MindConfig, id: &str) -> Result<()> {
         .context("Failed to invalidate fact")?;
 
     Ok(())
+}
+
+// ===== v1.4 Phase 0 step 3: cardinality registry + conflict events =====
+
+/// Deterministic ID for a predicate registry entry. Stable across re-registration.
+fn predicate_id(predicate: &str) -> String {
+    let key = format!("__pred__\u{0}{predicate}");
+    Uuid::new_v5(&FACT_NAMESPACE, key.as_bytes()).to_string()
+}
+
+/// Register or update the cardinality of a predicate.
+///
+/// Idempotent: re-registering the same predicate with the same cardinality
+/// is a no-op upsert. Changing the cardinality of an already-registered
+/// predicate is allowed but logged — it affects how future writes resolve
+/// conflicts, and the Phase 2 duel rule treats this as a config change,
+/// not a data change.
+pub async fn register_cardinality(
+    config: &MindConfig,
+    predicate: &str,
+    cardinality: Cardinality,
+) -> Result<()> {
+    let client = storage::get_client(config).await?;
+    ensure_predicates_collection(&client).await?;
+
+    let id = predicate_id(predicate);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("predicate".into(), predicate.into());
+    payload.insert(
+        "cardinality".into(),
+        match cardinality {
+            Cardinality::Single => "single",
+            Cardinality::TemporalSingle => "temporal-single",
+            Cardinality::Multi => "multi",
+        }
+        .into(),
+    );
+    payload.insert("updated_at".into(), now.into());
+
+    let point = PointStruct::new(id, NamedVectors::default(), payload);
+    client
+        .upsert_points(
+            UpsertPointsBuilder::new(storage::PREDICATES_COLLECTION, vec![point]).wait(true),
+        )
+        .await
+        .context("Failed to register predicate cardinality")?;
+    Ok(())
+}
+
+/// Look up the cardinality of a predicate. Returns `Multi` for any predicate
+/// not registered — safe default per §4 (better to keep both honest facts
+/// than to fire a false duel between coexisting truths).
+pub async fn get_cardinality(config: &MindConfig, predicate: &str) -> Result<Cardinality> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::PREDICATES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Cardinality::Multi);
+    }
+
+    let id = predicate_id(predicate);
+    let s = storage::existing_payload_string(
+        &client,
+        storage::PREDICATES_COLLECTION,
+        &id,
+        "cardinality",
+    )
+    .await;
+    Ok(s.and_then(|s| Cardinality::parse(&s)).unwrap_or(Cardinality::Multi))
+}
+
+/// List all registered predicate cardinalities. Newest first by
+/// `updated_at`. Used by `mgimind doctor` and `mind_predicate(action="list")`.
+pub async fn list_cardinalities(config: &MindConfig) -> Result<Vec<(String, Cardinality)>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::PREDICATES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::PREDICATES_COLLECTION)
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            let predicate = extract_string(p, "predicate").unwrap_or_default();
+            let card = extract_string(p, "cardinality")
+                .and_then(|s| Cardinality::parse(&s))
+                .unwrap_or(Cardinality::Multi);
+            out.push((predicate, card));
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+pub async fn ensure_predicates_collection(
+    client: &qdrant_client::Qdrant,
+) -> Result<()> {
+    if !client
+        .collection_exists(storage::PREDICATES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        storage::create_vectorless_collection(client, storage::PREDICATES_COLLECTION).await?;
+    }
+    Ok(())
+}
+
+/// Find all *valid* facts already on record for a given `(subject, predicate)`
+/// pair. Used by `add_fact` to decide whether a new triple opens a duel
+/// (Phase 2) or coexists peacefully (Multi cardinality, or first write).
+///
+/// Server-side filter: `valid = true` AND `subject = ...` AND `predicate = ...`.
+/// Exact match, not full-text — the duel-rule signal must not fire on
+/// fuzzy term overlap.
+pub async fn find_facts_by_subject_predicate(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![
+            Condition::matches("valid", "true".to_string()),
+            Condition::matches("subject", subject.to_string()),
+            Condition::matches("predicate", predicate.to_string()),
+        ],
+        ..Default::default()
+    };
+
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(64)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            let id = point
+                .id
+                .as_ref()
+                .map(|pid| {
+                    use qdrant_client::qdrant::point_id::PointIdOptions;
+                    match &pid.point_id_options {
+                        Some(PointIdOptions::Uuid(u)) => u.clone(),
+                        Some(PointIdOptions::Num(n)) => n.to_string(),
+                        None => "unknown".to_string(),
+                    }
+                })
+                .unwrap_or_default();
+            facts.push(Fact {
+                id,
+                subject: extract_string(p, "subject").unwrap_or_default(),
+                predicate: extract_string(p, "predicate").unwrap_or_default(),
+                object: extract_string(p, "object").unwrap_or_default(),
+                created_at: extract_string(p, "created_at"),
+                valid: true,
+            });
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(facts)
+}
+
+/// Count facts currently flagged as having an unresolved conflict event.
+/// Phase 0: this is just a count surfaced by `mgimind doctor` so the user
+/// sees the volume of pending duels. Phase 2 wires the actual resolution.
+pub async fn count_pending_conflicts(config: &MindConfig) -> Result<u64> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(0);
+    }
+
+    let filter = Filter {
+        must: vec![
+            Condition::matches("valid", "true".to_string()),
+            Condition::matches("conflict_pending", "true".to_string()),
+        ],
+        ..Default::default()
+    };
+
+    let response = client
+        .count(
+            qdrant_client::qdrant::CountPointsBuilder::new(storage::FACTS_COLLECTION)
+                .filter(filter)
+                .exact(true),
+        )
+        .await?;
+    Ok(response.result.map(|r| r.count).unwrap_or(0))
 }
 
 // ===== v1.4 Phase 0: cardinality + conflict detector =====
@@ -376,5 +622,35 @@ mod tests {
         // First write of any kind is `New`, not a duel.
         assert!(!detect_conflict(&[], "Go", Cardinality::Single));
         assert!(!detect_conflict(&[], "Go", Cardinality::Multi));
+    }
+
+    #[test]
+    fn predicate_id_is_deterministic_and_predicate_scoped() {
+        // Same predicate → same UUID across calls (idempotent registration).
+        // Different predicate → different UUID (no collisions in registry).
+        // The id is a UUIDv5, so format is verifiable.
+        let a = predicate_id("primary_language");
+        let b = predicate_id("primary_language");
+        let c = predicate_id("uses_language");
+        assert_eq!(a, b, "same predicate must map to the same id");
+        assert_ne!(
+            a, c,
+            "different predicate must map to different ids — no collisions in the cardinality registry"
+        );
+        assert!(uuid::Uuid::parse_str(&a).is_ok());
+    }
+
+    #[test]
+    fn predicate_id_isolates_predicate_from_fact_namespace() {
+        // The predicate registry uses the same FACT_NAMESPACE but with a
+        // distinct "__pred__\0<predicate>" key. A predicate id must not
+        // collide with a fact id even if a fact happens to involve the
+        // predicate name as subject/object — the keying makes that
+        // structurally impossible. Probe a few adversarial shapes.
+        let pred_id = predicate_id("primary_language");
+        let fact_id_a = fact_id("primary_language", "primary_language", "primary_language");
+        let fact_id_b = fact_id("", "primary_language", "");
+        assert_ne!(pred_id, fact_id_a);
+        assert_ne!(pred_id, fact_id_b);
     }
 }
