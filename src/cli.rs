@@ -195,6 +195,25 @@ pub enum Commands {
         what: ConfigCmd,
     },
 
+    /// v1.5 Phase 7: record a typed external-signal outcome on any
+    /// memory. Closes the CLI gap — `mind_outcome` was MCP-only
+    /// before. Useful for debugging guardrail / confidence_score
+    /// behaviour from a terminal.
+    Outcome {
+        /// Target memory id.
+        memory_id: String,
+        /// Signal type: test_passed | code_compiled | user_confirmed | cited_by.
+        signal_type: String,
+        /// Whether the signal was positive (default true) or negative.
+        #[arg(long, default_value_t = true, value_name = "BOOL")]
+        success: bool,
+        /// Stable source identifier used for idempotency (default
+        /// `cli` so the dedup key is well-defined; pass a meaningful
+        /// value like `ci.github.com/run/N` or `user-mad` in real use).
+        #[arg(long, default_value = "cli")]
+        source: String,
+    },
+
     /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
     /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
     Bench {
@@ -584,6 +603,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
         Commands::Config { what } => cmd_config(what).await,
+        Commands::Outcome {
+            memory_id,
+            signal_type,
+            success,
+            source,
+        } => cmd_outcome(&memory_id, &signal_type, success, &source).await,
         Commands::MigrateV14 { what } => match what {
             MigrateV14Cmd::Dependants { threshold, apply } => {
                 cmd_migrate_v14_dependants(threshold, apply).await
@@ -2184,6 +2209,35 @@ async fn cmd_config_install_mode_set(mode_str: &str) -> Result<()> {
         old.as_str(),
         new_mode.as_str()
     );
+    Ok(())
+}
+
+// ===== v1.5 Phase 7 + v1.6.1: outcome command handler =====
+
+async fn cmd_outcome(
+    memory_id: &str,
+    signal_type_str: &str,
+    success: bool,
+    source: &str,
+) -> Result<()> {
+    let signal_type =
+        crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown signal_type '{signal_type_str}' — expected one of: \
+                 test_passed, code_compiled, user_confirmed, cited_by"
+            )
+        })?;
+    let cfg = crate::config::MindConfig::load().with_context(|| {
+        "config not initialised — run `mgimind init` first".to_string()
+    })?;
+    let signal = crate::outcome::ExternalSignal {
+        signal_type,
+        success,
+        source: source.to_string(),
+        ts: chrono::Utc::now().to_rfc3339(),
+    };
+    let summary = crate::outcome::record(&cfg, memory_id, signal).await?;
+    println!("{summary}");
     Ok(())
 }
 
