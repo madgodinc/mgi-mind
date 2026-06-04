@@ -225,6 +225,95 @@ impl DoubtState {
     }
 }
 
+// ===== Retrieval-triggered doubt window (Phase 3 step 2) =====
+//
+// The state machine in `apply_retrieval_event` is pure; persisting the
+// counter is the side effect. Each fact carries a payload field
+// `doubt_drift_count` with the running count of drifted retrievals
+// since the last non-drifted one. When the counter crosses
+// DOUBT_WINDOW_N_RETRIEVALS the fact enters the doubt window — its
+// confidence is halved by the ranking layer until a fresh non-drifted
+// retrieval resets the counter.
+//
+// This function runs the full cycle: read prior count, apply event,
+// write back. It is the wrapper the Phase 4 ranking layer calls when
+// it surfaces a high-entrenchment fact.
+//
+// **Cost.** One payload read + one payload write per retrieval of a
+// high-entrenchment fact. Phase 4 caches the resulting DoubtState in
+// the per-fact `confidence_score` so the ranking hot path does not
+// re-run the cycle on every search.
+
+use anyhow::Result;
+
+use crate::config::MindConfig;
+
+/// Run the retrieval-triggered doubt-window cycle against a single
+/// fact and persist the new counter.
+///
+/// `fact_id` — the fact that the ranking layer just surfaced.
+/// `drifted` — whether the surrounding context drifted from the
+/// fact's origin context (computed by the caller via
+/// `is_context_drifted`).
+///
+/// Returns the new DoubtState. The ranking layer multiplies the
+/// fact's confidence by `state.confidence_multiplier()` before
+/// final ordering.
+pub async fn apply_doubt_check_to_fact(
+    config: &MindConfig,
+    fact_id: &str,
+    drifted: bool,
+) -> Result<DoubtState> {
+    let prior = read_doubt_count(config, fact_id).await;
+    let (new_count, state) = apply_retrieval_event(prior, drifted);
+    if new_count != prior {
+        write_doubt_count(config, fact_id, new_count).await?;
+    }
+    Ok(state)
+}
+
+async fn read_doubt_count(config: &MindConfig, fact_id: &str) -> u32 {
+    let Ok(client) = crate::storage::get_client(config).await else {
+        return 0;
+    };
+    crate::storage::existing_payload_string(
+        &client,
+        crate::storage::FACTS_COLLECTION,
+        fact_id,
+        "doubt_drift_count",
+    )
+    .await
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0u32)
+}
+
+async fn write_doubt_count(config: &MindConfig, fact_id: &str, count: u32) -> Result<()> {
+    // Phase 3 carries its own payload-setter rather than depending on
+    // the Phase 1 helper (set_fact_payload_field), because the two
+    // branches are developed in parallel and merge order is not yet
+    // fixed. When Phase 1 lands the duplicate helper can be replaced
+    // by a delegate call.
+    use std::collections::HashMap;
+    let client = crate::storage::get_client(config).await?;
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("doubt_drift_count".into(), count.to_string().into());
+    let point_id: qdrant_client::qdrant::PointId = fact_id.to_string().into();
+    client
+        .set_payload(
+            qdrant_client::qdrant::SetPayloadPointsBuilder::new(
+                crate::storage::FACTS_COLLECTION,
+                payload,
+            )
+            .points_selector(qdrant_client::qdrant::PointsIdsList {
+                ids: vec![point_id],
+            })
+            .wait(true),
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
 // ===== Inheritance flag — per-process registry =====
 //
 // Synthesis §3 mechanism 3: facts entering a session from memory
