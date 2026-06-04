@@ -95,6 +95,14 @@ pub enum EntryStatus {
     Stale,
     PropagationShadowed,
     Unknown,
+    /// Post-critic addition (PR #5 round 2): the duel rule rejected a
+    /// weak challenger and moved it to candidate state. Distinct from
+    /// `Contested` (both stay live, awaiting fresh observations) — a
+    /// QuarantineCandidate is *waiting for promote-on-repeat*. Phase 4
+    /// STALE bench reads this to distinguish "correctly rejected weak
+    /// fact" from "live contested both visible" — collapsing them was
+    /// the architectural hole the critic flagged.
+    QuarantineCandidate,
 }
 
 impl Default for EntryStatus {
@@ -113,6 +121,7 @@ impl EntryStatus {
             EntryStatus::Stale => "stale",
             EntryStatus::PropagationShadowed => "propagation_shadowed",
             EntryStatus::Unknown => "unknown",
+            EntryStatus::QuarantineCandidate => "quarantine_candidate",
         }
     }
 
@@ -126,6 +135,9 @@ impl EntryStatus {
                 Some(EntryStatus::PropagationShadowed)
             }
             "unknown" => Some(EntryStatus::Unknown),
+            "quarantine_candidate" | "quarantine-candidate" | "candidate" => {
+                Some(EntryStatus::QuarantineCandidate)
+            }
             _ => None,
         }
     }
@@ -268,14 +280,15 @@ pub async fn add_fact(
             crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
             crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
             // Quarantine: the duel says the fresh fact is too weak to
-            // unseat the entrenched one. Phase 0 already records the
-            // Contested status as the diagnostic flag; for Phase 2 we
-            // keep that semantic (the fact still goes into the store,
-            // surfaced by `mgimind doctor` and by mind_quarantine_show)
-            // until the existing v0.11 quarantine layer is wired into
-            // the fact path. That's a Phase 2 step 2.3 follow-up;
-            // contested-as-quarantine is the conservative interim.
-            crate::duel::DuelOutcome::Quarantine => (EntryStatus::Contested, None),
+            // unseat the entrenched one. Post-critic (round 2): use the
+            // dedicated EntryStatus::QuarantineCandidate to distinguish
+            // "weak rejected, waiting promote-on-repeat" from "live
+            // contested both visible." Earlier interim collapsed both
+            // to Contested, which prevented STALE bench from measuring
+            // the difference.
+            crate::duel::DuelOutcome::Quarantine => {
+                (EntryStatus::QuarantineCandidate, None)
+            }
         }
     } else {
         (EntryStatus::Active, None)
