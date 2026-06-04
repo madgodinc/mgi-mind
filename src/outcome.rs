@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+// OutcomeSignal::ALL is the closed enumeration of valid signal_types for
+// schema validation messages and CLI help. Surfaced for callers; the parse
+// path reaches it transitively.
+
 //! v1.5 Phase 7 — generalised external-signal model.
 //!
 //! Replaces the v1.4 `external_signals: Vec<String>` payload (where

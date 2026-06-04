@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+// AccessAction::reason() is the diagnostics surface for the relevance gate;
+// `mgimind doctor` and a future viewer call it. Hot path uses the boolean
+// gate without reading the reason string.
+
 //! Relevance gate for ingest candidates (phase Д2, v0.11).
 //!
 //! The auto-ingest path (`mind_ingest`) needs a heuristic filter that catches

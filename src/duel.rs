@@ -1,3 +1,9 @@
+#![allow(dead_code)]
+// v1.5 calibration scaffolding: WEIGHT_CONFIRMATIONS / WEIGHT_EXTERNAL_SIGNAL
+// stay declared because Phase 4 calibration sweeps grep them as the discoverable
+// tunables. weight_new + diversity_weighted_count are the public formula surface
+// downstream callers (relevance.rs ranking layer) wire in v1.6.
+
 //! v1.4 Phase 2: the duel rule.
 //!
 //! When a fresh fact `F_new` contradicts an existing `F_old` along the

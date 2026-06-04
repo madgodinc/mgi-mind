@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+// print_plan is the debug helper for `mgimind md-reconcile --plan-only`.
+// Public for downstream tooling; production CLI calls a different exporter.
+
 //! Markdown reconcile import — the escape hatch for hand-editing memories.
 //!
 //! mgi-mind is automated memory. Qdrant is the source of truth. The store

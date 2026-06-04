@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+// InstallMode::ALL is kept as the CLI enumeration of valid modes for
+// `mgimind config install-mode --help`. Auto-detect routes use it
+// transitively; production code reaches it via parse/default.
+
 //! v1.5 Phase 6 — install-mode profile.
 //!
 //! Three install profiles select different anchors for the

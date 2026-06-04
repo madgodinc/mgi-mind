@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+// RecoveredSession.agent + ZombieReport.session_path are surfaced for callers
+// (doctor output, zombie cleanup CLI). Lib-side production reads `path` only.
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::fs;

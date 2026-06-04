@@ -1,3 +1,9 @@
+#![allow(dead_code)]
+// EXTRACTOR_*_Q4_K_M + LLAMA_CPP_* + QDRANT_* are surfaced as `pub const` so
+// a CI integrity check (separate from the runtime download path) can reference
+// them. Phase 5 extractor uses a subset; the rest exists for future audit /
+// multi-platform builds.
+
 //! Pinned SHA-256 checksums for downloaded runtime artifacts (audit #6).
 //!
 //! `util::download_file` verifies fail-closed against these. Artifacts without a
