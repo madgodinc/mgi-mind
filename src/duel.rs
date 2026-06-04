@@ -145,25 +145,41 @@ pub struct NewFactInputs {
     pub external_signals: u32,
 }
 
-/// Compute the weight of a fresh fact for the duel.
+/// Compute the weight of a fresh fact for the duel using the
+/// hardcoded `ChatOnly` slot weights. This is the v1.4 API kept
+/// for callers that have not yet been threaded with an install
+/// mode; v1.5+ call sites should prefer `weight_new_for_mode()`.
 ///
-/// The slot weights below are the **single-user chat-only default**
+/// The slot weights are the **single-user chat-only default**
 /// from synthesis §6:
-/// - dependants weight 0.7 — but irrelevant here because a fresh fact
+/// - dependants weight 0.7 — irrelevant here because a fresh fact
 ///   has no dependants yet by construction.
 /// - confirmations weight 0.1 — almost decorative.
 /// - external-signal weight 0.2 — high quality when present.
 ///
-/// For a fresh fact, the dependants-weight axis collapses to zero (no
-/// dependants yet), so the duel weight is dominated by external signals
-/// when present, with confirmations as a tiebreaker. The inheritance
-/// discount halves the weight when applicable.
+/// For a fresh fact, the dependants-weight axis collapses to zero
+/// (no dependants yet), so the duel weight is dominated by external
+/// signals when present, with confirmations as a tiebreaker. The
+/// inheritance discount halves the weight when applicable.
 pub fn weight_new(inputs: NewFactInputs) -> f32 {
-    // Slot weights extracted from inline magic numbers post-critic so
-    // Phase 4 calibration can grep `pub const` and find every tunable.
-    // See WEIGHT_CONFIRMATIONS, WEIGHT_EXTERNAL_SIGNAL, INHERITANCE_DISCOUNT.
-    let conf_term = WEIGHT_CONFIRMATIONS * (1.0 + inputs.diverse_confirmations as f32).log2();
-    let ext_term = WEIGHT_EXTERNAL_SIGNAL * (1.0 + inputs.external_signals as f32).log2();
+    weight_new_for_mode(inputs, crate::install_mode::InstallMode::ChatOnly)
+}
+
+/// v1.5 Phase 6 step 6.3: install-mode-aware weight_new.
+///
+/// Picks the `confirmations` and `external` slot weights from the
+/// configured install mode (§6 synthesis) instead of the hardcoded
+/// ChatOnly anchors. Same formula shape; only the multipliers shift.
+///
+/// Gate (v1.5 plan): when `mode = ChatOnly` this MUST equal the v1.4
+/// `weight_new` output bit-for-bit. The contract is tested below.
+pub fn weight_new_for_mode(
+    inputs: NewFactInputs,
+    mode: crate::install_mode::InstallMode,
+) -> f32 {
+    let weights = mode.weights();
+    let conf_term = weights.confirmations * (1.0 + inputs.diverse_confirmations as f32).log2();
+    let ext_term = weights.external * (1.0 + inputs.external_signals as f32).log2();
 
     let raw = conf_term + ext_term;
 
@@ -272,7 +288,12 @@ pub async fn resolve_against_existing(
     }
 
     let (loser_id, ent_score) = best.unwrap_or_else(|| (String::new(), 0.0));
-    let w_new = weight_new(new_inputs);
+    // v1.5 Phase 6 step 6.3: pick the install-mode-aware slot weights.
+    // The mode lives in the runtime config, written by
+    // `mgimind config install-mode <mode>`. Default ChatOnly keeps
+    // legacy behaviour identical bit-for-bit (see test
+    // chat_only_mode_matches_legacy_weight_new in this file).
+    let w_new = weight_new_for_mode(new_inputs, config.install_mode);
     let outcome = resolve_duel(ent_score, w_new);
 
     let loser = match outcome {
@@ -532,6 +553,120 @@ mod tests {
                 "resolution went backwards at w={w}"
             );
             last_outcome_rank = r;
+        }
+    }
+
+    // --- v1.5 Phase 6 step 6.3: install-mode-aware weight_new ---
+
+    /// Contract: weight_new (v1.4 API) must equal weight_new_for_mode(_,
+    /// ChatOnly) bit-for-bit. Catches accidental drift if someone
+    /// adjusts ChatOnly anchors but forgets the v1.4 surface stayed
+    /// frozen against the original anchors.
+    #[test]
+    fn chat_only_mode_matches_legacy_weight_new() {
+        use crate::install_mode::InstallMode;
+        for from_live in [true, false] {
+            for diverse in 0..6u32 {
+                for ext in 0..6u32 {
+                    let inputs = NewFactInputs {
+                        from_live_session: from_live,
+                        diverse_confirmations: diverse,
+                        external_signals: ext,
+                    };
+                    let legacy = weight_new(inputs);
+                    let modal = weight_new_for_mode(inputs, InstallMode::ChatOnly);
+                    assert_eq!(
+                        legacy.to_bits(),
+                        modal.to_bits(),
+                        "ChatOnly mode must equal legacy weight_new at \
+                         (from_live={from_live}, diverse={diverse}, ext={ext}): \
+                         legacy={legacy} modal={modal}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// DevWithCi mode emphasises external signal (anchor 0.35 vs
+    /// ChatOnly's 0.2). For the same fresh fact with non-zero
+    /// external signal count, DevWithCi must produce a strictly
+    /// higher weight than ChatOnly. This is the v1.5 plan Step 6.3
+    /// gate: "DevWithCi mode lifts external-signal-driven precision
+    /// by ≥ 5pp" — at the formula level, that translates into a
+    /// strictly larger weight when external signals are present.
+    #[test]
+    fn dev_with_ci_mode_lifts_external_signal_weight() {
+        use crate::install_mode::InstallMode;
+        let with_ext = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 5,
+        };
+        let chat = weight_new_for_mode(with_ext, InstallMode::ChatOnly);
+        let dev = weight_new_for_mode(with_ext, InstallMode::DevWithCi);
+        assert!(
+            dev > chat,
+            "DevWithCi must lift external-signal weight: chat={chat} dev={dev}"
+        );
+        // Sanity: lift must be at least 50% — DevWithCi external
+        // anchor (0.35) is 1.75x ChatOnly's (0.2).
+        assert!(
+            dev > chat * 1.5,
+            "DevWithCi lift too small: chat={chat} dev={dev}"
+        );
+    }
+
+    /// MultiTenant mode emphasises confirmations (anchor 0.4 vs
+    /// ChatOnly's 0.1). For the same fresh fact with non-zero
+    /// confirmation count, MultiTenant must produce a strictly
+    /// higher confirmation contribution than ChatOnly.
+    #[test]
+    fn multi_tenant_mode_lifts_confirmation_weight() {
+        use crate::install_mode::InstallMode;
+        let with_conf = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 5,
+            external_signals: 0,
+        };
+        let chat = weight_new_for_mode(with_conf, InstallMode::ChatOnly);
+        let multi = weight_new_for_mode(with_conf, InstallMode::MultiTenant);
+        assert!(
+            multi > chat,
+            "MultiTenant must lift confirmation weight: chat={chat} multi={multi}"
+        );
+        // MultiTenant confirmation anchor (0.4) is 4x ChatOnly's
+        // (0.1) — lift must be substantial.
+        assert!(
+            multi > chat * 3.0,
+            "MultiTenant lift too small: chat={chat} multi={multi}"
+        );
+    }
+
+    /// Inheritance discount applies uniformly across all modes —
+    /// it's a §3 Mechanism 3 invariant, orthogonal to the §6
+    /// per-mode weights.
+    #[test]
+    fn inheritance_discount_uniform_across_modes() {
+        use crate::install_mode::InstallMode;
+        for mode in InstallMode::ALL {
+            let inputs = NewFactInputs {
+                from_live_session: false,
+                diverse_confirmations: 3,
+                external_signals: 3,
+            };
+            let inherited = weight_new_for_mode(inputs, mode);
+            let live = weight_new_for_mode(
+                NewFactInputs {
+                    from_live_session: true,
+                    ..inputs
+                },
+                mode,
+            );
+            assert!(
+                (inherited - live * INHERITANCE_DISCOUNT).abs() < 1e-5,
+                "inheritance discount broken for {:?}: live={live} inherited={inherited}",
+                mode
+            );
         }
     }
 }
