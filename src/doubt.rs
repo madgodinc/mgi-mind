@@ -578,6 +578,100 @@ pub fn doubt_window_flag_count() -> usize {
     DOUBT_WINDOW_FLAGGED.lock().len()
 }
 
+/// v1.5 Phase 8 step 8.1A: drain up to `max` flagged ids from
+/// the registry, returning them sorted (deterministic for tests).
+/// Used by `select_retest_candidates` to feed the background loop's
+/// per-tick work queue. Drained ids are removed from the registry —
+/// the caller takes responsibility for applying the doubt-window
+/// state transition or re-flagging on failure.
+pub fn drain_doubt_window_flags(max: usize) -> Vec<String> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let mut guard = DOUBT_WINDOW_FLAGGED.lock();
+    // Sort the full registry first, THEN take `max`. HashSet iteration
+    // order is unstable, so `iter().take(max)` without a prior sort
+    // would return a non-deterministic subset and the drain would
+    // pick different ids on each call.
+    let mut all: Vec<String> = guard.iter().cloned().collect();
+    all.sort();
+    let out: Vec<String> = all.into_iter().take(max).collect();
+    for id in &out {
+        guard.remove(id);
+    }
+    out
+}
+
+/// v1.5 Phase 8 step 8.1A: choose up to `cap` fact ids for the
+/// next background re-test tick.
+///
+/// Priority order:
+///   1. Drain DOUBT_WINDOW_FLAGGED — these are facts the Phase 7
+///      error-rate guardrail explicitly forced into the queue.
+///      They are the highest-priority candidates because they have
+///      external evidence of being wrong.
+///   2. Top up with the highest-`dependants_count` facts from the
+///      base. Load-bearing facts are checked more aggressively
+///      because their incorrectness has the largest blast radius.
+///
+/// **Hard-fail invariant (guarantee b from §10 q5):**
+/// `assert!(result.len() <= cap)` — the cap is enforced; the loop
+/// will panic if a future refactor breaks it. Better to crash the
+/// background task (auto-restarted by the loop's outer scheduling)
+/// than to silently scan unbounded work and starve the MCP path.
+///
+/// Returns an empty vec on any Qdrant fetch error — the loop is
+/// best-effort; tick failures should not crash the server.
+pub async fn select_retest_candidates(
+    config: &crate::config::MindConfig,
+    cap: usize,
+) -> Vec<String> {
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    // Priority 1: flagged ids drained from Phase 7 guardrail registry.
+    let mut out: Vec<String> = drain_doubt_window_flags(cap);
+    if out.len() >= cap {
+        debug_assert!(out.len() <= cap, "drain returned more than cap");
+        out.truncate(cap);
+        return out;
+    }
+
+    // Priority 2: top up with high-dependants facts. Skip if Qdrant
+    // is unreachable — better to do less work this tick than to
+    // crash the loop.
+    let remaining = cap - out.len();
+    let top = match crate::knowledge::list_top_dependants_facts(config, remaining).await {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            tracing::debug!("select_retest_candidates: list_top_dependants_facts failed: {e}");
+            return out;
+        }
+    };
+
+    // Avoid duplicating ids already drained from the flag registry —
+    // those got priority 1 treatment and don't need a second pass.
+    let already: std::collections::HashSet<String> = out.iter().cloned().collect();
+    for (id, _dep) in top {
+        if !already.contains(&id) {
+            out.push(id);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+
+    // Hard-fail invariant — guarantee (b) from v1.5 plan Step 8.1.
+    assert!(
+        out.len() <= cap,
+        "select_retest_candidates returned {} > cap {}",
+        out.len(),
+        cap,
+    );
+    out
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
@@ -818,5 +912,45 @@ mod tests {
         record_edit();
         assert_eq!(take_edit_count(), 3);
         assert_eq!(take_edit_count(), 0, "swap should leave the counter at zero");
+    }
+
+    // --- v1.5 Phase 8 step 8.1A: drain + per-tick cap ---
+
+    /// drain returns sorted ids up to `max`, and the registry is
+    /// emptied of those ids (not the rest if `max` < count).
+    #[test]
+    fn drain_returns_sorted_subset_and_clears_them() {
+        clear_all_doubt_window_flags();
+        for id in ["c-fact", "a-fact", "b-fact", "d-fact"] {
+            flag_for_doubt_window(id);
+        }
+        let drained = drain_doubt_window_flags(2);
+        assert_eq!(drained, vec!["a-fact".to_string(), "b-fact".to_string()]);
+        assert_eq!(doubt_window_flag_count(), 2, "two unflagged should remain");
+        clear_all_doubt_window_flags(); // tidy up for sibling tests
+    }
+
+    /// `drain(0)` is a no-op even when the registry has entries —
+    /// catches a misuse where the cap is computed as zero.
+    #[test]
+    fn drain_zero_returns_empty_and_keeps_flags() {
+        clear_all_doubt_window_flags();
+        flag_for_doubt_window("kept");
+        let drained = drain_doubt_window_flags(0);
+        assert!(drained.is_empty());
+        assert_eq!(doubt_window_flag_count(), 1, "flag must not be drained");
+        clear_all_doubt_window_flags();
+    }
+
+    /// `drain(huge)` returns every flag without panicking.
+    #[test]
+    fn drain_larger_than_count_returns_all() {
+        clear_all_doubt_window_flags();
+        for i in 0..5 {
+            flag_for_doubt_window(&format!("fact-{i}"));
+        }
+        let drained = drain_doubt_window_flags(100);
+        assert_eq!(drained.len(), 5);
+        assert_eq!(doubt_window_flag_count(), 0);
     }
 }
