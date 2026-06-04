@@ -389,6 +389,25 @@ pub enum ExtractorCmd {
         #[arg(long, default_value = "default")]
         variant: String,
     },
+    /// v1.5 retroactive backfill: walk every memory in `library`,
+    /// extract triples, write them into the facts collection. Uses
+    /// the same in-process llama-server (one warm load), so 10k+
+    /// memories complete in minutes instead of hours. Prints progress
+    /// every 100 memories and a final stats line.
+    BatchFromLibrary {
+        /// Source library name (e.g. `projects`).
+        library: String,
+        /// Variant to load.
+        #[arg(long, default_value = "default")]
+        variant: String,
+        /// Stop after N memories — handy for staged runs. 0 = all.
+        #[arg(long, default_value = "0")]
+        limit: usize,
+        /// Dry run — extract but do NOT write triples into the facts
+        /// collection. Prints the same stats so you can size the run.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2222,5 +2241,117 @@ async fn cmd_extractor(what: ExtractorCmd) -> Result<()> {
             }
             Ok(())
         }
+        ExtractorCmd::BatchFromLibrary {
+            library,
+            variant,
+            limit,
+            dry_run,
+        } => cmd_extractor_batch_from_library(&library, &variant, limit, dry_run).await,
     }
+}
+
+#[cfg(feature = "extractor")]
+async fn cmd_extractor_batch_from_library(
+    library: &str,
+    variant: &str,
+    limit: usize,
+    dry_run: bool,
+) -> Result<()> {
+    let v = crate::extractor::ExtractorVariant::parse(variant)
+        .ok_or_else(|| anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)"))?;
+    let extract_cfg = crate::extractor::ExtractConfig {
+        variant: v,
+        ..crate::extractor::ExtractConfig::default()
+    };
+    let mind_cfg = crate::config::load_cached()?;
+
+    eprintln!(
+        "v1.5 batch extraction from library `{library}` (variant: {variant}, dry_run: {dry_run})"
+    );
+    // Pull every memory in the library. The current `list_memories`
+    // API takes a hard limit; pass 100k so we cover Mad's ~12k base
+    // without paging logic. For libraries above that, ship a paged
+    // version in v1.6.
+    let scan_cap = if limit == 0 { 100_000 } else { limit };
+    let memories = crate::storage::list_memories(&mind_cfg, library, scan_cap).await?;
+    eprintln!("loaded {} memories from library", memories.len());
+
+    let mut processed = 0usize;
+    let mut produced_triples = 0usize;
+    let mut written = 0usize;
+    let mut empty_outputs = 0usize;
+    let mut errors = 0usize;
+    let total = memories.len();
+
+    for (i, mem) in memories.into_iter().enumerate() {
+        if limit > 0 && i >= limit {
+            break;
+        }
+
+        let triples = match crate::extractor::extract_facts(&extract_cfg, &mem.content).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("memory {}: extraction error: {e}", mem.id);
+                errors += 1;
+                processed += 1;
+                continue;
+            }
+        };
+
+        if triples.is_empty() {
+            empty_outputs += 1;
+        } else {
+            produced_triples += triples.len();
+            if !dry_run {
+                for t in &triples {
+                    match crate::knowledge::add_fact(
+                        &mind_cfg,
+                        &t.subject,
+                        &t.predicate,
+                        &t.object,
+                    )
+                    .await
+                    {
+                        Ok(_) => written += 1,
+                        Err(e) => {
+                            eprintln!(
+                                "memory {}: add_fact (`{}` `{}` `{}`) failed: {e}",
+                                mem.id, t.subject, t.predicate, t.object
+                            );
+                            errors += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        processed += 1;
+
+        if processed.is_multiple_of(100) {
+            eprintln!(
+                "progress: {processed}/{total} memories, {produced_triples} triples produced, \
+                 {written} facts written, {empty_outputs} empty, {errors} errors"
+            );
+        }
+    }
+
+    eprintln!("\n=== batch extraction summary ===");
+    eprintln!("memories processed     : {processed}");
+    eprintln!("triples produced       : {produced_triples}");
+    eprintln!("facts written          : {written}");
+    eprintln!("memories with no output: {empty_outputs}");
+    eprintln!("errors                 : {errors}");
+    eprintln!(
+        "avg triples / memory   : {:.2}",
+        if processed == 0 {
+            0.0
+        } else {
+            produced_triples as f64 / processed as f64
+        }
+    );
+
+    if dry_run {
+        eprintln!("\n(dry_run: no facts written. Re-run without --dry-run to persist.)");
+    }
+    Ok(())
 }
