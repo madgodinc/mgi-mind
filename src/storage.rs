@@ -25,6 +25,9 @@ use crate::embedder;
 /// `created_at` instead of scrolling everything.
 pub const MEMORIES_COLLECTION: &str = "memories";
 pub const FACTS_COLLECTION: &str = "_kg_facts";
+/// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
+/// Lazily created on first cardinality registration; absent predicate = Multi.
+pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -342,7 +345,7 @@ fn is_collection_exists_error<E: std::fmt::Display>(e: &E) -> bool {
 /// collections with no vector config - points are pure payload. Used for facts,
 /// which are looked up by exact/lexical payload match, never by vector.
 /// Idempotent: a concurrent "already exists" is treated as success.
-async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
+pub(crate) async fn create_vectorless_collection(client: &Qdrant, name: &str) -> Result<()> {
     match client
         .create_collection(CreateCollectionBuilder::new(name))
         .await
@@ -1904,6 +1907,51 @@ pub struct MemoryRecord {
     pub r#type: String,
     pub created_at: String,
     pub updated_at: String,
+    /// v1.4 confidence score — the cached output of the duel-rule machinery.
+    /// `None` for legacy memories written before the v1.4 schema landed and
+    /// for memories whose score has not yet been computed by the background
+    /// re-test pass. Treated as "no calibration available, fall back to the
+    /// v1.0 relevance formula" when consumed by ranking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<f32>,
+}
+
+/// Phase 0 helper: store a confidence score into a Qdrant point payload.
+///
+/// The payload format mirrors the existing string-everywhere convention used
+/// by the rest of `storage.rs` (Qdrant's typed payload is touched through
+/// `qdrant_client::qdrant::Value`, and this codebase consistently writes
+/// scalars as strings to dodge the small surface of typed-vs-untyped traps
+/// the wrapper crate has). The serialized form is the f32 rendered with
+/// `to_string()` so the reverse parse in `payload_get_confidence` is exact.
+///
+/// Allowed-dead until Phase 3 wires this into `add_memory`; landing it now
+/// keeps the schema migration in one bisectable commit.
+#[allow(dead_code)]
+pub fn payload_set_confidence(
+    payload: &mut std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+    score: f32,
+) {
+    payload.insert("confidence_score".into(), score.to_string().into());
+}
+
+/// Phase 0 helper: read a confidence score back from a Qdrant point payload.
+///
+/// Returns `None` for legacy points (the field was added in v1.4) and for
+/// points whose stored value cannot be parsed as `f32` (which should never
+/// happen unless the payload was corrupted; the parse failure is silent
+/// here because the ranking layer is expected to fall back to the v1.0
+/// formula in that case, not surface an error to the agent).
+#[allow(dead_code)]
+pub fn payload_get_confidence(
+    payload: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+) -> Option<f32> {
+    let v = payload.get("confidence_score")?;
+    let s = match &v.kind {
+        Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => s.as_str(),
+        _ => return None,
+    };
+    s.parse::<f32>().ok()
 }
 
 /// Filter that selects all memories in a library whose `source` payload field
@@ -1954,6 +2002,7 @@ pub async fn find_by_source(
                 r#type: extract_string(pl, "type").unwrap_or_else(|| "memory".into()),
                 created_at: extract_string(pl, "created_at").unwrap_or_default(),
                 updated_at: extract_string(pl, "updated_at").unwrap_or_default(),
+                confidence_score: payload_get_confidence(pl),
             }
         })
         .collect())
@@ -2001,6 +2050,7 @@ pub async fn list_memories(
                 r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
                 created_at: extract_string(p, "created_at").unwrap_or_default(),
                 updated_at: extract_string(p, "updated_at").unwrap_or_default(),
+                confidence_score: payload_get_confidence(p),
             }
         })
         .collect())
@@ -2063,6 +2113,7 @@ pub async fn recent_by_source_since(
                 r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
                 created_at,
                 updated_at: extract_string(p, "updated_at").unwrap_or_default(),
+                confidence_score: payload_get_confidence(p),
             })
         })
         .collect();
@@ -2404,5 +2455,47 @@ mod tests {
         assert_eq!(idx.len(), val.len());
         // "aurora" (lowercased) appears twice -> one index with value 2.
         assert!(val.iter().any(|&v| (v - 2.0).abs() < 1e-6));
+    }
+
+    // ===== v1.4 Phase 0: confidence_score payload round-trip =====
+
+    #[test]
+    fn confidence_score_round_trips_through_payload() {
+        // The Phase 0 spec for the score field: write an f32 into a Qdrant
+        // point payload via payload_set_confidence, read it back via
+        // payload_get_confidence, get the same value within f32 precision.
+        // No Qdrant connection needed — this is a pure HashMap test on the
+        // same helpers the real write path will use in Phase 3.
+        let mut payload = std::collections::HashMap::new();
+        payload_set_confidence(&mut payload, 0.732_5);
+        let read_back = payload_get_confidence(&payload).expect("score present");
+        assert!(
+            (read_back - 0.732_5).abs() < 1e-5,
+            "round-trip diff {} too large",
+            (read_back - 0.732_5).abs()
+        );
+    }
+
+    #[test]
+    fn confidence_score_absent_payload_reads_as_none() {
+        // Legacy memories (written before v1.4) have no confidence_score in
+        // their payload. The reader must return None — not 0.0, not a default
+        // — so the ranking layer can distinguish "no score yet" from "low
+        // confidence" and fall back cleanly.
+        let payload = std::collections::HashMap::new();
+        assert!(payload_get_confidence(&payload).is_none());
+    }
+
+    #[test]
+    fn confidence_score_unparseable_payload_reads_as_none() {
+        // Defensive: if some other write put a non-numeric string under the
+        // same key (shouldn't happen, but the world is wide), the reader
+        // must degrade to None rather than poison the ranker with a panic.
+        let mut payload = std::collections::HashMap::new();
+        payload.insert(
+            "confidence_score".into(),
+            qdrant_client::qdrant::Value::from("not-a-float"),
+        );
+        assert!(payload_get_confidence(&payload).is_none());
     }
 }
