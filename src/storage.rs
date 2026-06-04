@@ -683,6 +683,40 @@ pub(crate) async fn existing_payload_string(
     extract_string(&point.payload, key)
 }
 
+/// v1.6 step 1: batched payload read — one `get_points` call returns
+/// every requested string-shaped payload field for a single point.
+///
+/// Replaces N round-trips of `existing_payload_string` with one.
+/// The v1.5 retest_fact_step82 made four such calls per fact; at
+/// BACKGROUND_PER_TICK_CAP=50 that's 200 Qdrant round-trips per
+/// tick. After this lands the same tick costs 50 round-trips.
+///
+/// Returns a HashMap. Missing keys are simply absent — the caller
+/// applies defaults the same way they would after the per-key API.
+/// Returns None on a Qdrant fetch error (point missing, collection
+/// gone, network blip). Callers fall back to defaults uniformly,
+/// which preserves the v1.5 best-effort semantics.
+pub(crate) async fn read_point_payload_strings(
+    client: &Qdrant,
+    collection: &str,
+    id: &str,
+    keys: &[&str],
+) -> Option<HashMap<String, String>> {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(GetPointsBuilder::new(collection, vec![pid]).with_payload(true))
+        .await
+        .ok()?;
+    let point = resp.result.into_iter().next()?;
+    let mut out: HashMap<String, String> = HashMap::with_capacity(keys.len());
+    for &key in keys {
+        if let Some(value) = extract_string(&point.payload, key) {
+            out.insert(key.to_string(), value);
+        }
+    }
+    Some(out)
+}
+
 // --- Core memory operations -------------------------------------------------
 
 /// Batch GET the `created_at` payload of existing points by id (audit #4). One
