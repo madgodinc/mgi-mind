@@ -355,6 +355,10 @@ pub async fn add_fact(
         .upsert_points(UpsertPointsBuilder::new(storage::FACTS_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to add fact")?;
+    // v1.5 Phase 8 step 8.1D: graph just gained a fact. The
+    // background re-test loop watches this counter so the cadence
+    // speeds up after a burst of additions.
+    crate::doubt::record_edit();
 
     // Phase 2 step 2.3: if the duel produced a Flip, dampen the loser
     // *after* the winner is in the store. Doing it after the upsert
@@ -741,6 +745,11 @@ pub async fn set_fact_payload_field(
         )
         .await
         .context("Failed to set fact payload field")?;
+    // v1.5 Phase 8 step 8.1D: signal that the graph changed. The
+    // background re-test loop watches this counter to speed up its
+    // cadence after a burst of edits. Cheap atomic add — fine to call
+    // from hot paths.
+    crate::doubt::record_edit();
     Ok(())
 }
 
