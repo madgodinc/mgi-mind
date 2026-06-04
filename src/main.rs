@@ -6,6 +6,7 @@ mod bench_procedural;
 mod bench_stale;
 mod cli;
 mod config;
+mod confidence;
 mod consolidate;
 mod doubt;
 mod duel;
