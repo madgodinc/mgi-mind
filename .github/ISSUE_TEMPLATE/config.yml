@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or design discussion
+    url: https://github.com/madgodinc/mgi-mind/discussions
+    about: |
+      For questions, ideas before they become PRs, and design discussions.
+      Issues are for bugs and concrete feature requests; everything else
+      starts as a Discussion.
+  - name: Read the docs
+    url: https://github.com/madgodinc/mgi-mind/blob/main/README.md
+    about: Quick start, install, and CLI reference live in the README.
+  - name: CHANGELOG
+    url: https://github.com/madgodinc/mgi-mind/blob/main/CHANGELOG.md
+    about: Per-release notes. Check here before reporting "v1.5 broke X".
