@@ -1183,6 +1183,19 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
                 );
             }
         }
+        // v1.4 Phase 3 step 4: surface the inheritance-flag registry size.
+        // Counts facts the current process flagged as
+        // "came in from memory, not from the live session." Cleared
+        // automatically at session-end and at process restart.
+        let inherited = crate::doubt::inherited_count();
+        if inherited == 0 {
+            let _ = writeln!(out, "[OK]   No inherited-unverified facts in this session");
+        } else {
+            let _ = writeln!(
+                out,
+                "[INFO] {inherited} fact(s) flagged inherited-unverified (will clear on session end)"
+            );
+        }
     }
 
     if issues == 0 && fixed == 0 {
@@ -1548,6 +1561,14 @@ async fn cmd_session_end(agent: &str, summary: &str) -> Result<()> {
 
 pub(crate) async fn run_session_end(agent: &str, summary: &str) -> Result<String> {
     crate::session::end(agent, summary)?;
+    // v1.4 Phase 3 step 4: clear the inheritance flag registry at
+    // session end. The flag tracks "this came in from memory in *this*
+    // session"; leaking it into the next session that starts in the
+    // same warm process would re-discount facts that were genuinely
+    // confirmed in the new live conversation. Process restart already
+    // clears the in-memory state; this clear handles the warm-process
+    // case (mgimind mcp).
+    crate::doubt::clear_all_inherited();
     Ok("Session ended.".to_string())
 }
 

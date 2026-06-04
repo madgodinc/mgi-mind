@@ -225,6 +225,78 @@ impl DoubtState {
     }
 }
 
+// ===== Inheritance flag — per-process registry =====
+//
+// Synthesis §3 mechanism 3: facts entering a session from memory
+// (briefing, session_last, files outside the live conversation) carry
+// an `inherited_unverified` flag until first in-session confirmation.
+//
+// We keep the flag in a per-process registry rather than a payload
+// field, because the flag is a property of *this session's view of
+// the fact*, not of the fact itself. The same fact is inherited in
+// session N and live in session N+1; persisting the flag in payload
+// would leak one session's state into the next.
+//
+// The registry is populated when a session reads its previous
+// summary (`mind_session(action="last")`) or context briefing, and
+// consumed by the duel rule via `weight_new` (mechanism 3 already
+// accepts `from_live_session: bool`).
+//
+// Cleared at: first independent live-session confirmation of the
+// fact (a fresh `add_fact` for the same triple with no contradiction),
+// or process restart (in-process state is intentionally ephemeral).
+
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
+
+static INHERITED_FACTS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Mark a fact id as inherited-from-memory in the current process.
+/// Called by `mind_session(action="last")` and the briefing path for
+/// every fact reference they surface.
+pub fn mark_inherited(fact_id: &str) {
+    if let Ok(mut set) = INHERITED_FACTS.lock() {
+        set.insert(fact_id.to_string());
+    }
+}
+
+/// Check whether a fact is currently flagged as inherited-unverified.
+/// Consumed by the duel rule (`weight_new` slot) and by the ranking
+/// layer (confidence multiplier).
+pub fn is_inherited(fact_id: &str) -> bool {
+    INHERITED_FACTS
+        .lock()
+        .map(|set| set.contains(fact_id))
+        .unwrap_or(false)
+}
+
+/// Clear a fact's inheritance flag — called when a live in-session
+/// observation confirms the fact (a re-assertion of the same triple
+/// without contradiction).
+pub fn clear_inherited(fact_id: &str) {
+    if let Ok(mut set) = INHERITED_FACTS.lock() {
+        set.remove(fact_id);
+    }
+}
+
+/// Bulk clear — used by tests and by `mind_session(action="end")` so a
+/// closed session does not leak inheritance state into the next one
+/// that starts in the same warm process.
+pub fn clear_all_inherited() {
+    if let Ok(mut set) = INHERITED_FACTS.lock() {
+        set.clear();
+    }
+}
+
+/// Count of currently-inherited facts. Surfaced by `mgimind doctor`
+/// alongside the conflict counts so the user can see how much of the
+/// active session's context came from memory vs the live conversation.
+pub fn inherited_count() -> usize {
+    INHERITED_FACTS.lock().map(|set| set.len()).unwrap_or(0)
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
@@ -378,5 +450,58 @@ mod tests {
         // Pathologically high prior_count should saturate, not wrap.
         let (n, _) = apply_retrieval_event(u32::MAX, true);
         assert_eq!(n, u32::MAX);
+    }
+
+    // --- Inheritance flag registry ---
+    //
+    // The registry is process-global by design — it tracks "what came
+    // in from memory in *this* warm process." Tests serialise their
+    // access via clear_all_inherited at the start so they don't trip
+    // over each other's state.
+
+    #[test]
+    fn mark_then_is_inherited_returns_true() {
+        clear_all_inherited();
+        mark_inherited("test-fact-1");
+        assert!(is_inherited("test-fact-1"));
+    }
+
+    #[test]
+    fn unmarked_fact_is_not_inherited() {
+        clear_all_inherited();
+        assert!(!is_inherited("never-marked"));
+    }
+
+    #[test]
+    fn clear_inherited_removes_the_flag() {
+        clear_all_inherited();
+        mark_inherited("ephemeral");
+        clear_inherited("ephemeral");
+        assert!(!is_inherited("ephemeral"));
+    }
+
+    #[test]
+    fn clear_all_wipes_the_registry() {
+        clear_all_inherited();
+        mark_inherited("a");
+        mark_inherited("b");
+        mark_inherited("c");
+        assert_eq!(inherited_count(), 3);
+        clear_all_inherited();
+        assert_eq!(inherited_count(), 0);
+        assert!(!is_inherited("a"));
+        assert!(!is_inherited("b"));
+        assert!(!is_inherited("c"));
+    }
+
+    #[test]
+    fn mark_inherited_is_idempotent() {
+        // Re-marking the same fact does not double-count or fail.
+        clear_all_inherited();
+        mark_inherited("dup");
+        mark_inherited("dup");
+        mark_inherited("dup");
+        assert!(is_inherited("dup"));
+        assert_eq!(inherited_count(), 1);
     }
 }
