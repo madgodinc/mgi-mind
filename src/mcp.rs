@@ -59,6 +59,15 @@ pub async fn serve() -> Result<()> {
         );
     }
 
+    // v1.4 Phase 3 step 3: spawn the background doubt-window re-test
+    // loop. Three hard guarantees: yields when an MCP call is in
+    // flight, caps per-tick scan, adaptive cadence by edit rate.
+    // The loop runs for the lifetime of the warm process; dropping
+    // the JoinHandle at process exit is fine.
+    if let Some(cfg) = config.clone() {
+        let _handle = crate::doubt::spawn_background_retest_loop(cfg);
+    }
+
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
@@ -227,6 +236,12 @@ fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
 /// Dispatch `tools/call`. Always returns a tool-result Value (never a protocol
 /// error) - failures become `isError: true` text.
 async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
+    // v1.4 Phase 3 step 3 guarantee (a): the background re-test loop
+    // sees this flag and yields rather than contend with a live tool
+    // call. Dropped at end of scope (including via panic), so a
+    // misbehaving tool cannot leave the flag stuck.
+    let _busy_guard = crate::doubt::BusyGuard::new();
+
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return tool_text("tools/call: missing tool name", true);
     };
