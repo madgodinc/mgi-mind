@@ -1,0 +1,32 @@
+# EditorConfig — https://editorconfig.org
+# Keep formatting consistent across editors that pick this up
+# automatically (VS Code, Helix, Vim with plugin, JetBrains, Sublime).
+
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+
+[*.{rs,toml}]
+# Rust convention — 4-space indent, LF, UTF-8. cargo fmt enforces
+# most of this; .editorconfig catches the cases where the editor
+# is the one writing (new files, comments, doctests).
+indent_size = 4
+
+[*.{md,yml,yaml,json}]
+# Looser handling for docs / config — trailing whitespace is
+# meaningful in markdown (two-space line break).
+trim_trailing_whitespace = false
+indent_size = 2
+
+[CHANGELOG.md]
+# CHANGELOG is wide for table formatting; do not enforce indent.
+indent_size = unset
+
+[Makefile]
+indent_style = tab
