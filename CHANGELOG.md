@@ -1,5 +1,106 @@
 # Changelog
 
+## 1.6.4 — Windows fix + doctor --fix cardinality + ADRs + SECURITY policy
+
+This release closes the v1.5 honest limit on cross-platform CI plus
+ships the developer-facing scaffolding that pulse-style projects
+have.
+
+### Issue [#23](https://github.com/madgodinc/mgi-mind/issues/23) — Windows stack overflow
+
+`tokio::main` runs `block_on` on the process's main thread, which
+uses the OS default stack budget. Windows defaults to 1 MB; the v1.5
+background re-test loop's futures (MindConfig clone + payload
+HashMaps + Vec<String> candidates + per-fact futures) overflow it.
+
+Fix (two layers in `src/main.rs`):
+
+1. Re-launch `main` on `std::thread::Builder` with 8 MB stack —
+   fixes the process main thread on every platform.
+2. Build the tokio runtime with `thread_stack_size(8 * 1024 * 1024)`
+   — every worker thread (where `tokio::spawn` lands) gets the same
+   8 MB.
+
+8 MB matches the Linux default — the most-tested configuration.
+After this lands all six CI jobs go green (Linux / Windows / macOS
+× fmt+clippy+test + Linux integration + Windows integration +
+cargo-audit).
+
+### `mgimind doctor` detects pending cardinality proposals
+
+After extraction lands hundreds of predicate cardinality proposals
+in `$MGIMIND_HOME/migration/cardinality-proposals.json`, the user
+had to remember to run `migrate-v14 cardinality --apply` to register
+them. `mgimind doctor` now surfaces the count:
+
+```
+[INFO] 1096 High-confidence cardinality proposal(s) waiting — run
+       `mgimind doctor --fix` or
+       `mgimind migrate-v14 cardinality --apply`
+```
+
+`mgimind doctor --fix` bulk-registers every pending High-confidence
+proposal via the same path the migrate-v14 path uses.
+
+### `mgimind doctor` and `mgimind config install-mode` show weight breakdown
+
+Both surfaces now print the install-mode AND the per-mode anchors:
+
+```
+[OK]   install-mode: chat-only [d=0.70 c=0.10 e=0.20] (matches auto-detect)
+```
+
+```
+install-mode: chat-only [dependants=0.70 confirmations=0.10 external=0.20]
+```
+
+### Project documentation
+
+- **CONTRIBUTING.md** — project layout, build commands, three
+  architecture rules (Mechanism 1 invariant, §10 q5 guarantees,
+  illustrative-until-calibrated constants), how to add an MCP tool,
+  branch model.
+- **CODE_OF_CONDUCT.md** — pragmatic compression of Contributor
+  Covenant 2.1.
+- **SECURITY.md** — vulnerability disclosure policy with scope
+  (vault, extractor, MCP surface, Qdrant binary, audit log) and
+  out-of-scope (shell access, DoS via large inputs, MCP client
+  misbehaviour).
+- **`.github/ISSUE_TEMPLATE/`** — bug_report.md + feature_request.md
+  + config.yml routing questions to Discussions.
+- **`docs/design/adr/`** — four foundational ADRs (Cardinality enum,
+  Mechanism 1 invariant, §10 q5 guarantees, install-mode anchors).
+- **`benchmarks/v0.14.3-gpu/`** — pre-v1.4 retrieval baseline
+  (R@5 = 99.2%) committed for STALE bench comparison.
+- **`docs/blog/2026-06-04-validity-model.md`** — draft technical
+  post explaining v1.4 / v1.5 / v1.6 design.
+- **`.editorconfig`** — consistent indent / EOL across editors.
+
+### CLI surface
+
+- `mgimind bench-stale` + `mgimind bench-stale-sweep` — CLI scaffold
+  for issue [#16](https://github.com/madgodinc/mgi-mind/issues/16)
+  calibration tooling. The STALE protocol adapter is still TBD; the
+  CLI plumbing and sweep grid are in place.
+
+### Tests
+
+- 290 unit + 6 integration tests pass on **all three OSes**.
+- Cleaned up test serialisation around `DOUBT_WINDOW_FLAGGED`
+  global registry — four registry-touching tests now lock
+  `SERIAL_LOOP_TEST` to prevent races on the macOS runner.
+
+### Documentation issues opened
+
+- **#23** — Windows stack overflow (closed by this release).
+- **#24** — `ROADMAP.md` is stale (last version mentioned is v1.2;
+  we shipped v1.3 through v1.6.4). Tracked for v1.7.
+
+### Migration notes
+
+None. v1.6.4 ships only the Windows fix + scaffolding; no semantic
+changes to formulas, MCP surface, or payload shape.
+
 ## 1.6.3 — bench-stale CLI + bulk cardinality apply + contributor docs
 
 ### `mgimind migrate-v14 cardinality --apply`
