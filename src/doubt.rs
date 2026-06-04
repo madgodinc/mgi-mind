@@ -405,9 +405,34 @@ pub async fn retest_fact_step82(
     match transition {
         RetestTransition::PromoteToDoubt => {
             write_doubt_count(config, fact_id, DOUBT_WINDOW_N_RETRIEVALS).await?;
+            // v1.5 Phase 8 step 8.4: audit log entry. Append-only;
+            // a future `mgimind audit replay --since 1d` can
+            // reconstruct the sequence of promotions.
+            crate::audit::record(
+                crate::audit::AuditEvent::new(
+                    crate::audit::AuditOp::RetestPromote,
+                    "facts",
+                    fact_id,
+                )
+                .actor("retest")
+                .before(format!("{cached_score:.6}"))
+                .after(format!("{new_score:.6}"))
+                .note("promote_to_doubt"),
+            );
         }
         RetestTransition::RecoverFromDoubt => {
             write_doubt_count(config, fact_id, 0).await?;
+            crate::audit::record(
+                crate::audit::AuditEvent::new(
+                    crate::audit::AuditOp::RetestRecover,
+                    "facts",
+                    fact_id,
+                )
+                .actor("retest")
+                .before(format!("{cached_score:.6}"))
+                .after(format!("{new_score:.6}"))
+                .note("recover_from_doubt"),
+            );
         }
         RetestTransition::NoChange => {}
     }
