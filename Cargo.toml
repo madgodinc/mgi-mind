@@ -121,3 +121,11 @@ libc = "0.2"
 [features]
 default = []
 cuda = ["ort/cuda"]
+# v1.4 Phase 5 — auto-extractor (Qwen 2.5 GGUF via subprocess llama-server).
+# Default off because the auto-ingest hook calls knowledge::add_fact, which in
+# Phase 2+ runs the duel rule + per-(subject,predicate) lock + quarantine
+# routing. Until users understand the model semantics, default-on would let an
+# auto-installed extractor write through a path they did not explicitly opt
+# into. Enable with `cargo build --release --features extractor`, then `mgimind
+# extractor install`.
+extractor = []

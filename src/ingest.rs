@@ -307,6 +307,7 @@ pub async fn run_ingest(
                     // through a bounded mpsc queue (post-critic fix). The
                     // worker is a single dedicated task; bursts drop
                     // overflow rather than spawn unbounded futures.
+                    #[cfg(feature = "extractor")]
                     if crate::extractor::is_llama_server_installed() {
                         crate::extractor::enqueue_auto_extract(config, &content);
                     }
