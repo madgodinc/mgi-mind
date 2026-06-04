@@ -41,17 +41,14 @@ pub struct WeightTriple {
 /// is a single-user chat assistant memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum InstallMode {
+    #[default]
     ChatOnly,
     DevWithCi,
     MultiTenant,
 }
 
-impl Default for InstallMode {
-    fn default() -> Self {
-        Self::ChatOnly
-    }
-}
 
 impl InstallMode {
     /// Per-mode anchors from §6 synthesis. Each mode's weights sum

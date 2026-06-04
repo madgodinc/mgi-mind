@@ -32,17 +32,14 @@ const FACT_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6661_6374_0000_000000000
 /// Unknown predicates default to `Multi` — better to keep both honest facts
 /// than to start a false duel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Cardinality {
     Single,
     TemporalSingle,
+    #[default]
     Multi,
 }
 
-impl Default for Cardinality {
-    fn default() -> Self {
-        Cardinality::Multi
-    }
-}
 
 impl Cardinality {
     /// Parse from a lowercase MCP / config string. Returns `None` for unknown
@@ -89,7 +86,9 @@ impl Cardinality {
 /// - `Unknown` — placeholder for facts the writer was unsure about; treated
 ///   as `Active` by default ranking but surfaced separately by `doctor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum EntryStatus {
+    #[default]
     Active,
     Contested,
     Stale,
@@ -105,11 +104,6 @@ pub enum EntryStatus {
     QuarantineCandidate,
 }
 
-impl Default for EntryStatus {
-    fn default() -> Self {
-        EntryStatus::Active
-    }
-}
 
 impl EntryStatus {
     /// Lowercase wire format. Stable since v1.4 — do not rename existing

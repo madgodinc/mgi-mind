@@ -129,14 +129,13 @@ fn check_auth(state: &AppState, headers: &HeaderMap, q: &AuthQuery) -> Result<()
     {
         return Ok(());
     }
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(s) = auth.to_str()
+    if let Some(auth) = headers.get("authorization")
+        && let Ok(s) = auth.to_str()
             && let Some(t) = s.strip_prefix("Bearer ")
             && t == state.token.as_str()
         {
             return Ok(());
         }
-    }
     Err(StatusCode::UNAUTHORIZED)
 }
 
@@ -227,7 +226,7 @@ async fn api_delete_memory(
     // library arg is kept only for CLI/MCP signature parity; the id is the
     // authoritative key. "viewer" tags the audit actor so the trail shows
     // *where* the delete came from.
-    let _ = storage::delete_memory(&state.config, "", &id)
+    storage::delete_memory(&state.config, "", &id)
         .await
         .map_err(internal)?;
     audit::record(
