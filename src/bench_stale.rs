@@ -151,8 +151,8 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
     let type_ii: Vec<&ScenarioResult> =
         results.iter().filter(|r| r.conflict_type == ConflictType::TypeII).collect();
 
-    let metric_pct = |selected: &[&ScenarioResult],
-                      sel: fn(&ScenarioResult) -> bool|
+    let _metric_pct = |selected: &[&ScenarioResult],
+                       sel: fn(&ScenarioResult) -> bool|
      -> f32 {
         if selected.is_empty() {
             0.0
