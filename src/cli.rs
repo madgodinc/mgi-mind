@@ -726,9 +726,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             MigrateV14Cmd::Cardinality { output, apply } => {
                 cmd_migrate_v14_cardinality(output.as_deref(), apply).await
             }
-            MigrateV14Cmd::Confirmations { apply } => {
-                cmd_migrate_v14_confirmations(apply).await
-            }
+            MigrateV14Cmd::Confirmations { apply } => cmd_migrate_v14_confirmations(apply).await,
         },
         Commands::Bench {
             dataset,
@@ -833,12 +831,9 @@ async fn cmd_ingest_session(path: &str, library: &str) -> Result<()> {
         .context("Failed to load config — run `mgimind init` first")?;
     // Ensure target library exists (idempotent).
     let _ = crate::storage::create_library(&config, library).await;
-    let report = crate::session_ingest::ingest_transcript(
-        &config,
-        std::path::Path::new(path),
-        library,
-    )
-    .await?;
+    let report =
+        crate::session_ingest::ingest_transcript(&config, std::path::Path::new(path), library)
+            .await?;
     print!("{}", report.render());
     Ok(())
 }
@@ -854,7 +849,9 @@ async fn cmd_quarantine_show(id: &str) -> Result<()> {
     let config = crate::config::load_cached()?;
     match crate::storage::quarantine_get(&config, id).await? {
         Some(e) => print!("{}", render_quarantine_entry(&e)),
-        None => println!("No quarantined entry with id '{id}' (it may be a regular memory or unknown id)."),
+        None => println!(
+            "No quarantined entry with id '{id}' (it may be a regular memory or unknown id)."
+        ),
     }
     Ok(())
 }
@@ -1093,8 +1090,7 @@ async fn cmd_bench_stale_sweep(
             overrides.doubt_drift_threshold = Some(0.4 * mult);
         }
 
-        let out_path =
-            std::path::Path::new(output_dir).join(format!("stale-{name}.json"));
+        let out_path = std::path::Path::new(output_dir).join(format!("stale-{name}.json"));
         eprintln!(
             "STALE sweep: running '{name}' (overrides: {}) → {}",
             overrides.tag(),
@@ -1195,19 +1191,23 @@ async fn cmd_migrate_v14_dependants(threshold: f32, apply: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
     println!(
         "v1.4 Phase 1.1 — counting dependants per fact (cosine threshold = {threshold}{}).",
-        if apply { ", writing back to payloads" } else { ", read-only" }
+        if apply {
+            ", writing back to payloads"
+        } else {
+            ", read-only"
+        }
     );
-    let (counts, summary) =
-        crate::migrate_v14::run_dependants(&config, threshold, apply).await?;
+    let (counts, summary) = crate::migrate_v14::run_dependants(&config, threshold, apply).await?;
     println!("\n{}", summary.render("dependants per fact"));
-    println!("formula-shape recommendation: {}", summary.recommended_formula_shape());
+    println!(
+        "formula-shape recommendation: {}",
+        summary.recommended_formula_shape()
+    );
     if !apply && !counts.is_empty() {
         println!("\nRun again with --apply to write the counts back into fact payloads.");
     }
     if !apply && counts.is_empty() {
-        println!(
-            "\n(walk implementation still landing in step 1.1 commit 2; CLI scaffold ready.)"
-        );
+        println!("\n(walk implementation still landing in step 1.1 commit 2; CLI scaffold ready.)");
     }
     Ok(())
 }
@@ -1224,15 +1224,10 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
     );
     let n = crate::migrate_v14::run_cardinality_inference(&config, output_path.clone()).await?;
     if n == 0 {
-        println!(
-            "(walk implementation still landing in step 1.2 commit; CLI scaffold ready.)"
-        );
+        println!("(walk implementation still landing in step 1.2 commit; CLI scaffold ready.)");
         return Ok(());
     }
-    println!(
-        "Wrote {n} proposals to {}.",
-        output_path.display(),
-    );
+    println!("Wrote {n} proposals to {}.", output_path.display(),);
     if !apply {
         println!(
             "Review the JSON, then re-run with --apply to bulk-register every High-confidence proposal, or commit each by hand via `mgimind mcp` tool `mind_predicate(action=\"register\")`."
@@ -1293,18 +1288,25 @@ async fn cmd_migrate_v14_confirmations(apply: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
     println!(
         "v1.4 Phase 1.3 — backfilling confirmations from derivable signals{}.",
-        if apply { ", writing back" } else { ", read-only" }
+        if apply {
+            ", writing back"
+        } else {
+            ", read-only"
+        }
     );
     let (n_backfilled, summary) = crate::migrate_v14::run_confirmations(&config, apply).await?;
-    println!("\n{}", summary.render("confirmations per memory (where derivable)"));
+    println!(
+        "\n{}",
+        summary.render("confirmations per memory (where derivable)")
+    );
     if n_backfilled == 0 {
-        println!(
-            "\n(walk implementation still landing in step 1.3 commit; CLI scaffold ready.)"
-        );
+        println!("\n(walk implementation still landing in step 1.3 commit; CLI scaffold ready.)");
     } else if !apply {
         println!("\nRun again with --apply to write {n_backfilled} backfills.");
     } else {
-        println!("\nBackfilled {n_backfilled} memories. Others stay at 0 and accumulate going forward.");
+        println!(
+            "\nBackfilled {n_backfilled} memories. Others stay at 0 and accumulate going forward."
+        );
     }
     Ok(())
 }
@@ -1510,7 +1512,10 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         if crate::embedder::is_model_downloaded(&cfg) {
             let _ = writeln!(out, "[OK]   Embedding model ({variant:?})");
         } else {
-            let _ = writeln!(out, "[FAIL] Embedding model not downloaded (variant={variant:?})");
+            let _ = writeln!(
+                out,
+                "[FAIL] Embedding model not downloaded (variant={variant:?})"
+            );
             if fix {
                 let _ = writeln!(out, "       Downloading model...");
                 match crate::embedder::download_model(&cfg).await {
@@ -1618,12 +1623,9 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
                     .map(|obj| {
                         obj.iter()
                             .filter(|(_, v)| {
-                                v.get("confidence").and_then(|c| c.as_str())
-                                    == Some("High")
+                                v.get("confidence").and_then(|c| c.as_str()) == Some("High")
                             })
-                            .filter(|(name, _)| {
-                                !predicates.iter().any(|(p, _)| p == *name)
-                            })
+                            .filter(|(name, _)| !predicates.iter().any(|(p, _)| p == *name))
                             .map(|(name, v)| {
                                 let proposed = v
                                     .get("proposed")
@@ -1645,20 +1647,16 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
                         let mut registered_now = 0usize;
                         let mut errs = 0usize;
                         for (predicate, proposed) in &pending_high {
-                            let card = match crate::knowledge::Cardinality::parse(
-                                proposed,
-                            ) {
+                            let card = match crate::knowledge::Cardinality::parse(proposed) {
                                 Some(c) => c,
                                 None => {
                                     errs += 1;
                                     continue;
                                 }
                             };
-                            if crate::knowledge::register_cardinality(
-                                &cfg, predicate, card,
-                            )
-                            .await
-                            .is_ok()
+                            if crate::knowledge::register_cardinality(&cfg, predicate, card)
+                                .await
+                                .is_ok()
                             {
                                 registered_now += 1;
                             } else {
@@ -2273,10 +2271,13 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     let _ = writeln!(out, "Sessions:       {session_count}");
     // v0.13: surface zombie-session count alongside other stats. The number
     // is the same one `mind_doctor` shows in detail.
-    let zombies =
-        crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
+    let zombies = crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
     if !zombies.is_empty() {
-        let _ = writeln!(out, "  zombies:      {} (idle >30min, see `mgimind doctor`)", zombies.len());
+        let _ = writeln!(
+            out,
+            "  zombies:      {} (idle >30min, see `mgimind doctor`)",
+            zombies.len()
+        );
     }
     let _ = write!(out, "Vault:          {vault_summary}");
     Ok(out)
@@ -2324,9 +2325,7 @@ async fn cmd_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn build_stats_json(
-    config: &crate::config::MindConfig,
-) -> Result<serde_json::Value> {
+async fn build_stats_json(config: &crate::config::MindConfig) -> Result<serde_json::Value> {
     let (libraries, facts_count) = crate::storage::stats(config).await?;
     let total_memories: u64 = libraries.iter().map(|(_, c)| c).sum();
 
@@ -2338,8 +2337,7 @@ async fn build_stats_json(
 
     // Dependants distribution — same data the human view emits.
     let dependants_json = if facts_count > 0 {
-        match crate::knowledge::list_top_dependants_facts(config, facts_count as usize).await
-        {
+        match crate::knowledge::list_top_dependants_facts(config, facts_count as usize).await {
             Ok(pairs) if !pairs.is_empty() => {
                 let dep_counts: Vec<u32> = pairs.iter().map(|(_, c)| *c).collect();
                 let s = percentiles_u32(&dep_counts);
@@ -2369,8 +2367,7 @@ async fn build_stats_json(
         })
         .unwrap_or(0);
 
-    let zombies =
-        crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
+    let zombies = crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
 
     Ok(serde_json::json!({
         "libraries": libs_json,
@@ -2702,9 +2699,8 @@ async fn cmd_config(what: ConfigCmd) -> Result<()> {
 }
 
 async fn cmd_config_install_mode_show() -> Result<()> {
-    let config = crate::config::MindConfig::load().with_context(|| {
-        "config not initialised — run `mgimind init` first".to_string()
-    })?;
+    let config = crate::config::MindConfig::load()
+        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
     let weights = config.install_mode.weights();
     println!(
         "install-mode: {} [dependants={:.2} confirmations={:.2} external={:.2}]",
@@ -2738,9 +2734,8 @@ async fn cmd_config_install_mode_set(mode_str: &str) -> Result<()> {
             "unknown install-mode '{mode_str}' — expected one of: chat-only, dev-with-ci, multi-tenant"
         )
     })?;
-    let mut config = crate::config::MindConfig::load().with_context(|| {
-        "config not initialised — run `mgimind init` first".to_string()
-    })?;
+    let mut config = crate::config::MindConfig::load()
+        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
     let old = config.install_mode;
     if old == new_mode {
         println!("install-mode already {} — no change", new_mode.as_str());
@@ -2764,16 +2759,14 @@ async fn cmd_outcome(
     success: bool,
     source: &str,
 ) -> Result<()> {
-    let signal_type =
-        crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown signal_type '{signal_type_str}' — expected one of: \
+    let signal_type = crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown signal_type '{signal_type_str}' — expected one of: \
                  test_passed, code_compiled, user_confirmed, cited_by"
-            )
-        })?;
-    let cfg = crate::config::MindConfig::load().with_context(|| {
-        "config not initialised — run `mgimind init` first".to_string()
+        )
     })?;
+    let cfg = crate::config::MindConfig::load()
+        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
     let signal = crate::outcome::ExternalSignal {
         signal_type,
         success,
@@ -2861,7 +2854,15 @@ async fn cmd_facts_list(
         let p = truncate_for_table(&f.predicate, if with_id { 22 } else { 25 });
         let o = truncate_for_table(&f.object, if with_id { 30 } else { 35 });
         if with_id {
-            println!("{:>3} {:>4} {:<36} {:<28} {:<22} {:<30}", i + 1, dep, &f.id, s, p, o);
+            println!(
+                "{:>3} {:>4} {:<36} {:<28} {:<22} {:<30}",
+                i + 1,
+                dep,
+                &f.id,
+                s,
+                p,
+                o
+            );
         } else {
             println!("{:>3} {:>4} {:<35} {:<25} {:<35}", i + 1, dep, s, p, o);
         }
@@ -2921,10 +2922,9 @@ fn truncate_for_table(s: &str, max: usize) -> String {
 async fn cmd_extractor(what: ExtractorCmd) -> Result<()> {
     match what {
         ExtractorCmd::Install { variant } => {
-            let v = crate::extractor::ExtractorVariant::parse(&variant)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
-                })?;
+            let v = crate::extractor::ExtractorVariant::parse(&variant).ok_or_else(|| {
+                anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
+            })?;
             println!("Installing extractor: {}", v.describe());
             let warn = v.multilingual_warning();
             if !warn.is_empty() {
@@ -2949,10 +2949,9 @@ async fn cmd_extractor(what: ExtractorCmd) -> Result<()> {
             Ok(())
         }
         ExtractorCmd::Test { text, variant } => {
-            let v = crate::extractor::ExtractorVariant::parse(&variant)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
-                })?;
+            let v = crate::extractor::ExtractorVariant::parse(&variant).ok_or_else(|| {
+                anyhow::anyhow!("unknown variant '{variant}' (expected lite or default)")
+            })?;
             let cfg = crate::extractor::ExtractConfig {
                 variant: v,
                 ..crate::extractor::ExtractConfig::default()
@@ -3032,13 +3031,8 @@ async fn cmd_extractor_batch_from_library(
             produced_triples += triples.len();
             if !dry_run {
                 for t in &triples {
-                    match crate::knowledge::add_fact(
-                        &mind_cfg,
-                        &t.subject,
-                        &t.predicate,
-                        &t.object,
-                    )
-                    .await
+                    match crate::knowledge::add_fact(&mind_cfg, &t.subject, &t.predicate, &t.object)
+                        .await
                     {
                         Ok(_) => written += 1,
                         Err(e) => {

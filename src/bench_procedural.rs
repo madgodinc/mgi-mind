@@ -191,14 +191,23 @@ pub async fn run(
         overall.record(gold_position);
 
         if let Some(lang) = &item.language {
-            by_language.entry(lang.clone()).or_default().record(gold_position);
+            by_language
+                .entry(lang.clone())
+                .or_default()
+                .record(gold_position);
         }
         if let Some(s) = &item.stratum {
-            by_stratum.entry(s.clone()).or_default().record(gold_position);
+            by_stratum
+                .entry(s.clone())
+                .or_default()
+                .record(gold_position);
         }
         if let (Some(lang), Some(s)) = (&item.language, &item.stratum) {
             let key = format!("{lang}/{s}");
-            by_lang_stratum.entry(key).or_default().record(gold_position);
+            by_lang_stratum
+                .entry(key)
+                .or_default()
+                .record(gold_position);
         }
 
         if output.is_some() {

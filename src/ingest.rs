@@ -241,10 +241,8 @@ pub async fn run_ingest(
                                 .iter()
                                 .flat_map(|n| crate::relevance::tokenize(n))
                                 .collect();
-                            let novelty = crate::relevance::novelty_ratio(
-                                &content,
-                                &neighbor_tokens,
-                            );
+                            let novelty =
+                                crate::relevance::novelty_ratio(&content, &neighbor_tokens);
                             if novelty < gate_cfg.min_novelty {
                                 crate::relevance::Verdict::Quarantine {
                                     reason: "low_novelty".into(),
@@ -261,13 +259,11 @@ pub async fn run_ingest(
                     cheap_verdict
                 };
 
-                if let crate::relevance::Verdict::Quarantine { reason } = novelty_verdict
-                {
+                if let crate::relevance::Verdict::Quarantine { reason } = novelty_verdict {
                     // Re-assertion check: if the same content already lives in
                     // quarantine (deterministic id), this is the promotion
                     // signal — user is insistent, raise confidence.
-                    let qid =
-                        crate::storage::quarantine_id_for(library, content.trim());
+                    let qid = crate::storage::quarantine_id_for(library, content.trim());
                     if crate::storage::promote_from_quarantine(config, &qid)
                         .await
                         .unwrap_or(false)

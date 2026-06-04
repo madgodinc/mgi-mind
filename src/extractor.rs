@@ -520,14 +520,10 @@ async fn install_llama_server() -> anyhow::Result<()> {
 
     // Download the tarball to a temp path.
     let tarball = target_dir.join(format!("llama-{LLAMA_RELEASE_TAG}.tar.gz"));
-    eprintln!(
-        "  downloading llama-server (Vulkan) {LLAMA_RELEASE_TAG}..."
-    );
+    eprintln!("  downloading llama-server (Vulkan) {LLAMA_RELEASE_TAG}...");
     let pin = llama_server_pinned_hash();
     if pin.is_none() {
-        eprintln!(
-            "  [warn] no pinned checksum for llama-server tarball — integrity not verified"
-        );
+        eprintln!("  [warn] no pinned checksum for llama-server tarball — integrity not verified");
     }
     crate::util::download_file(llama_server_tarball_url(), &tarball, pin).await?;
 
@@ -565,9 +561,7 @@ async fn install_llama_server() -> anyhow::Result<()> {
         let path = entry.path();
         // Keep llama-server + all libraries; skip other CLI binaries
         // to bound install footprint at ~80MB instead of ~200MB.
-        let keep = name == "llama-server"
-            || name.starts_with("lib")
-            || name == "LICENSE";
+        let keep = name == "llama-server" || name.starts_with("lib") || name == "LICENSE";
         if !keep {
             continue;
         }
@@ -584,9 +578,7 @@ async fn install_llama_server() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&tarball);
 
     if !dest.exists() {
-        anyhow::bail!(
-            "llama-server binary not found in tarball at expected path"
-        );
+        anyhow::bail!("llama-server binary not found in tarball at expected path");
     }
     // Ensure server is executable.
     #[cfg(unix)]
@@ -599,8 +591,7 @@ async fn install_llama_server() -> anyhow::Result<()> {
     // chmod succeeded. is_install_complete() checks for this file,
     // so a tarball killed mid-extract or a chmod failure leaves no
     // sentinel and the next install attempt cleans up and retries.
-    std::fs::write(install_sentinel_path(), LLAMA_RELEASE_TAG)
-        .context("write install sentinel")?;
+    std::fs::write(install_sentinel_path(), LLAMA_RELEASE_TAG).context("write install sentinel")?;
 
     eprintln!("  llama-server installed at {}", dest.display());
     Ok(())
@@ -855,7 +846,9 @@ async fn ensure_server(variant: ExtractorVariant) -> anyhow::Result<(u16, String
 /// Shut down the llama-server subprocess if running. Called by
 /// `mgimind extractor unload` and on warm-process shutdown.
 pub fn shutdown_server() {
-    let Some(slot) = LLAMA_SERVER.get() else { return };
+    let Some(slot) = LLAMA_SERVER.get() else {
+        return;
+    };
     let Ok(mut guard) = slot.lock() else { return };
     *guard = None; // Drop runs kill+wait
 }
@@ -896,7 +889,8 @@ pub struct AutoExtractJob {
 /// `enqueue_auto_extract` call.
 fn ensure_auto_extract_worker() -> &'static tokio::sync::mpsc::Sender<AutoExtractJob> {
     AUTO_EXTRACT_TX.get_or_init(|| {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<AutoExtractJob>(AUTO_EXTRACT_QUEUE_CAPACITY);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<AutoExtractJob>(AUTO_EXTRACT_QUEUE_CAPACITY);
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 let ec = ExtractConfig::default();
@@ -991,10 +985,7 @@ struct CompletionResponse {
 /// On success: returns a (possibly empty) list of triples. On failure
 /// after retry: returns an error and the caller is expected to log
 /// and drop the chunk — silent miss is better than poisoned graph.
-pub async fn extract_facts(
-    config: &ExtractConfig,
-    text: &str,
-) -> anyhow::Result<Vec<Triple>> {
+pub async fn extract_facts(config: &ExtractConfig, text: &str) -> anyhow::Result<Vec<Triple>> {
     let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
     let _permit = sem.acquire().await?;
 
@@ -1015,10 +1006,7 @@ pub async fn extract_facts(
 /// Lifted out of `extract_facts` so unit tests can inject a stub
 /// completion and verify the (good, bad+good, bad+bad) branches
 /// without spinning up the subprocess.
-pub async fn run_extract_pipeline<F, Fut>(
-    text: &str,
-    mut call: F,
-) -> anyhow::Result<Vec<Triple>>
+pub async fn run_extract_pipeline<F, Fut>(text: &str, mut call: F) -> anyhow::Result<Vec<Triple>>
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -1042,9 +1030,8 @@ where
          No prose, no markdown, no explanation. Just the array."
     );
     let second = call(strict_prompt).await?;
-    parse_response(&second).ok_or_else(|| {
-        anyhow::anyhow!("extractor returned non-JSON twice; dropping chunk")
-    })
+    parse_response(&second)
+        .ok_or_else(|| anyhow::anyhow!("extractor returned non-JSON twice; dropping chunk"))
 }
 
 async fn call_completion(
@@ -1135,10 +1122,7 @@ mod tests {
     fn parse_empty_returns_default_variant() {
         // Empty input maps to Default rather than None so a CLI that
         // forgets to pass --variant lands on the recommended choice.
-        assert_eq!(
-            ExtractorVariant::parse(""),
-            Some(ExtractorVariant::Default)
-        );
+        assert_eq!(ExtractorVariant::parse(""), Some(ExtractorVariant::Default));
     }
 
     #[test]
@@ -1197,7 +1181,9 @@ mod tests {
         // copy stays accurate.
         assert!(ExtractorVariant::Lite.approx_size_mb() < 1100);
         assert!(ExtractorVariant::Default.approx_size_mb() < 2100);
-        assert!(ExtractorVariant::Default.approx_size_mb() > ExtractorVariant::Lite.approx_size_mb());
+        assert!(
+            ExtractorVariant::Default.approx_size_mb() > ExtractorVariant::Lite.approx_size_mb()
+        );
     }
 
     #[test]
@@ -1206,13 +1192,8 @@ mod tests {
         // the install CLI. If a future refactor accidentally clears
         // it on Lite, the user gets the smaller model without being
         // told about the trade-off.
-        assert!(!ExtractorVariant::Lite
-            .multilingual_warning()
-            .is_empty());
-        assert_eq!(
-            ExtractorVariant::Default.multilingual_warning(),
-            ""
-        );
+        assert!(!ExtractorVariant::Lite.multilingual_warning().is_empty());
+        assert_eq!(ExtractorVariant::Default.multilingual_warning(), "");
     }
 
     #[test]
@@ -1265,7 +1246,10 @@ mod tests {
         let fence_count = p.matches("```").count();
         // Expected: 6 (3 example pairs) + 2 (the user fence pair) = 8.
         // If sanitisation broke, there would be 10+.
-        assert!(fence_count <= 8, "triple backticks leaked into user section: {fence_count} pairs");
+        assert!(
+            fence_count <= 8,
+            "triple backticks leaked into user section: {fence_count} pairs"
+        );
     }
 
     #[test]

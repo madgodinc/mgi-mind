@@ -425,7 +425,9 @@ fn model_file_pin(
             // file is still integrity-checked rather than blindly downloaded.
             integrity::pin(integrity::MODEL_MINILM_ONNX)
         }
-        ("all-MiniLM-L6-v2", _, "tokenizer.json") => integrity::pin(integrity::MODEL_MINILM_TOKENIZER),
+        ("all-MiniLM-L6-v2", _, "tokenizer.json") => {
+            integrity::pin(integrity::MODEL_MINILM_TOKENIZER)
+        }
         _ => None,
     }
 }
@@ -629,9 +631,7 @@ pub async fn download_ort_runtime() -> Result<()> {
         (
             format!("onnxruntime-linux-aarch64-{ORT_VERSION}"),
             "tgz",
-            format!(
-                "onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"
-            ),
+            format!("onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"),
             None,
         )
     } else {

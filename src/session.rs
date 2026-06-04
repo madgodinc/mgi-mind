@@ -58,7 +58,9 @@ pub fn start(agent: &str) -> Result<StartReport> {
     // heartbeat is older than the idle threshold, auto-close it before
     // starting a new one. The user is told (warning in the returned struct),
     // we never silently swallow it.
-    let recovered = recover_zombie(agent, DEFAULT_IDLE_THRESHOLD_MINUTES).ok().flatten();
+    let recovered = recover_zombie(agent, DEFAULT_IDLE_THRESHOLD_MINUTES)
+        .ok()
+        .flatten();
 
     let now = Utc::now();
     // Seconds + a short random suffix → two starts in the same minute can't

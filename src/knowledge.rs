@@ -31,15 +31,13 @@ const FACT_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_6661_6374_0000_000000000
 ///
 /// Unknown predicates default to `Multi` — better to keep both honest facts
 /// than to start a false duel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Cardinality {
     Single,
     TemporalSingle,
     #[default]
     Multi,
 }
-
 
 impl Cardinality {
     /// Parse from a lowercase MCP / config string. Returns `None` for unknown
@@ -85,8 +83,7 @@ impl Cardinality {
 ///   uses this to flag for re-verification rather than dampening directly.
 /// - `Unknown` — placeholder for facts the writer was unsure about; treated
 ///   as `Active` by default ranking but surfaced separately by `doctor`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EntryStatus {
     #[default]
     Active,
@@ -103,7 +100,6 @@ pub enum EntryStatus {
     /// the architectural hole the critic flagged.
     QuarantineCandidate,
 }
-
 
 impl EntryStatus {
     /// Lowercase wire format. Stable since v1.4 — do not rename existing
@@ -163,17 +159,11 @@ impl EntryStatus {
 /// duel rule in Phase 2. Allowed-dead until then so the v1.4 schema lands
 /// without warnings, in one bisectable commit.
 #[allow(dead_code)]
-pub fn detect_conflict(
-    existing: &[Fact],
-    new_object: &str,
-    cardinality: Cardinality,
-) -> bool {
+pub fn detect_conflict(existing: &[Fact], new_object: &str, cardinality: Cardinality) -> bool {
     if !cardinality.admits_conflict() {
         return false;
     }
-    existing
-        .iter()
-        .any(|f| f.valid && f.object != new_object)
+    existing.iter().any(|f| f.valid && f.object != new_object)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -288,49 +278,42 @@ pub async fn add_fact(
     // Run the duel scaffold only when there's an actual contradiction.
     // detect_conflict already filters re-assertions of the same object
     // and Multi predicates.
-    let (status, loser_to_dampen) = if cardinality.admits_conflict()
-        && detect_conflict(&existing, object, cardinality)
-    {
-        // Phase 2 v0: a brand-new fact has no diversity history yet, so
-        // we treat it as a single live observation with no external
-        // signals. The duel weight comes from `from_live_session=true,
-        // diverse_confirmations=1, external_signals=0`. Phase 4
-        // calibration may revise these defaults; they are the
-        // honest "first-mention" weights.
-        let new_inputs = crate::duel::NewFactInputs {
-            from_live_session: true,
-            diverse_confirmations: 1,
-            external_signals: 0,
-            // A brand-new fact has no typed signals yet — the v1.5
-            // Phase 7 score path activates only when mind_outcome
-            // calls land against an existing memory_id (in the duel
-            // path for an existing F_old, see Step 7.2 sketch).
-            external_signal_score: None,
-        };
-        let (outcome, loser) = crate::duel::resolve_against_existing(
-            config,
-            &existing,
-            new_inputs,
-            cardinality,
-        )
-        .await?;
-        match outcome {
-            crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
-            crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
-            // Quarantine: the duel says the fresh fact is too weak to
-            // unseat the entrenched one. Post-critic (round 2): use the
-            // dedicated EntryStatus::QuarantineCandidate to distinguish
-            // "weak rejected, waiting promote-on-repeat" from "live
-            // contested both visible." Earlier interim collapsed both
-            // to Contested, which prevented STALE bench from measuring
-            // the difference.
-            crate::duel::DuelOutcome::Quarantine => {
-                (EntryStatus::QuarantineCandidate, None)
+    let (status, loser_to_dampen) =
+        if cardinality.admits_conflict() && detect_conflict(&existing, object, cardinality) {
+            // Phase 2 v0: a brand-new fact has no diversity history yet, so
+            // we treat it as a single live observation with no external
+            // signals. The duel weight comes from `from_live_session=true,
+            // diverse_confirmations=1, external_signals=0`. Phase 4
+            // calibration may revise these defaults; they are the
+            // honest "first-mention" weights.
+            let new_inputs = crate::duel::NewFactInputs {
+                from_live_session: true,
+                diverse_confirmations: 1,
+                external_signals: 0,
+                // A brand-new fact has no typed signals yet — the v1.5
+                // Phase 7 score path activates only when mind_outcome
+                // calls land against an existing memory_id (in the duel
+                // path for an existing F_old, see Step 7.2 sketch).
+                external_signal_score: None,
+            };
+            let (outcome, loser) =
+                crate::duel::resolve_against_existing(config, &existing, new_inputs, cardinality)
+                    .await?;
+            match outcome {
+                crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
+                crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
+                // Quarantine: the duel says the fresh fact is too weak to
+                // unseat the entrenched one. Post-critic (round 2): use the
+                // dedicated EntryStatus::QuarantineCandidate to distinguish
+                // "weak rejected, waiting promote-on-repeat" from "live
+                // contested both visible." Earlier interim collapsed both
+                // to Contested, which prevented STALE bench from measuring
+                // the difference.
+                crate::duel::DuelOutcome::Quarantine => (EntryStatus::QuarantineCandidate, None),
             }
-        }
-    } else {
-        (EntryStatus::Active, None)
-    };
+        } else {
+            (EntryStatus::Active, None)
+        };
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("subject".into(), subject.into());
@@ -533,7 +516,8 @@ pub async fn get_cardinality(config: &MindConfig, predicate: &str) -> Result<Car
         "cardinality",
     )
     .await;
-    Ok(s.and_then(|s| Cardinality::parse(&s)).unwrap_or(Cardinality::Multi))
+    Ok(s.and_then(|s| Cardinality::parse(&s))
+        .unwrap_or(Cardinality::Multi))
 }
 
 /// List all registered predicate cardinalities. Newest first by
@@ -574,9 +558,7 @@ pub async fn list_cardinalities(config: &MindConfig) -> Result<Vec<(String, Card
     Ok(out)
 }
 
-pub async fn ensure_predicates_collection(
-    client: &qdrant_client::Qdrant,
-) -> Result<()> {
+pub async fn ensure_predicates_collection(client: &qdrant_client::Qdrant) -> Result<()> {
     if !client
         .collection_exists(storage::PREDICATES_COLLECTION)
         .await
@@ -696,7 +678,11 @@ pub async fn list_top_dependants_facts(
         }
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            let id = point.id.as_ref().map(storage::format_point_id).unwrap_or_default();
+            let id = point
+                .id
+                .as_ref()
+                .map(storage::format_point_id)
+                .unwrap_or_default();
             let dep = extract_string(&point.payload, "dependants_count")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
@@ -836,14 +822,12 @@ pub async fn count_pending_conflicts(config: &MindConfig) -> Result<(u64, u64)> 
         return Ok((0, 0));
     }
 
-    let one = |status: &str| {
-        Filter {
-            must: vec![
-                Condition::matches("valid", "true".to_string()),
-                Condition::matches("status", status.to_string()),
-            ],
-            ..Default::default()
-        }
+    let one = |status: &str| Filter {
+        must: vec![
+            Condition::matches("valid", "true".to_string()),
+            Condition::matches("status", status.to_string()),
+        ],
+        ..Default::default()
     };
 
     let contested = client
@@ -970,11 +954,7 @@ mod tests {
         // duel keep its audit trace without poisoning future writes.
         let mut existing = rec("Rust");
         existing.valid = false;
-        assert!(!detect_conflict(
-            &[existing],
-            "Go",
-            Cardinality::Single
-        ));
+        assert!(!detect_conflict(&[existing], "Go", Cardinality::Single));
     }
 
     #[test]
@@ -1057,10 +1037,7 @@ mod tests {
             EntryStatus::parse("shadowed"),
             Some(EntryStatus::PropagationShadowed)
         );
-        assert_eq!(
-            EntryStatus::parse("  ACTIVE  "),
-            Some(EntryStatus::Active)
-        );
+        assert_eq!(EntryStatus::parse("  ACTIVE  "), Some(EntryStatus::Active));
         assert_eq!(EntryStatus::parse("totally-bogus"), None);
     }
 

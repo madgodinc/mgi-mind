@@ -131,7 +131,10 @@ struct PriorityBuckets {
 
 pub fn run(input_path: &Path) -> Result<String> {
     let raw = std::fs::read_to_string(input_path).with_context(|| {
-        format!("Failed to read bench raw output at {}", input_path.display())
+        format!(
+            "Failed to read bench raw output at {}",
+            input_path.display()
+        )
     })?;
     let items: Vec<InputRow> = serde_json::from_str(&raw)
         .context("Failed to parse bench raw output (expected an array of objects)")?;
@@ -190,9 +193,11 @@ pub fn run(input_path: &Path) -> Result<String> {
         }
         without_policy.overall.record(&empty_row);
 
-        let entry = by_type
-            .entry(row.question_type.clone())
-            .or_insert((Bucket::default(), Bucket::default(), prio));
+        let entry = by_type.entry(row.question_type.clone()).or_insert((
+            Bucket::default(),
+            Bucket::default(),
+            prio,
+        ));
         entry.0.record(row);
         // The actual row contributes to with-policy; without-policy stays
         // empty.
@@ -206,7 +211,8 @@ pub fn run(input_path: &Path) -> Result<String> {
         let d = (w.recall(5) - wo.recall(5)) * 100.0;
         delta.insert(format!("{} ({:?})", t, prio), d);
     }
-    let overall_delta_at_5 = (with_policy.overall.recall(5) - without_policy.overall.recall(5)) * 100.0;
+    let overall_delta_at_5 =
+        (with_policy.overall.recall(5) - without_policy.overall.recall(5)) * 100.0;
     notes.push(format!(
         "Overall ΔR@5 = +{overall_delta_at_5:.1} pct — this is the recall a no-search baseline would not have."
     ));

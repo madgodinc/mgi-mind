@@ -352,8 +352,18 @@ mod tests {
     #[test]
     fn score_is_sum_of_successful_weights() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-04T00:00:00Z"),
-            sig(OutcomeSignal::UserConfirmed, true, "user-mad", "2026-06-04T00:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-1",
+                "2026-06-04T00:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::UserConfirmed,
+                true,
+                "user-mad",
+                "2026-06-04T00:00:00Z",
+            ),
         ];
         let score = compute_external_signal_score(&signals, |_| None);
         assert!((score - 1.7).abs() < 1e-5, "expected 1.7, got {score}");
@@ -408,9 +418,24 @@ mod tests {
     #[test]
     fn dedup_keeps_latest_by_timestamp() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-04T00:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T01:00:00Z"),
-            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-03T00:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-1",
+                "2026-06-04T00:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-1",
+                "2026-06-04T01:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-1",
+                "2026-06-03T00:00:00Z",
+            ),
         ];
         let deduped = dedup_keep_latest(signals);
         assert_eq!(deduped.len(), 1);
@@ -422,9 +447,24 @@ mod tests {
     #[test]
     fn dedup_preserves_distinct_keys() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-04T00:00:00Z"),
-            sig(OutcomeSignal::TestPassed, true, "ci-2", "2026-06-04T00:00:00Z"),
-            sig(OutcomeSignal::UserConfirmed, true, "user-mad", "2026-06-04T00:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-1",
+                "2026-06-04T00:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-2",
+                "2026-06-04T00:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::UserConfirmed,
+                true,
+                "user-mad",
+                "2026-06-04T00:00:00Z",
+            ),
         ];
         let deduped = dedup_keep_latest(signals);
         assert_eq!(deduped.len(), 3, "distinct keys must not collapse");
@@ -443,9 +483,24 @@ mod tests {
     #[test]
     fn guardrail_promotes_at_threshold() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-06-04T09:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-2",
+                "2026-06-04T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-3",
+                "2026-06-04T09:00:00Z",
+            ),
         ];
         assert!(should_promote_to_doubt_window(&signals, now_for_test()));
     }
@@ -455,8 +510,18 @@ mod tests {
     #[test]
     fn guardrail_does_not_promote_below_threshold() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-2",
+                "2026-06-04T10:00:00Z",
+            ),
         ];
         assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
     }
@@ -466,9 +531,24 @@ mod tests {
     #[test]
     fn guardrail_ignores_signals_outside_window() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-05-05T11:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-05-05T10:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-05-05T09:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-1",
+                "2026-05-05T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-2",
+                "2026-05-05T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-3",
+                "2026-05-05T09:00:00Z",
+            ),
         ];
         assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
     }
@@ -480,12 +560,42 @@ mod tests {
     #[test]
     fn guardrail_only_counts_test_passed_failures() {
         let signals = vec![
-            sig(OutcomeSignal::UserConfirmed, false, "user-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::UserConfirmed, false, "user-2", "2026-06-04T10:00:00Z"),
-            sig(OutcomeSignal::UserConfirmed, false, "user-3", "2026-06-04T09:00:00Z"),
-            sig(OutcomeSignal::CodeCompiled, false, "cargo-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::CodeCompiled, false, "cargo-2", "2026-06-04T10:00:00Z"),
-            sig(OutcomeSignal::CodeCompiled, false, "cargo-3", "2026-06-04T09:00:00Z"),
+            sig(
+                OutcomeSignal::UserConfirmed,
+                false,
+                "user-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::UserConfirmed,
+                false,
+                "user-2",
+                "2026-06-04T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::UserConfirmed,
+                false,
+                "user-3",
+                "2026-06-04T09:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::CodeCompiled,
+                false,
+                "cargo-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::CodeCompiled,
+                false,
+                "cargo-2",
+                "2026-06-04T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::CodeCompiled,
+                false,
+                "cargo-3",
+                "2026-06-04T09:00:00Z",
+            ),
         ];
         assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
     }
@@ -496,9 +606,24 @@ mod tests {
     #[test]
     fn guardrail_only_counts_failures_not_successes() {
         let signals = vec![
-            sig(OutcomeSignal::TestPassed, true, "ci-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::TestPassed, true, "ci-2", "2026-06-04T10:00:00Z"),
-            sig(OutcomeSignal::TestPassed, true, "ci-3", "2026-06-04T09:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-2",
+                "2026-06-04T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                true,
+                "ci-3",
+                "2026-06-04T09:00:00Z",
+            ),
         ];
         assert!(!should_promote_to_doubt_window(&signals, now_for_test()));
     }
@@ -512,9 +637,24 @@ mod tests {
     #[test]
     fn guardrail_ignores_historical_successes_when_recent_failures_exist() {
         let mut signals = vec![
-            sig(OutcomeSignal::TestPassed, false, "ci-1", "2026-06-04T11:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-2", "2026-06-04T10:00:00Z"),
-            sig(OutcomeSignal::TestPassed, false, "ci-3", "2026-06-04T09:00:00Z"),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-1",
+                "2026-06-04T11:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-2",
+                "2026-06-04T10:00:00Z",
+            ),
+            sig(
+                OutcomeSignal::TestPassed,
+                false,
+                "ci-3",
+                "2026-06-04T09:00:00Z",
+            ),
         ];
         for i in 0..100 {
             signals.push(sig(

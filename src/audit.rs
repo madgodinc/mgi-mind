@@ -317,7 +317,8 @@ mod tests {
         // Simulate a crash mid-write: append a half-line without newline closing
         // and without valid JSON.
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all(b"{\"ts\":\"2026-01-01T00:00:00Z\",\"op\"").unwrap();
+        f.write_all(b"{\"ts\":\"2026-01-01T00:00:00Z\",\"op\"")
+            .unwrap();
         // The reader should return only the first valid event.
         let read = read_events(&path);
         assert_eq!(read.len(), 1);

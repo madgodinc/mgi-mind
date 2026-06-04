@@ -132,9 +132,8 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
         };
     }
 
-    let count_true = |sel: fn(&ScenarioResult) -> bool| -> usize {
-        results.iter().filter(|r| sel(r)).count()
-    };
+    let count_true =
+        |sel: fn(&ScenarioResult) -> bool| -> usize { results.iter().filter(|r| sel(r)).count() };
     let sr = count_true(|r| r.state_resolution);
     let pr = count_true(|r| r.premise_resistance);
     let ipa = count_true(|r| r.implicit_policy_adaptation);
@@ -146,14 +145,16 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
     let total_correct_cells = sr + pr + ipa;
     let overall_pct = 100.0 * total_correct_cells as f32 / (3.0 * n as f32);
 
-    let type_i: Vec<&ScenarioResult> =
-        results.iter().filter(|r| r.conflict_type == ConflictType::TypeI).collect();
-    let type_ii: Vec<&ScenarioResult> =
-        results.iter().filter(|r| r.conflict_type == ConflictType::TypeII).collect();
+    let type_i: Vec<&ScenarioResult> = results
+        .iter()
+        .filter(|r| r.conflict_type == ConflictType::TypeI)
+        .collect();
+    let type_ii: Vec<&ScenarioResult> = results
+        .iter()
+        .filter(|r| r.conflict_type == ConflictType::TypeII)
+        .collect();
 
-    let _metric_pct = |selected: &[&ScenarioResult],
-                       sel: fn(&ScenarioResult) -> bool|
-     -> f32 {
+    let _metric_pct = |selected: &[&ScenarioResult], sel: fn(&ScenarioResult) -> bool| -> f32 {
         if selected.is_empty() {
             0.0
         } else {
@@ -167,8 +168,9 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
         let sum = type_i
             .iter()
             .map(|r| {
-                (r.state_resolution as u32 + r.premise_resistance as u32 + r.implicit_policy_adaptation as u32)
-                    as f32
+                (r.state_resolution as u32
+                    + r.premise_resistance as u32
+                    + r.implicit_policy_adaptation as u32) as f32
             })
             .sum::<f32>();
         100.0 * sum / (3.0 * type_i.len() as f32)
@@ -180,8 +182,9 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
         let sum = type_ii
             .iter()
             .map(|r| {
-                (r.state_resolution as u32 + r.premise_resistance as u32 + r.implicit_policy_adaptation as u32)
-                    as f32
+                (r.state_resolution as u32
+                    + r.premise_resistance as u32
+                    + r.implicit_policy_adaptation as u32) as f32
             })
             .sum::<f32>();
         100.0 * sum / (3.0 * type_ii.len() as f32)
@@ -467,10 +470,7 @@ mod tests {
             publish_decision(&mk(40.0)),
             PublishDecision::PublishHeadline
         );
-        assert_eq!(
-            publish_decision(&mk(20.0)),
-            PublishDecision::PublishHonest
-        );
+        assert_eq!(publish_decision(&mk(20.0)), PublishDecision::PublishHonest);
         assert_eq!(publish_decision(&mk(10.0)), PublishDecision::Withhold);
     }
 
