@@ -146,3 +146,21 @@ useful, be honest about limits, no harassment, no asshole behaviour.
 - **Questions / design** — open a Discussion. Issues are for
   actionable items; "how do I…" / "what about…" stays in Discussions.
 - **Security** — email instead of public issue. Address in CODE_OF_CONDUCT.
+
+## Past contributors
+
+mgi-mind is mostly a solo project, but a few outside contributions
+already shaped the design. Listed here because the issue / PR
+history alone does not show why they mattered:
+
+- **[@spikefcz](https://github.com/spikefcz)** — PR #2 (closed
+  superseded by v1.4 Cardinality enum + duel rule). The PR
+  signalled that audit #13 (single-valued fact accumulation)
+  mattered to someone besides me, which is part of why v1.4
+  prioritised the broader Mechanism 1 fix. Closed because the
+  generalised solution shipped, not because the PR was bad. The
+  conversation lives at https://github.com/madgodinc/mgi-mind/pull/2.
+
+If you contributed something and you are not listed here, open an
+Issue (or just nudge me in Discussions). I am bad at
+self-noticing.
