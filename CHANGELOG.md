@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.6.3 — bench-stale CLI + bulk cardinality apply + contributor docs
+
+### `mgimind migrate-v14 cardinality --apply`
+
+v1.4 cardinality walk wrote a JSON of proposed predicate
+cardinalities for manual review. Manual loop was fine at the 9
+predicates we had at launch, but extraction produces hundreds.
+
+```sh
+mgimind migrate-v14 cardinality --apply
+```
+
+Bulk-registers every High-confidence proposal via
+`knowledge::register_cardinality`. Low-confidence entries stay in
+the JSON for human review.
+
+### `mgimind bench-stale` + `mgimind bench-stale-sweep`
+
+CLI surface for the STALE benchmark calibration sweep. The STALE
+protocol adapter is still TBD (returns an empty report), but the
+CLI plumbing and sweep grid are now in place against the existing
+type contracts:
+
+```sh
+mgimind bench-stale <dataset> --duel-flip-ratio 1.5 --output run.json
+mgimind bench-stale-sweep <dataset> --output-dir results/
+```
+
+Sweep grid is 7 runs: baseline + ±50% on `DUEL_FLIP_RATIO`,
+`DUEL_CONTESTED_RATIO`, `DOUBT_DRIFT_THRESHOLD`. Each writes a
+per-run JSON; the harness writes a summary.json mapping run name
+to overall_pct / state_resolution_pct / premise_resistance_pct.
+
+### Contributor docs
+
+- `CONTRIBUTING.md` — project layout, build commands, three
+  architecture rules (Mechanism 1 invariant, §10 q5 guarantees,
+  illustrative-until-calibrated constants), how to add an MCP tool,
+  branch model.
+- `CODE_OF_CONDUCT.md` — pragmatic compression of Contributor
+  Covenant 2.1.
+- `.github/ISSUE_TEMPLATE/` — bug_report.md + feature_request.md +
+  config.yml routing questions to Discussions.
+
+### Tests
+
+290 unit + 6 integration tests, 0 failed.
+
 ## 1.6.2 — facts inspection + machine-parseable stats
 
 Two more CLI usability additions.
