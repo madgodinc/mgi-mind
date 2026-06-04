@@ -476,11 +476,44 @@ pub async fn install(variant: ExtractorVariant) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sentinel file written after `install_llama_server` succeeds. Its
+/// presence is the canonical check for "installation complete"; the
+/// previous heuristic (`llama_server_path().exists()`) returned true
+/// even for a partial install (tar killed mid-extract leaves the
+/// binary but not the libs). Post-critic fix for the "corrupt install
+/// passes as installed" finding.
+fn install_sentinel_path() -> PathBuf {
+    crate::config::mind_home()
+        .join("bin")
+        .join("extractor")
+        .join(format!(".installed-{LLAMA_RELEASE_TAG}"))
+}
+
+fn is_install_complete() -> bool {
+    install_sentinel_path().exists()
+}
+
 async fn install_llama_server() -> anyhow::Result<()> {
     let dest = llama_server_path();
-    if dest.exists() {
-        eprintln!("  llama-server already installed, skipping download");
+    if is_install_complete() {
+        eprintln!("  llama-server already installed (sentinel present), skipping download");
         return Ok(());
+    }
+    // A previous run may have left the binary but no sentinel — that's
+    // a partial install. Clear the target dir before re-installing so
+    // we know what state we end up in.
+    if dest.exists() {
+        eprintln!(
+            "  found partial install (binary present, no sentinel); cleaning before re-install"
+        );
+        let target_dir = dest.parent().unwrap().to_path_buf();
+        for entry in std::fs::read_dir(&target_dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy() == ".gitkeep" {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
     let target_dir = dest.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&target_dir).context("create extractor bin dir")?;
@@ -561,6 +594,14 @@ async fn install_llama_server() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
     }
+
+    // Post-critic: write the sentinel only AFTER all extraction +
+    // chmod succeeded. is_install_complete() checks for this file,
+    // so a tarball killed mid-extract or a chmod failure leaves no
+    // sentinel and the next install attempt cleans up and retries.
+    std::fs::write(install_sentinel_path(), LLAMA_RELEASE_TAG)
+        .context("write install sentinel")?;
+
     eprintln!("  llama-server installed at {}", dest.display());
     Ok(())
 }
@@ -656,9 +697,12 @@ pub fn llama_server_path() -> PathBuf {
         .join("llama-server")
 }
 
-/// Whether the llama-server binary is on disk and executable.
+/// Whether the llama-server is **fully** installed. Post-critic: this
+/// now requires the install sentinel to be present, not just the binary
+/// — a tarball killed mid-extract leaves the binary without the libs,
+/// and the previous heuristic would return true for that broken state.
 pub fn is_llama_server_installed() -> bool {
-    llama_server_path().exists()
+    is_install_complete()
 }
 
 fn random_api_key() -> String {
