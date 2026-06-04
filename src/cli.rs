@@ -1884,6 +1884,38 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     }
     let _ = writeln!(out, "Total memories: {total_memories}");
     let _ = writeln!(out, "KG facts:       {facts_count}");
+
+    // v1.6.1: distribution of dependants_count + confidence_score
+    // across facts. Reads the same payload fields v1.5 retest_fact_step82
+    // consumes. O(facts) scan — fine at 12k, may need bounding past 100k.
+    if facts_count > 0 {
+        match crate::knowledge::list_top_dependants_facts(config, facts_count as usize).await {
+            Ok(pairs) if !pairs.is_empty() => {
+                let dep_counts: Vec<u32> = pairs.iter().map(|(_, c)| *c).collect();
+                let stats = percentiles_u32(&dep_counts);
+                let _ = writeln!(
+                    out,
+                    "  dependants:   min={} p50={} p90={} p99={} max={} mean={:.2}",
+                    stats.min, stats.p50, stats.p90, stats.p99, stats.max, stats.mean
+                );
+                let with_deps = dep_counts.iter().filter(|&&n| n > 0).count();
+                let _ = writeln!(
+                    out,
+                    "                {with_deps}/{} facts have ≥1 dependant ({:.1}%)",
+                    pairs.len(),
+                    100.0 * with_deps as f64 / pairs.len() as f64,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // v1.5 Phase 8 in-process registry counts.
+    let inherited = crate::doubt::inherited_count();
+    let flagged = crate::doubt::doubt_window_flag_count();
+    let _ = writeln!(out, "  in-doubt:     {flagged} flagged for retest");
+    let _ = writeln!(out, "  inherited:    {inherited} (cleared on session end)");
+
     let _ = writeln!(out, "Sessions:       {session_count}");
     // v0.13: surface zombie-session count alongside other stats. The number
     // is the same one `mind_doctor` shows in detail.
@@ -1894,6 +1926,37 @@ pub(crate) async fn build_stats(config: &crate::config::MindConfig) -> Result<St
     }
     let _ = write!(out, "Vault:          {vault_summary}");
     Ok(out)
+}
+
+struct DistU32 {
+    min: u32,
+    p50: u32,
+    p90: u32,
+    p99: u32,
+    max: u32,
+    mean: f64,
+}
+
+fn percentiles_u32(values: &[u32]) -> DistU32 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let mean = sorted.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+    let p = |q: f64| -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let idx = ((q * (n as f64 - 1.0)).round() as usize).min(n - 1);
+        sorted[idx]
+    };
+    DistU32 {
+        min: sorted[0],
+        p50: p(0.5),
+        p90: p(0.9),
+        p99: p(0.99),
+        max: sorted[n - 1],
+        mean,
+    }
 }
 
 async fn cmd_stats() -> Result<()> {
