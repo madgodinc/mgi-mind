@@ -368,6 +368,13 @@ pub enum MigrateV14Cmd {
         /// `$MGIMIND_HOME/migration/cardinality-proposals.json`.
         #[arg(long)]
         output: Option<String>,
+        /// v1.6.3: bulk-register every High-confidence proposal
+        /// from the JSON file via knowledge::register_cardinality.
+        /// Skips Low-confidence entries (user reviews those by
+        /// hand). The walk still writes the file first, so
+        /// --output and --apply compose: walk + write + register.
+        #[arg(long)]
+        apply: bool,
     },
     /// Backfill `confirmations_count` for memories that have a derivable
     /// confirmation signal (linked to mind_procedure_outcome(worked=true) or
@@ -669,8 +676,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             MigrateV14Cmd::Dependants { threshold, apply } => {
                 cmd_migrate_v14_dependants(threshold, apply).await
             }
-            MigrateV14Cmd::Cardinality { output } => {
-                cmd_migrate_v14_cardinality(output.as_deref()).await
+            MigrateV14Cmd::Cardinality { output, apply } => {
+                cmd_migrate_v14_cardinality(output.as_deref(), apply).await
             }
             MigrateV14Cmd::Confirmations { apply } => {
                 cmd_migrate_v14_confirmations(apply).await
@@ -1034,7 +1041,7 @@ async fn cmd_migrate_v14_dependants(threshold: f32, apply: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_migrate_v14_cardinality(output: Option<&str>) -> Result<()> {
+async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
     let default_path = crate::config::mind_home()
         .join("migration")
@@ -1049,12 +1056,65 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>) -> Result<()> {
         println!(
             "(walk implementation still landing in step 1.2 commit; CLI scaffold ready.)"
         );
-    } else {
-        println!(
-            "Wrote {n} proposals to {}. Review the JSON, then commit each with `mgimind mcp` tool `mind_predicate(action=\"register\")` or edit the file in place before a future bulk apply.",
-            output_path.display()
-        );
+        return Ok(());
     }
+    println!(
+        "Wrote {n} proposals to {}.",
+        output_path.display(),
+    );
+    if !apply {
+        println!(
+            "Review the JSON, then re-run with --apply to bulk-register every High-confidence proposal, or commit each by hand via `mgimind mcp` tool `mind_predicate(action=\"register\")`."
+        );
+        return Ok(());
+    }
+
+    // --apply: parse the JSON we just wrote, register each
+    // High-confidence proposal via knowledge::register_cardinality.
+    // Low-confidence entries are skipped — those need user review.
+    let raw = std::fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "failed to re-read proposals JSON at {}",
+            output_path.display()
+        )
+    })?;
+    let proposals: serde_json::Value = serde_json::from_str(&raw)?;
+    let Some(obj) = proposals.as_object() else {
+        anyhow::bail!("proposals JSON is not an object");
+    };
+
+    let mut registered = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
+    for (predicate, entry) in obj {
+        let confidence = entry
+            .get("confidence")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if confidence != "High" {
+            skipped += 1;
+            continue;
+        }
+        let proposed = entry.get("proposed").and_then(|v| v.as_str()).unwrap_or("");
+        let cardinality = match crate::knowledge::Cardinality::parse(proposed) {
+            Some(c) => c,
+            None => {
+                eprintln!("skipped '{predicate}': unknown cardinality '{proposed}'");
+                errors += 1;
+                continue;
+            }
+        };
+        match crate::knowledge::register_cardinality(&config, predicate, cardinality).await {
+            Ok(_) => registered += 1,
+            Err(e) => {
+                eprintln!("failed to register '{predicate}': {e}");
+                errors += 1;
+            }
+        }
+    }
+    println!(
+        "Registered {registered} High-confidence proposals; skipped {skipped} Low-confidence; {errors} errors."
+    );
     Ok(())
 }
 
