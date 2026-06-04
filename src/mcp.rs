@@ -490,6 +490,37 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let worked = arg_bool(args, "worked", false);
             crate::procedure::outcome(cfg, id, worked).await
         }
+        "mind_outcome" => {
+            // v1.5 Phase 7 step 7.1: generalised external-signal API.
+            // Differs from mind_procedure_outcome in three ways: works on
+            // any memory_id (not only procedures); accepts a typed signal
+            // (test_passed / code_compiled / user_confirmed / cited_by);
+            // is idempotent on (memory_id, signal_type, source).
+            let cfg = warm(true)?;
+            let memory_id = arg_str(args, "memory_id")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'memory_id'"))?;
+            let signal_type_str = arg_str(args, "signal_type")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'signal_type'"))?;
+            let signal_type = crate::outcome::OutcomeSignal::parse(&signal_type_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown signal_type '{signal_type_str}' — expected one of: \
+                         test_passed, code_compiled, user_confirmed, cited_by"
+                    )
+                })?;
+            let success = arg_bool(args, "success", true);
+            // Source defaults to a literal "unspecified" so the
+            // (signal_type, source) dedup key is well-defined even when
+            // callers omit it. Callers SHOULD pass a meaningful source.
+            let source = arg_str(args, "source").unwrap_or("unspecified").to_string();
+            let signal = crate::outcome::ExternalSignal {
+                signal_type,
+                success,
+                source,
+                ts: chrono::Utc::now().to_rfc3339(),
+            };
+            crate::outcome::record(&cfg, &memory_id, signal).await
+        }
 
         // ---- Terminal-only 3 (vault; never touch secrets over MCP) ----
         "mind_vault_store" => {
@@ -1006,6 +1037,24 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_outcome",
+            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "memory_id": { "type": "string", "description": "Target memory id (from mind_search or any tool returning ids)" },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["test_passed", "code_compiled", "user_confirmed", "cited_by"],
+                        "description": "What kind of signal this is. test_passed is the strongest (weight 1.0); cited_by the weakest (0.2)."
+                    },
+                    "success": { "type": "boolean", "default": true, "description": "Did the signal positively confirm the fact (true) or negate it (false)? A failed test_passed (success=false) pulls the score negative." },
+                    "source": { "type": "string", "description": "Stable identifier of where the signal came from (e.g. 'ci.github.com/run/12345', 'user-mad'). Used for idempotency." }
+                },
+                "required": ["memory_id", "signal_type"]
+            }
+        }),
+        json!({
             "name": "mind_history",
             "description": "Show recent additions chronologically",
             "inputSchema": {
@@ -1273,11 +1322,12 @@ mod tests {
         // verbs (mind_quarantine/_vault/_session/_fact/_library). The 15
         // deprecated singletons are still in the list, but flagged
         // `deprecated: true`. Total v1.1 = 35. v1.4 adds mind_predicate → 36.
+        // v1.5 Phase 7 adds mind_outcome → 37.
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            36,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) = 36"
+            37,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) = 37"
         );
         let deprecated = tools
             .iter()
@@ -1289,8 +1339,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 21,
-            "non-deprecated surface is 21 tools (20 v1.1 + 1 v1.4 mind_predicate)"
+            live_surface, 22,
+            "non-deprecated surface is 22 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome)"
         );
     }
 
@@ -1401,13 +1451,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_v1_4_surface() {
+    async fn tools_list_returns_v1_5_surface() {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
-        // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) = 36 total.
+        // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
+        // 1 v1.5 (mind_outcome) = 37 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 36);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 37);
     }
 
     #[tokio::test]
