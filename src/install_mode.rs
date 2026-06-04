@@ -96,6 +96,48 @@ impl InstallMode {
     pub const ALL: [Self; 3] = [Self::ChatOnly, Self::DevWithCi, Self::MultiTenant];
 }
 
+/// v1.5 Phase 6 step 6.2 — auto-detect heuristic.
+///
+/// Snapshot of the two counts that drive `recommend()`. Lives as a
+/// struct so the heuristic stays pure (testable without touching
+/// Qdrant or the filesystem), and so the wire-up code can collect
+/// the counts however it likes — file scan, Qdrant query, mock.
+#[derive(Debug, Clone, Copy)]
+pub struct DetectInputs {
+    /// Distinct `mind_outcome` / procedure-outcome events recorded in
+    /// the last 7 days. A live CI loop typically emits ≥ 10/week.
+    pub external_signal_count_last_7d: u32,
+    /// Distinct session-agent names seen in the last 30 days. Three
+    /// or more means at least two non-author agents have touched the
+    /// store — a multi-tenant deployment signature.
+    pub distinct_session_agents_last_30d: u32,
+}
+
+/// v1.5 Phase 6 step 6.2 thresholds. Chosen as conservative cliffs
+/// rather than gradients because the cost of mis-classification is
+/// silent quality drift (§10 q6). Each threshold needs strong
+/// evidence — better to stay on the safe `ChatOnly` default.
+pub const DEV_WITH_CI_SIGNAL_THRESHOLD: u32 = 10;
+pub const MULTI_TENANT_AGENT_THRESHOLD: u32 = 3;
+
+/// Pure recommendation function. Does NOT auto-apply — the caller
+/// (CLI `doctor`, `serve` first-run) reports the recommendation to
+/// the user, who explicitly sets it via `mgimind config install-mode`.
+///
+/// Ordering matters: a MultiTenant deployment with a CI loop should
+/// classify as `MultiTenant` (because multi-tenant emphasises
+/// `confirmations`, which is the dominant signal in that regime).
+/// So `MultiTenant` is checked first.
+pub fn recommend(inputs: DetectInputs) -> InstallMode {
+    if inputs.distinct_session_agents_last_30d >= MULTI_TENANT_AGENT_THRESHOLD {
+        return InstallMode::MultiTenant;
+    }
+    if inputs.external_signal_count_last_7d >= DEV_WITH_CI_SIGNAL_THRESHOLD {
+        return InstallMode::DevWithCi;
+    }
+    InstallMode::ChatOnly
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +227,70 @@ mod tests {
             multi.confirmations > InstallMode::ChatOnly.weights().confirmations,
             "MultiTenant must raise confirmations above ChatOnly"
         );
+    }
+
+    /// Step 6.2 gate: fresh install on empty base returns ChatOnly.
+    /// The safe fallback whenever there's no telemetry to act on.
+    #[test]
+    fn recommend_fresh_install_is_chat_only() {
+        let empty = DetectInputs {
+            external_signal_count_last_7d: 0,
+            distinct_session_agents_last_30d: 1,
+        };
+        assert_eq!(recommend(empty), InstallMode::ChatOnly);
+    }
+
+    /// Step 6.2 gate: 12 procedure-outcome events / week → DevWithCi.
+    /// Threshold is 10; using 12 leaves headroom for off-by-one drift.
+    #[test]
+    fn recommend_ci_load_promotes_to_dev_with_ci() {
+        let ci_load = DetectInputs {
+            external_signal_count_last_7d: 12,
+            distinct_session_agents_last_30d: 1,
+        };
+        assert_eq!(recommend(ci_load), InstallMode::DevWithCi);
+    }
+
+    /// Three+ distinct agents in a 30-day window is the multi-tenant
+    /// signature — confirmations weight becomes load-bearing.
+    #[test]
+    fn recommend_multiple_agents_promotes_to_multi_tenant() {
+        let multi_agent = DetectInputs {
+            external_signal_count_last_7d: 0,
+            distinct_session_agents_last_30d: 3,
+        };
+        assert_eq!(recommend(multi_agent), InstallMode::MultiTenant);
+    }
+
+    /// A multi-tenant deployment that ALSO has a CI loop classifies as
+    /// MultiTenant. Reason: multi-tenant emphasises confirmations
+    /// (independent agents reporting the same fact), which is the
+    /// dominant signal in that regime — external signals are
+    /// secondary. This is the ordering invariant from `recommend`.
+    #[test]
+    fn recommend_multi_tenant_beats_dev_with_ci_when_both_apply() {
+        let both = DetectInputs {
+            external_signal_count_last_7d: 50,
+            distinct_session_agents_last_30d: 5,
+        };
+        assert_eq!(recommend(both), InstallMode::MultiTenant);
+    }
+
+    /// Edge: exactly at the DevWithCi threshold (10) — the documented
+    /// promotion point. Catches accidental off-by-one in the
+    /// `>=` comparison.
+    #[test]
+    fn recommend_dev_with_ci_threshold_is_inclusive() {
+        let at_threshold = DetectInputs {
+            external_signal_count_last_7d: DEV_WITH_CI_SIGNAL_THRESHOLD,
+            distinct_session_agents_last_30d: 1,
+        };
+        assert_eq!(recommend(at_threshold), InstallMode::DevWithCi);
+
+        let just_below = DetectInputs {
+            external_signal_count_last_7d: DEV_WITH_CI_SIGNAL_THRESHOLD - 1,
+            distinct_session_agents_last_30d: 1,
+        };
+        assert_eq!(recommend(just_below), InstallMode::ChatOnly);
     }
 }
