@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.6.2 — facts inspection + machine-parseable stats
+
+Two more CLI usability additions.
+
+### `mgimind stats --json`
+
+Machine-parseable variant of stats for monitoring dashboards or
+scripts. Same fields, JSON shape. Useful during extraction to
+poll fact counts:
+
+```sh
+watch -n 30 'mgimind stats --json | jq .kg_facts'
+```
+
+### `mgimind facts list/show`
+
+First-class CLI surface for inspecting the knowledge graph.
+
+```sh
+mgimind facts list --limit 5 [--predicate uses_language] [--sort created] [--with-id]
+mgimind facts show <fact_id>
+```
+
+`show` prints every payload field the v1.5/v1.6 formulas read:
+subject, predicate, object, valid, created_at, dependants_count,
+confirmations_count, external_signals, confidence_score,
+doubt_drift_count, status.
+
+O(facts) for list — fine at 12k base, capped at 10k for the
+dependants decoration.
+
+### Tests
+
+290 unit + 6 integration tests, 0 failed.
+
 ## 1.6.1 — CLI surfaces for v1.5 / v1.6 features
 
 Four CLI usability fixes. No schema changes, no MCP surface
