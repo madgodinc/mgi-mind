@@ -339,8 +339,10 @@ mod tests {
 
     #[test]
     fn very_long_quarantined() {
-        let mut cfg = GateConfig::default();
-        cfg.max_chars = 100;
+        let cfg = GateConfig {
+            max_chars: 100,
+            ..GateConfig::default()
+        };
         let long = "word ".repeat(50); // 250 chars
         assert_eq!(check_cheap(&cand(&long), &cfg).reason(), Some("too_long"));
     }

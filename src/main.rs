@@ -40,19 +40,34 @@ use clap::Parser;
 use cli::Cli;
 use tracing_subscriber::EnvFilter;
 
-/// Tokio runtime built with an explicit 4 MB worker stack.
+/// v1.6.4 Windows fix (#23): the process main thread runs on the OS default
+/// stack (Windows: 1 MB; Linux: 8 MB; macOS: 512 KB but historically 8 MB
+/// for the binary's main thread). The v1.5 background re-test loop's futures
+/// (MindConfig clone + payload HashMaps + Vec<String> candidates) overflow
+/// the 1 MB Windows main thread.
 ///
-/// v1.6.4 Windows fix (#23): Windows default thread stack is 1 MB; the v1.5
-/// background re-test loop's futures (MindConfig clone + payload HashMaps +
-/// Vec<String> candidates) blow past it. Linux default is 8 MB so this is
-/// only observable on Windows. 4 MB is the smallest power-of-two that
-/// reliably fits the loop body's live state with a safety margin.
+/// Two layers:
+/// 1. Re-launch `main` on a `std::thread` with an explicit 8 MB stack. This
+///    fixes the *main* thread budget across platforms.
+/// 2. Build the tokio runtime with `thread_stack_size(8 * 1024 * 1024)` so
+///    every worker thread (where `tokio::spawn` lands futures) also gets
+///    8 MB.
+///
+/// 8 MB matches the Linux default — the most-tested configuration — and is
+/// enough headroom for the loop body's live state on any platform.
 fn main() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(4 * 1024 * 1024)
-        .build()?;
-    runtime.block_on(async_main())
+    let stack_size = 8 * 1024 * 1024; // 8 MB
+    let handle = std::thread::Builder::new()
+        .name("mgimind-main".into())
+        .stack_size(stack_size)
+        .spawn(move || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(stack_size)
+                .build()?;
+            runtime.block_on(async_main())
+        })?;
+    handle.join().expect("mgimind main thread panicked")
 }
 
 async fn async_main() -> Result<()> {

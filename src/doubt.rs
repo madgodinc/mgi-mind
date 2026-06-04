@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn centroid_of_one_vector_is_that_vector() {
         let v = vec![0.6, 0.8, 0.0];
-        let c = centroid(&[v.clone()]);
+        let c = centroid(std::slice::from_ref(&v));
         // After re-normalisation; v is already L2-normalised so the
         // centroid is identical.
         for (a, b) in v.iter().zip(c.iter()) {
