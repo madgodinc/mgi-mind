@@ -239,7 +239,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     format!("{}...", truncated[..cut].trim_end())
 }
 
-fn format_point_id(pid: &qdrant_client::qdrant::PointId) -> String {
+pub(crate) fn format_point_id(pid: &qdrant_client::qdrant::PointId) -> String {
     use qdrant_client::qdrant::point_id::PointIdOptions;
     match &pid.point_id_options {
         Some(PointIdOptions::Uuid(u)) => u.clone(),
