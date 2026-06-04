@@ -116,6 +116,7 @@ impl EntryStatus {
         }
     }
 
+    #[allow(dead_code)] // wired by Phase 2 duel-rule read path
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "active" => Some(EntryStatus::Active),
@@ -133,6 +134,7 @@ impl EntryStatus {
     /// hidden by default and require an explicit `include_stale` filter to
     /// surface — this is what lets the loser of a past duel keep its audit
     /// trail without poisoning future reads.
+    #[allow(dead_code)] // wired by Phase 2 duel-rule read path
     pub fn is_default_visible(self) -> bool {
         matches!(
             self,

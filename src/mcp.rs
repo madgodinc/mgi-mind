@@ -782,7 +782,7 @@ fn tool_definitions() -> Vec<Value> {
     // The dispatch table above still handles every old name, so any client
     // that already wires the old tools by name keeps working unchanged through
     // the v1.x line.
-    let mut tools = vec![
+    let tools = vec![
         json!({
             "name": "mind_search",
             "description": "Semantic search across memories",

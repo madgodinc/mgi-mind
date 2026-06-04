@@ -168,6 +168,16 @@ pub enum Commands {
         purge: bool,
     },
 
+    /// v1.4 Phase 1: prepare the existing memory base for the validity
+    /// model. Computes dependant counts per fact, proposes predicate
+    /// cardinalities, and backfills confirmation history where derivable.
+    /// All operations are idempotent and read-only by default; use --apply
+    /// to write the results back into the store.
+    MigrateV14 {
+        #[command(subcommand)]
+        what: MigrateV14Cmd,
+    },
+
     /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
     /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
     Bench {
@@ -282,6 +292,43 @@ pub enum Commands {
         /// Target library (default: `sessions`).
         #[arg(long, default_value = "sessions")]
         library: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MigrateV14Cmd {
+    /// For every fact in the knowledge graph, count how many memories in the
+    /// store semantically depend on it (cosine ≥ 0.7 against the fact's
+    /// (subject, predicate, object) vector). Prints a distribution histogram
+    /// (min / p10 / p50 / p90 / max) and, with --apply, writes a
+    /// `dependants_count` field to each fact's payload.
+    Dependants {
+        /// Cosine threshold for "definitely related". 0.7 is conservative.
+        #[arg(long, default_value = "0.7")]
+        threshold: f32,
+        /// Write the counts back to fact payloads. Without this flag the
+        /// command is read-only and prints the histogram only.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Inspect every distinct predicate in the knowledge graph and propose a
+    /// cardinality (Single / TemporalSingle / Multi) based on observed usage.
+    /// Writes proposals to a local JSON file for the user to review before
+    /// committing to the cardinality registry.
+    Cardinality {
+        /// Where to write the proposals JSON. Defaults to
+        /// `$MGIMIND_HOME/migration/cardinality-proposals.json`.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Backfill `confirmations_count` for memories that have a derivable
+    /// confirmation signal (linked to mind_procedure_outcome(worked=true) or
+    /// multi-source provenance). Memories without a derivable signal stay at
+    /// 0 and accumulate confirmations going forward.
+    Confirmations {
+        /// Write the counts back. Read-only without this flag.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -456,6 +503,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
+        Commands::MigrateV14 { what } => match what {
+            MigrateV14Cmd::Dependants { threshold, apply } => {
+                cmd_migrate_v14_dependants(threshold, apply).await
+            }
+            MigrateV14Cmd::Cardinality { output } => {
+                cmd_migrate_v14_cardinality(output.as_deref()).await
+            }
+            MigrateV14Cmd::Confirmations { apply } => {
+                cmd_migrate_v14_confirmations(apply).await
+            }
+        },
         Commands::Bench {
             dataset,
             format,
@@ -750,6 +808,73 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
         } else {
             println!("Old collections kept. Re-run with --purge to delete them once verified.");
         }
+    }
+    Ok(())
+}
+
+// ===== v1.4 Phase 1 migrations =====
+
+async fn cmd_migrate_v14_dependants(threshold: f32, apply: bool) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    println!(
+        "v1.4 Phase 1.1 — counting dependants per fact (cosine threshold = {threshold}{}).",
+        if apply { ", writing back to payloads" } else { ", read-only" }
+    );
+    let (counts, summary) =
+        crate::migrate_v14::run_dependants(&config, threshold, apply).await?;
+    println!("\n{}", summary.render("dependants per fact"));
+    println!("formula-shape recommendation: {}", summary.recommended_formula_shape());
+    if !apply && !counts.is_empty() {
+        println!("\nRun again with --apply to write the counts back into fact payloads.");
+    }
+    if !apply && counts.is_empty() {
+        println!(
+            "\n(walk implementation still landing in step 1.1 commit 2; CLI scaffold ready.)"
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_migrate_v14_cardinality(output: Option<&str>) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let default_path = crate::config::mind_home()
+        .join("migration")
+        .join("cardinality-proposals.json");
+    let output_path = output.map(std::path::PathBuf::from).unwrap_or(default_path);
+    println!(
+        "v1.4 Phase 1.2 — inferring predicate cardinalities → {}",
+        output_path.display()
+    );
+    let n = crate::migrate_v14::run_cardinality_inference(&config, output_path.clone()).await?;
+    if n == 0 {
+        println!(
+            "(walk implementation still landing in step 1.2 commit; CLI scaffold ready.)"
+        );
+    } else {
+        println!(
+            "Wrote {n} proposals to {}. Review the JSON, then commit each with `mgimind mcp` tool `mind_predicate(action=\"register\")` or edit the file in place before a future bulk apply.",
+            output_path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_migrate_v14_confirmations(apply: bool) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    println!(
+        "v1.4 Phase 1.3 — backfilling confirmations from derivable signals{}.",
+        if apply { ", writing back" } else { ", read-only" }
+    );
+    let (n_backfilled, summary) = crate::migrate_v14::run_confirmations(&config, apply).await?;
+    println!("\n{}", summary.render("confirmations per memory (where derivable)"));
+    if n_backfilled == 0 {
+        println!(
+            "\n(walk implementation still landing in step 1.3 commit; CLI scaffold ready.)"
+        );
+    } else if !apply {
+        println!("\nRun again with --apply to write {n_backfilled} backfills.");
+    } else {
+        println!("\nBackfilled {n_backfilled} memories. Others stay at 0 and accumulate going forward.");
     }
     Ok(())
 }
