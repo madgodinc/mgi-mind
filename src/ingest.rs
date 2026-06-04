@@ -303,34 +303,12 @@ pub async fn run_ingest(
                     crate::storage::add_memory(config, library, &content, Some("ingest")).await?;
                 if n > 0 {
                     report.stored_memories += 1;
-                    // v1.4 Phase 5 step 5.5: fire-and-forget auto-extraction.
-                    // If the extractor is installed, spawn a background task
-                    // that runs the chunk through the LLM and writes the
-                    // resulting S-P-O triples to the knowledge graph via
-                    // add_fact. Single-permit semaphore inside extract_facts
-                    // ensures bursts queue rather than starve the runtime.
+                    // v1.4 Phase 5 step 5.5: fire-and-forget auto-extraction
+                    // through a bounded mpsc queue (post-critic fix). The
+                    // worker is a single dedicated task; bursts drop
+                    // overflow rather than spawn unbounded futures.
                     if crate::extractor::is_llama_server_installed() {
-                        let cfg_clone = config.clone();
-                        let content_clone = content.clone();
-                        tokio::spawn(async move {
-                            let ec = crate::extractor::ExtractConfig::default();
-                            match crate::extractor::extract_facts(&ec, &content_clone).await {
-                                Ok(triples) => {
-                                    for t in triples {
-                                        let _ = crate::knowledge::add_fact(
-                                            &cfg_clone,
-                                            &t.subject,
-                                            &t.predicate,
-                                            &t.object,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("auto-extract failed (chunk dropped): {e}");
-                                }
-                            }
-                        });
+                        crate::extractor::enqueue_auto_extract(config, &content);
                     }
                 }
             }

@@ -1491,6 +1491,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "libc",
  "once_cell",
  "ort",
  "parking_lot",
