@@ -700,6 +700,63 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             }
         }
 
+        // v1.4 Phase 0 step 3: predicate cardinality registry.
+        // Configures whether two distinct objects for the same
+        // (subject, predicate) pair count as a conflict (Single,
+        // TemporalSingle) or coexist (Multi). Default for unregistered
+        // predicates is Multi.
+        "mind_predicate" => {
+            let action = arg_str(args, "action").ok_or_else(|| {
+                anyhow::anyhow!("missing required 'action' (register|list|get)")
+            })?;
+            match action {
+                "register" => {
+                    let cfg = warm(true)?;
+                    let predicate = arg_str(args, "predicate").ok_or_else(|| {
+                        anyhow::anyhow!("action=register requires 'predicate'")
+                    })?;
+                    let cardinality_str = arg_str(args, "cardinality").ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "action=register requires 'cardinality' (single|temporal-single|multi)"
+                        )
+                    })?;
+                    let cardinality = crate::knowledge::Cardinality::parse(cardinality_str)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "unknown cardinality '{cardinality_str}' (expected single|temporal-single|multi)"
+                            )
+                        })?;
+                    crate::knowledge::register_cardinality(cfg, predicate, cardinality).await?;
+                    Ok(format!(
+                        "Registered '{predicate}' as {cardinality:?}."
+                    ))
+                }
+                "get" => {
+                    let cfg = warm(true)?;
+                    let predicate = arg_str(args, "predicate")
+                        .ok_or_else(|| anyhow::anyhow!("action=get requires 'predicate'"))?;
+                    let c = crate::knowledge::get_cardinality(cfg, predicate).await?;
+                    Ok(format!("{predicate} -> {c:?}"))
+                }
+                "list" => {
+                    let cfg = warm(true)?;
+                    let entries = crate::knowledge::list_cardinalities(cfg).await?;
+                    if entries.is_empty() {
+                        Ok("No predicates registered. Default for any unregistered predicate is Multi.".to_string())
+                    } else {
+                        let mut out = format!("{} registered predicate(s):\n", entries.len());
+                        for (p, c) in entries {
+                            out.push_str(&format!("  {p} -> {c:?}\n"));
+                        }
+                        Ok(out)
+                    }
+                }
+                other => anyhow::bail!(
+                    "mind_predicate: unknown action '{other}' (expected register|list|get)"
+                ),
+            }
+        }
+
         // Test-only handler that panics, so a test can prove the panic-isolation
         // wrapper in `tools/call` turns a handler panic into an `isError` result
         // instead of unwinding through the read loop and killing the session.
@@ -1110,6 +1167,19 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["action"]
             }
         }),
+        json!({
+            "name": "mind_predicate",
+            "description": "v1.4: register and inspect predicate cardinality (single | temporal-single | multi). Cardinality controls how `mind_fact(action=\"add\")` detects conflicts: Multi predicates never conflict; Single/TemporalSingle flag a `conflict_pending` event when a second distinct object is asserted. Default for unregistered predicates is Multi.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["register", "get", "list"], "description": "Operation" },
+                    "predicate": { "type": "string", "description": "Required for action=register and action=get" },
+                    "cardinality": { "type": "string", "enum": ["single", "temporal-single", "multi"], "description": "Required for action=register" }
+                },
+                "required": ["action"]
+            }
+        }),
     ];
 
     // Mark the 13 singletons as deprecated and rewrite their description with
@@ -1179,12 +1249,12 @@ mod tests {
         // v1.1 alias phase: 30 v1.0 singletons stay live + 5 new consolidated
         // verbs (mind_quarantine/_vault/_session/_fact/_library). The 15
         // deprecated singletons are still in the list, but flagged
-        // `deprecated: true`. Total 35.
+        // `deprecated: true`. Total v1.1 = 35. v1.4 adds mind_predicate → 36.
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            35,
-            "tools/list = 30 legacy + 5 consolidated v1.1 = 35 entries total"
+            36,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) = 36"
         );
         let deprecated = tools
             .iter()
@@ -1196,8 +1266,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 20,
-            "non-deprecated surface is 20 tools (the user-facing v1.1 shape)"
+            live_surface, 21,
+            "non-deprecated surface is 21 tools (20 v1.1 + 1 v1.4 mind_predicate)"
         );
     }
 
@@ -1210,11 +1280,12 @@ mod tests {
             "mind_session",
             "mind_fact",
             "mind_library",
+            "mind_predicate", // v1.4
         ] {
             let found = tools
                 .iter()
                 .any(|t| t.get("name").and_then(Value::as_str) == Some(needed));
-            assert!(found, "v1.1 consolidated tool {needed} missing from tools/list");
+            assert!(found, "consolidated tool {needed} missing from tools/list");
         }
     }
 
@@ -1307,13 +1378,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_v1_1_surface() {
-        // 30 legacy v1.0 singletons (15 of which are deprecated but kept for
-        // the alias phase) + 5 consolidated v1.1 verbs = 35 total entries.
+    async fn tools_list_returns_v1_4_surface() {
+        // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
+        // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) = 36 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 35);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 36);
     }
 
     #[tokio::test]

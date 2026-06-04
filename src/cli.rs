@@ -1036,6 +1036,30 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         );
     }
 
+    // v1.4: surface the predicate-cardinality registry and any pending
+    // duel events. Counts only — `mgimind doctor` is a snapshot, not a
+    // resolver. The Phase 2 duel rule will offer interactive resolution.
+    if config::is_initialized() {
+        let cfg = crate::config::load_cached()?;
+        if let Ok(predicates) = crate::knowledge::list_cardinalities(&cfg).await {
+            let _ = writeln!(
+                out,
+                "[OK]   v1.4 predicate registry: {} predicate(s) with explicit cardinality",
+                predicates.len()
+            );
+        }
+        if let Ok((contested, shadowed)) = crate::knowledge::count_pending_conflicts(&cfg).await {
+            if contested == 0 && shadowed == 0 {
+                let _ = writeln!(out, "[OK]   No pending fact conflicts");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); duel rule resolution arrives in Phase 2"
+                );
+            }
+        }
+    }
+
     if issues == 0 && fixed == 0 {
         let _ = write!(out, "\nAll checks passed.");
     } else if fix && issues == 0 {
