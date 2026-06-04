@@ -270,6 +270,71 @@ pub fn render_summary(report: &StaleReport) -> String {
 
 // ===== Public entry — scaffold =====
 
+/// Phase 4 calibration overrides — passed into `run()` so the sweep
+/// harness can iterate over duel/doubt constants without recompiling.
+/// Post-critic addition (PR #7 round): the previous signature gave the
+/// sweep harness no way to vary thresholds; v2.0 STALE re-runs depend
+/// on this being addressable.
+///
+/// Each field is `Option<f32>` — `None` means "use the compiled-in
+/// constant from duel.rs / doubt.rs"; `Some(value)` means "override
+/// for this run only." This keeps the default-call site
+/// `CalibrationOverrides::default()` cheap and the sweep harness
+/// just sets one field at a time.
+#[derive(Debug, Clone, Default)]
+pub struct CalibrationOverrides {
+    pub duel_flip_ratio: Option<f32>,
+    pub duel_contested_ratio: Option<f32>,
+    pub entrenchment_norm_divisor: Option<f32>,
+    pub weight_confirmations: Option<f32>,
+    pub weight_external_signal: Option<f32>,
+    pub inheritance_discount: Option<f32>,
+    pub doubt_drift_threshold: Option<f32>,
+    pub doubt_confidence_multiplier: Option<f32>,
+    pub doubt_window_n_retrievals: Option<u32>,
+}
+
+impl CalibrationOverrides {
+    /// Render the active overrides as a one-line tag for the
+    /// `calibration_report.md` rows. None-valued fields are omitted so
+    /// a row stays compact.
+    pub fn tag(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = self.duel_flip_ratio {
+            parts.push(format!("flip={v}"));
+        }
+        if let Some(v) = self.duel_contested_ratio {
+            parts.push(format!("contested={v}"));
+        }
+        if let Some(v) = self.entrenchment_norm_divisor {
+            parts.push(format!("norm_div={v}"));
+        }
+        if let Some(v) = self.weight_confirmations {
+            parts.push(format!("w_conf={v}"));
+        }
+        if let Some(v) = self.weight_external_signal {
+            parts.push(format!("w_ext={v}"));
+        }
+        if let Some(v) = self.inheritance_discount {
+            parts.push(format!("inh={v}"));
+        }
+        if let Some(v) = self.doubt_drift_threshold {
+            parts.push(format!("drift={v}"));
+        }
+        if let Some(v) = self.doubt_confidence_multiplier {
+            parts.push(format!("doubt_mul={v}"));
+        }
+        if let Some(v) = self.doubt_window_n_retrievals {
+            parts.push(format!("doubt_n={v}"));
+        }
+        if parts.is_empty() {
+            "default".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+}
+
 /// Run the STALE benchmark against the current mgi-mind store.
 ///
 /// **Scaffold note.** The harness adapter (STALE protocol →
@@ -281,9 +346,11 @@ pub async fn run(
     _dataset: PathBuf,
     _judge_model: &str,
     _limit: Option<usize>,
+    overrides: CalibrationOverrides,
     output: PathBuf,
 ) -> Result<StaleReport> {
     eprintln!("STALE bench: scaffold — harness adapter not implemented yet");
+    eprintln!("            overrides: {}", overrides.tag());
     eprintln!("            target output path: {}", output.display());
     eprintln!(
         "            wire-up requires the STALE public harness (Appendix G of arxiv 2605.06527)"
@@ -416,5 +483,98 @@ mod tests {
         assert!(s.contains("mem0"));
         assert!(s.contains("Zep"));
         assert!(s.contains("CUPMem"));
+    }
+
+    // --- CalibrationOverrides ---
+
+    #[test]
+    fn calibration_overrides_default_tag() {
+        let o = CalibrationOverrides::default();
+        assert_eq!(o.tag(), "default");
+    }
+
+    #[test]
+    fn calibration_overrides_tag_lists_non_none_fields() {
+        let o = CalibrationOverrides {
+            duel_flip_ratio: Some(2.0),
+            doubt_drift_threshold: Some(0.3),
+            ..Default::default()
+        };
+        let tag = o.tag();
+        assert!(tag.contains("flip=2"));
+        assert!(tag.contains("drift=0.3"));
+        // Comma-separated for sweep harness CSV friendliness.
+        assert!(tag.contains(","));
+    }
+
+    #[test]
+    fn calibration_overrides_tag_skips_none_fields() {
+        let o = CalibrationOverrides {
+            duel_flip_ratio: Some(1.5),
+            ..Default::default()
+        };
+        let tag = o.tag();
+        // Only the one field set should appear; others must not.
+        assert_eq!(tag, "flip=1.5");
+    }
+
+    // --- Publish-decision boundary values ---
+
+    fn mk_report(pct: f32) -> StaleReport {
+        StaleReport {
+            scenarios_run: 100,
+            overall_pct: pct,
+            by_metric: ByMetric {
+                state_resolution_pct: pct,
+                premise_resistance_pct: pct,
+                implicit_policy_adaptation_pct: pct,
+            },
+            by_conflict_type: ByConflictType {
+                type_i_pct: pct,
+                type_ii_pct: pct,
+            },
+            judge_model: "j".into(),
+            mgimind_version: "x".into(),
+        }
+    }
+
+    #[test]
+    fn publish_decision_boundary_at_50_inclusive() {
+        // 50.0 exactly is the boundary between PublishHeadline and
+        // PublishLikelyCUPMemRange. Spec says >= 50 → CUPMem-range.
+        assert_eq!(
+            publish_decision(&mk_report(50.0)),
+            PublishDecision::PublishLikelyCUPMemRange
+        );
+        assert_eq!(
+            publish_decision(&mk_report(49.9)),
+            PublishDecision::PublishHeadline
+        );
+    }
+
+    #[test]
+    fn publish_decision_boundary_at_15_inclusive() {
+        // 15.0 exactly → PublishHonest. 14.9 → Withhold.
+        assert_eq!(
+            publish_decision(&mk_report(15.0)),
+            PublishDecision::PublishHonest
+        );
+        assert_eq!(
+            publish_decision(&mk_report(14.9)),
+            PublishDecision::Withhold
+        );
+    }
+
+    #[test]
+    fn publish_decision_boundary_at_30_inclusive() {
+        // 30.0 exactly → PublishHeadline. 29.9 → PublishHonest.
+        assert_eq!(
+            publish_decision(&mk_report(30.0)),
+            PublishDecision::PublishHeadline
+        );
+        assert_eq!(
+            publish_decision(&mk_report(29.9)),
+            PublishDecision::PublishHonest
+        );
     }
 }
