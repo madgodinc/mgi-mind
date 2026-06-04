@@ -13,6 +13,7 @@ mod integrity;
 mod knowledge;
 mod mcp;
 mod md_reconcile;
+mod migrate_v14;
 mod procedure;
 mod provenance;
 mod relevance;
