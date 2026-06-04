@@ -323,12 +323,18 @@ code, not a comment in the spec.
 
 ---
 
-## Phase 4 — calibration + bench (2-3 days)
+## Phase 4 — calibration + bench (3-4 days)
 
 Goal: tune the parameters set in Phases 2-3 against the real base,
-then prove no regression.
+then prove no regression on LongMemEval-S **and** report the
+primary number on STALE (arxiv 2605.06527) — the field-recognised
+benchmark for exactly the belief-revision behaviour this milestone
+implements. The plan changed from "invent a custom QA harness" to
+"run STALE" after the prior-art search; STALE makes the result
+directly comparable to mem0=8.3, Zep=6.0, A-mem=5.1, and
+CUPMem=68.0 on the same scale.
 
-### Step 4.1 — Threshold sweep (1-2 days)
+### Step 4.1 — Threshold sweep against LongMemEval-S (1-2 days)
 
 **Artifact:** for each tunable constant
 (`DUEL_FLIP_RATIO`, `DUEL_CONTESTED_RATIO`, `DOUBT_THRESHOLD`,
@@ -339,24 +345,65 @@ with `± 25%` and `± 50%` sweeps. Pick the value that produces:
 - fewest false-positive duels in author spot-check (10 random
   recent facts)
 
-**Output:** `calibration_report.md` with chosen values and the
-sweep data behind each choice.
+**Output:** `calibration_report.md` (local only — references real
+facts; publishable summary commits to repo).
 
-**Gate to Step 4.2:** report committed. Constants in code match
-the chosen values, with comments linking to the report.
+**Gate to Step 4.2:** report committed locally. Constants in code
+match the chosen values, with comments linking to the report.
 
-### Step 4.2 — Smoke regression bench (0.5 day)
+### Step 4.2 — LongMemEval-S regression bench (0.5 day)
 
 **Artifact:** full LongMemEval-S 500q run on the v1.4-built system.
 R@1 / R@5 / R@10 reported. Must be within ±1.0pp of v1.1 baseline
-(the headline 98.2%) at minimum, ideally above.
+(the headline 98.2%) at minimum. This is the **regression check**
+— it guards that v1.4 mechanisms did not degrade pure retrieval
+recall. It is not the headline result for v1.4; that's Step 4.3.
 
-If above: that's the v1.4 release headline.
-If within tolerance: ship as "no regression, new mechanics, paid
-for by background budget" honest release.
-If below: do not ship. Calibration round 2 needed.
+If R@5 within tolerance: continue to Step 4.3.
+If R@5 below tolerance: do not ship; calibration round 2 needed.
 
-**Gate to release:** R@k meets the bar. Documentation drafted.
+### Step 4.3 — STALE benchmark (1-2 days)
+
+**Artifact:** clone STALE's published code+data (CC BY 4.0,
+release confirmed in Appendix G of arxiv 2605.06527; verify URL
+on first use), build the mgi-mind adapter (consume scenarios,
+write to facts collection, query under the three behavioural
+dimensions), run the full 400 scenarios / 1200 queries with the
+Gemini-3.1-flash-lite judge.
+
+**Budget:** order of magnitude tens to low hundreds of USD on a
+flash-tier judge. Materially more on a frontier judge — not
+needed for the headline number, but worth one frontier-judge run
+on a 50-scenario subset to verify the cheap-judge result is not
+artifacted by the cheap judge. Total estimated: $40-150 for the
+full flash run, plus $20-50 for the frontier subset verification.
+
+**Output:** STALE Overall %, broken down by metric (State
+Resolution / Premise Resistance / Implicit Policy Adaptation)
+and conflict type (Type I / Type II). Numbers commit to a new
+`BENCHMARKS-STALE.md` section.
+
+**Expected positioning of the result:**
+- **≥ 30% Overall** (beats LightMem, materially beats mem0/Zep):
+  publishable v1.4 release headline. The arXiv preprint angle
+  becomes "first locally hosted open-source memory layer to ship
+  the four mechanisms together, validated on STALE."
+- **15-30%**: honest release, narrative is "first to ship; the
+  full pipeline needs more calibration." Useful baseline for
+  iteration.
+- **< 15%** (worse than LightMem): do not publish the STALE
+  number publicly until the next calibration round. Internal
+  hold; debug; iterate. Releasing a bad number is worse than
+  not releasing.
+- **> 50%** (in CUPMem range): unlikely on the first pass;
+  if it lands there, double-check the harness, then publish.
+
+**Known limitation:** STALE is English-only. The Russian path
+mgi-mind handles is not measured. Reported as a coverage gap in
+the release notes, not papered over.
+
+**Gate to release:** STALE result lands in one of the publishable
+bands above and LongMemEval-S regression check passed.
 
 ---
 
@@ -377,22 +424,20 @@ If below: do not ship. Calibration round 2 needed.
 
 `v1.4.0`. GitHub release with the changelog as notes, latest=true.
 
-### Step 5.3 — Comparative judge-eval (deferred, ~$30-50)
+### Step 5.3 — arXiv preprint
 
-This is the **measurement that closes the loop** per §11. Run the
-v1.4-built system through LongMemEval-S **QA** harness with a gpt-4o
-judge. Compare to published mem0 / Zep / supermemory numbers on the
-same harness.
+The STALE result from Phase 4.3 is the headline. The preprint
+frames the contribution as "first locally hosted, open-source
+memory layer implementing the four mechanisms together, validated
+on STALE" — citing the prior-art file (`docs/design/v1.4/prior-
+art.md`), naming the implementation gap that the published memory
+products leave open, and reporting the STALE result against their
+baselines.
 
-Three possible outcomes:
-- **QA ≥ Zep (71.2%)**: write the arXiv preprint angled on
-  "calibrated confidence as a feature, not a bug, here is how" — the
-  §11.5 positioning becomes the paper's contribution.
-- **QA in the 60-70% range**: honest release note, narrative is
-  "comparable on QA, structurally honest about calibration." Still
-  fine; the differentiator was never QA, it was the design.
-- **QA below 60%**: do not publish the QA number. Do publish the
-  R@k bench. Re-enter Phase 4 with calibration round 2.
+Not gated on Phase 4.3 number — the preprint goes out regardless
+unless the number lands in the "do not publish publicly" band,
+in which case the implementation note ships without the bench
+number until the next calibration round.
 
 ---
 
@@ -404,9 +449,9 @@ Three possible outcomes:
 | 1 — migration + measurement | 3-5 | Distributions printed, cardinality reviewed |
 | 2 — duel rule | 3-5 | Spot-check ordering matches intuition |
 | 3 — doubt + inheritance | 3-4 | Background guards work, both paths complete |
-| 4 — calibration + bench | 2-3 | R@k holds |
+| 4 — calibration + bench (LongMemEval-S + STALE) | 3-4 | R@k regression + STALE in publishable band |
 | 5 — release | 0.5-1 | v1.4.0 tagged |
-| **Total** | **~12-19 focused days** | |
+| **Total** | **~13-20 focused days** | |
 
 This is honest. Synthesis effort estimate said 3-6 weeks; with
 weekends and breaks, ~12-19 focused days lands inside that range.
