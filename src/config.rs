@@ -57,6 +57,11 @@ pub struct MindConfig {
     /// How many dense candidates to fetch and rerank before returning `limit`.
     #[serde(default = "default_rerank_top_k")]
     pub rerank_top_k: usize,
+    /// v1.5 Phase 6: install profile selecting per-mode confidence-score
+    /// anchors. Default `chat-only` matches the legacy single-user behaviour
+    /// — existing configs that pre-date v1.5 deserialise unchanged.
+    #[serde(default)]
+    pub install_mode: crate::install_mode::InstallMode,
 }
 
 fn default_rerank_model() -> String {
@@ -87,6 +92,7 @@ impl Default for MindConfig {
             rerank_enabled: true,
             rerank_model: default_rerank_model(),
             rerank_top_k: default_rerank_top_k(),
+            install_mode: crate::install_mode::InstallMode::default(),
         }
     }
 }
@@ -207,5 +213,17 @@ mod tests {
         assert_eq!(cfg.model_name, "all-MiniLM-L6-v2");
         assert!(cfg.uses_token_type_ids);
         assert_eq!(cfg.query_prefix, "");
+    }
+
+    /// v1.5 Phase 6: pre-v1.5 configs with no `install_mode` field must
+    /// deserialise to `InstallMode::ChatOnly` (the single-user-chat
+    /// default that matches legacy behaviour). Catches accidental
+    /// breaking changes to the serde default.
+    #[test]
+    fn pre_v15_config_defaults_to_chat_only() {
+        use crate::install_mode::InstallMode;
+        let json = r#"{"version":"0.1.0","data_dir":"/tmp/x","model_name":"all-MiniLM-L6-v2","qdrant_port":6334}"#;
+        let cfg: MindConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.install_mode, InstallMode::ChatOnly);
     }
 }
