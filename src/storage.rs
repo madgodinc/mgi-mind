@@ -368,7 +368,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
-            .create_field_index(CreateFieldIndexCollectionBuilder::new(collection, field, ty))
+            .create_field_index(CreateFieldIndexCollectionBuilder::new(
+                collection, field, ty,
+            ))
             .await
         {
             Ok(_) => tracing::debug!(collection, field, "ensure_payload_index: ok"),
@@ -783,7 +785,10 @@ pub async fn add_memory(
 
     tracing::debug!(library, "add_memory: get_client start");
     let client = get_client(config).await?;
-    tracing::debug!(library, "add_memory: get_client done; ensure_memories_collection start");
+    tracing::debug!(
+        library,
+        "add_memory: get_client done; ensure_memories_collection start"
+    );
     ensure_memories_collection(&client, config.vector_size).await?;
     tracing::debug!(library, "add_memory: ensure_memories_collection done");
 
@@ -797,7 +802,11 @@ pub async fn add_memory(
     }
 
     // Embed every chunk in a single batched pass (audit #2).
-    tracing::debug!(library, n_chunks = chunks.len(), "add_memory: embed_passages start");
+    tracing::debug!(
+        library,
+        n_chunks = chunks.len(),
+        "add_memory: embed_passages start"
+    );
     let embeddings = embedder::embed_passages(config, &chunks).await?;
     tracing::debug!(library, "add_memory: embed_passages done");
     for e in &embeddings {
@@ -1030,7 +1039,10 @@ pub async fn quarantine_list_page(
         .await
         .unwrap_or(false)
     {
-        return Ok(QuarantinePage { entries: Vec::new(), next_cursor: None });
+        return Ok(QuarantinePage {
+            entries: Vec::new(),
+            next_cursor: None,
+        });
     }
 
     let filter = match library {
@@ -1048,7 +1060,8 @@ pub async fn quarantine_list_page(
     let order = OrderBy {
         key: "created_at".to_string(),
         direction: Some(Direction::Desc as i32),
-        start_from: cursor.map(|c| qdrant_client::qdrant::start_from::Value::Datetime(c.to_string()).into()),
+        start_from: cursor
+            .map(|c| qdrant_client::qdrant::start_from::Value::Datetime(c.to_string()).into()),
     };
 
     let fetch_limit = limit + 1;
@@ -1067,7 +1080,9 @@ pub async fn quarantine_list_page(
     // If we got more than `limit`, there's a next page; the extra row's
     // created_at becomes the cursor and we drop it from the returned set.
     let next_cursor = if points.len() > limit {
-        points.pop().and_then(|p| extract_string(&p.payload, "created_at"))
+        points
+            .pop()
+            .and_then(|p| extract_string(&p.payload, "created_at"))
     } else {
         None
     };
@@ -1088,7 +1103,10 @@ pub async fn quarantine_list_page(
         })
         .collect();
 
-    Ok(QuarantinePage { entries, next_cursor })
+    Ok(QuarantinePage {
+        entries,
+        next_cursor,
+    })
 }
 
 /// Backwards-compatible single-page lister. Used by the CLI/MCP surfaces
@@ -1144,11 +1162,16 @@ pub async fn quarantine_get(config: &MindConfig, id: &str) -> Result<Option<Quar
 }
 
 /// Helper to read a bool from Qdrant payload.
-fn extract_bool(payload: &HashMap<String, qdrant_client::qdrant::Value>, key: &str) -> Option<bool> {
-    payload.get(key).and_then(|v| v.kind.as_ref().and_then(|k| match k {
-        qdrant_client::qdrant::value::Kind::BoolValue(b) => Some(*b),
-        _ => None,
-    }))
+fn extract_bool(
+    payload: &HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<bool> {
+    payload.get(key).and_then(|v| {
+        v.kind.as_ref().and_then(|k| match k {
+            qdrant_client::qdrant::value::Kind::BoolValue(b) => Some(*b),
+            _ => None,
+        })
+    })
 }
 
 /// Cap audit log lines: a single memory can be a long article. 500 chars is
@@ -1283,7 +1306,9 @@ fn build_payload(
     source: Option<&str>,
     mem_type: &str,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
-    build_payload_full(content, hash, created_at, updated_at, library, source, mem_type, None, None)
+    build_payload_full(
+        content, hash, created_at, updated_at, library, source, mem_type, None, None,
+    )
 }
 
 /// Full-form payload builder. `quarantined=Some(true)` flags a point as not
@@ -1898,9 +1923,10 @@ pub async fn list_procedure_last_used(config: &MindConfig) -> Result<Vec<String>
         let response = client.scroll(builder).await?;
         for point in &response.result {
             if let Some(ts) = extract_string(&point.payload, "last_used")
-                && !ts.is_empty() {
-                    out.push(ts);
-                }
+                && !ts.is_empty()
+            {
+                out.push(ts);
+            }
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
@@ -1955,7 +1981,13 @@ pub async fn read_external_signals(
     memory_id: &str,
 ) -> Result<Vec<crate::outcome::ExternalSignal>> {
     let client = get_client(config).await?;
-    let Some(raw) = existing_payload_string(&client, MEMORIES_COLLECTION, memory_id, "external_signals_v15").await
+    let Some(raw) = existing_payload_string(
+        &client,
+        MEMORIES_COLLECTION,
+        memory_id,
+        "external_signals_v15",
+    )
+    .await
     else {
         return Ok(Vec::new());
     };
@@ -1975,8 +2007,8 @@ pub async fn write_external_signals(
     memory_id: &str,
     signals: &[crate::outcome::ExternalSignal],
 ) -> Result<()> {
-    let serialised = serde_json::to_string(signals)
-        .context("failed to serialise external_signals_v15")?;
+    let serialised =
+        serde_json::to_string(signals).context("failed to serialise external_signals_v15")?;
     set_memory_payload_field(config, memory_id, "external_signals_v15", serialised).await
 }
 
@@ -2035,8 +2067,7 @@ pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Res
         .await
         .context("Failed to delete memory")?;
 
-    let mut ev =
-        crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, _library, id);
+    let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, _library, id);
     if let Some(content) = before {
         ev = ev.before(truncate_for_audit(&content));
     }

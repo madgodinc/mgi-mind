@@ -50,8 +50,7 @@ pub const EXTERNAL_SCORE_NORM_SCALE: f32 = 5.0;
 /// Inputs to `confidence_score`. Same shape as `duel::EntrenchmentInputs`
 /// plus the typed external-signal score from Phase 7 and the
 /// inherited flag from Phase 3.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ConfidenceInputs {
     /// `dependants_count` payload field, written by Phase 1.1 walk.
     pub dependants: u32,
@@ -70,7 +69,6 @@ pub struct ConfidenceInputs {
     /// session — applies a 0.5 penalty per §3 mechanism 3.
     pub inherited_unverified: bool,
 }
-
 
 /// v1.5 Phase 8 step 8.2: pure confidence_score formula.
 ///
@@ -274,10 +272,7 @@ mod tests {
         };
         let score = confidence_score(inputs, InstallMode::ChatOnly);
         // ChatOnly w_external = 0.2 → -1.0 × 0.2 = -0.2.
-        assert!(
-            (score - (-0.2)).abs() < 1e-5,
-            "expected ~-0.2, got {score}"
-        );
+        assert!((score - (-0.2)).abs() < 1e-5, "expected ~-0.2, got {score}");
     }
 
     // --- Step 8.2 transition tests ---

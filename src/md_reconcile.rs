@@ -103,11 +103,7 @@ pub struct PlanCounts {
 
 /// Build the plan: scan the directory, fetch existing points per source,
 /// decide per-file action. Does NOT mutate anything — that's `apply`.
-pub async fn plan(
-    config: &MindConfig,
-    library: &str,
-    root: &Path,
-) -> Result<ReconcilePlan> {
+pub async fn plan(config: &MindConfig, library: &str, root: &Path) -> Result<ReconcilePlan> {
     if !root.exists() || !root.is_dir() {
         anyhow::bail!("Directory not found: {}", root.display());
     }
@@ -180,42 +176,26 @@ pub async fn apply(config: &MindConfig, plan: &ReconcilePlan) -> Result<ApplyRep
                 for old in &f.existing {
                     storage::delete_memory(config, &plan.library, &old.id)
                         .await
-                        .with_context(|| {
-                            format!("Failed to delete old point for {}", f.source)
-                        })?;
+                        .with_context(|| format!("Failed to delete old point for {}", f.source))?;
                 }
-                let n = storage::add_memory(
-                    config,
-                    &plan.library,
-                    &f.new_content,
-                    Some(&f.source),
-                )
-                .await
-                .with_context(|| format!("Failed to write new content for {}", f.source))?;
+                let n = storage::add_memory(config, &plan.library, &f.new_content, Some(&f.source))
+                    .await
+                    .with_context(|| format!("Failed to write new content for {}", f.source))?;
                 report.replaced += 1;
                 report.chunks_written += n;
                 audit::record(
-                    audit::AuditEvent::new(
-                        audit::AuditOp::Update,
-                        &plan.library,
-                        &f.source,
-                    )
-                    .actor("md-import")
-                    .note(format!(
-                        "md reconcile: replaced {} existing point(s) with {n} chunk(s)",
-                        f.existing.len()
-                    )),
+                    audit::AuditEvent::new(audit::AuditOp::Update, &plan.library, &f.source)
+                        .actor("md-import")
+                        .note(format!(
+                            "md reconcile: replaced {} existing point(s) with {n} chunk(s)",
+                            f.existing.len()
+                        )),
                 );
             }
             PlanAction::New => {
-                let n = storage::add_memory(
-                    config,
-                    &plan.library,
-                    &f.new_content,
-                    Some(&f.source),
-                )
-                .await
-                .with_context(|| format!("Failed to write new content for {}", f.source))?;
+                let n = storage::add_memory(config, &plan.library, &f.new_content, Some(&f.source))
+                    .await
+                    .with_context(|| format!("Failed to write new content for {}", f.source))?;
                 report.added += 1;
                 report.chunks_written += n;
                 audit::record(
@@ -370,7 +350,10 @@ mod tests {
     #[test]
     fn single_identical_is_unchanged() {
         let existing = vec![rec("hello world")];
-        assert_eq!(decide_action("hello world", &existing), PlanAction::Unchanged);
+        assert_eq!(
+            decide_action("hello world", &existing),
+            PlanAction::Unchanged
+        );
     }
 
     #[test]

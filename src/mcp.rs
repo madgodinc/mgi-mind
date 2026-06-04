@@ -501,8 +501,8 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'memory_id'"))?;
             let signal_type_str = arg_str(args, "signal_type")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'signal_type'"))?;
-            let signal_type = crate::outcome::OutcomeSignal::parse(signal_type_str)
-                .ok_or_else(|| {
+            let signal_type =
+                crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
                     anyhow::anyhow!(
                         "unknown signal_type '{signal_type_str}' — expected one of: \
                          test_passed, code_compiled, user_confirmed, cited_by"
@@ -620,9 +620,8 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 }
                 "show" => {
                     let cfg = warm(true)?;
-                    let id = arg_str(args, "id").ok_or_else(|| {
-                        anyhow::anyhow!("action=show requires 'id'")
-                    })?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=show requires 'id'"))?;
                     match crate::storage::quarantine_get(cfg, id).await? {
                         Some(e) => Ok(crate::cli::render_quarantine_entry(&e)),
                         None => Ok(format!(
@@ -632,16 +631,19 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 }
                 "promote" => {
                     let cfg = warm(true)?;
-                    let id = arg_str(args, "id").ok_or_else(|| {
-                        anyhow::anyhow!("action=promote requires 'id'")
-                    })?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=promote requires 'id'"))?;
                     if crate::storage::promote_from_quarantine(cfg, id).await? {
-                        Ok(format!("Promoted '{id}' from quarantine to ordinary memory."))
+                        Ok(format!(
+                            "Promoted '{id}' from quarantine to ordinary memory."
+                        ))
                     } else {
                         Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
                     }
                 }
-                other => anyhow::bail!("mind_quarantine: unknown action '{other}' (expected list|show|promote)"),
+                other => anyhow::bail!(
+                    "mind_quarantine: unknown action '{other}' (expected list|show|promote)"
+                ),
             }
         }
         "mind_vault" => {
@@ -671,7 +673,9 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                     \x20\x20\x20\x20mgimind vault list\n\n\
                     You'll be prompted for the master password (hidden)."
                     .to_string()),
-                other => anyhow::bail!("mind_vault: unknown action '{other}' (expected get|store|list)"),
+                other => {
+                    anyhow::bail!("mind_vault: unknown action '{other}' (expected get|store|list)")
+                }
             }
         }
         "mind_session" => {
@@ -685,29 +689,28 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 "last" => crate::cli::run_session_last(arg_str(args, "agent")).await,
                 "end" => {
                     let agent = arg_str(args, "agent").unwrap_or("unknown");
-                    let summary = arg_str(args, "summary").ok_or_else(|| {
-                        anyhow::anyhow!("action=end requires 'summary'")
-                    })?;
+                    let summary = arg_str(args, "summary")
+                        .ok_or_else(|| anyhow::anyhow!("action=end requires 'summary'"))?;
                     crate::cli::run_session_end(agent, summary).await
                 }
-                other => anyhow::bail!("mind_session: unknown action '{other}' (expected start|end|last)"),
+                other => anyhow::bail!(
+                    "mind_session: unknown action '{other}' (expected start|end|last)"
+                ),
             }
         }
         "mind_fact" => {
-            let action = arg_str(args, "action")
-                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (add|query|invalidate)"))?;
+            let action = arg_str(args, "action").ok_or_else(|| {
+                anyhow::anyhow!("missing required 'action' (add|query|invalidate)")
+            })?;
             match action {
                 "add" => {
                     let cfg = warm(true)?;
-                    let subject = arg_str(args, "subject").ok_or_else(|| {
-                        anyhow::anyhow!("action=add requires 'subject'")
-                    })?;
-                    let predicate = arg_str(args, "predicate").ok_or_else(|| {
-                        anyhow::anyhow!("action=add requires 'predicate'")
-                    })?;
-                    let object = arg_str(args, "object").ok_or_else(|| {
-                        anyhow::anyhow!("action=add requires 'object'")
-                    })?;
+                    let subject = arg_str(args, "subject")
+                        .ok_or_else(|| anyhow::anyhow!("action=add requires 'subject'"))?;
+                    let predicate = arg_str(args, "predicate")
+                        .ok_or_else(|| anyhow::anyhow!("action=add requires 'predicate'"))?;
+                    let object = arg_str(args, "object")
+                        .ok_or_else(|| anyhow::anyhow!("action=add requires 'object'"))?;
                     let id = crate::knowledge::add_fact(cfg, subject, predicate, object).await?;
                     Ok(format!(
                         "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
@@ -715,19 +718,19 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 }
                 "query" => {
                     let cfg = warm(true)?;
-                    let subject = arg_str(args, "subject").ok_or_else(|| {
-                        anyhow::anyhow!("action=query requires 'subject'")
-                    })?;
+                    let subject = arg_str(args, "subject")
+                        .ok_or_else(|| anyhow::anyhow!("action=query requires 'subject'"))?;
                     let facts = crate::knowledge::query_facts(cfg, subject).await?;
                     Ok(crate::cli::render_facts(subject, &facts))
                 }
                 "invalidate" => {
-                    let id = arg_str(args, "id").ok_or_else(|| {
-                        anyhow::anyhow!("action=invalidate requires 'id'")
-                    })?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=invalidate requires 'id'"))?;
                     crate::cli::run_fact_invalidate(id).await
                 }
-                other => anyhow::bail!("mind_fact: unknown action '{other}' (expected add|query|invalidate)"),
+                other => anyhow::bail!(
+                    "mind_fact: unknown action '{other}' (expected add|query|invalidate)"
+                ),
             }
         }
         "mind_library" => {
@@ -735,22 +738,21 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 .ok_or_else(|| anyhow::anyhow!("missing required 'action' (create|delete|list)"))?;
             match action {
                 "create" => {
-                    let name = arg_str(args, "name").ok_or_else(|| {
-                        anyhow::anyhow!("action=create requires 'name'")
-                    })?;
+                    let name = arg_str(args, "name")
+                        .ok_or_else(|| anyhow::anyhow!("action=create requires 'name'"))?;
                     crate::cli::run_create(name).await
                 }
                 "list" => crate::cli::run_list().await,
                 "delete" => {
-                    let library = arg_str(args, "library").ok_or_else(|| {
-                        anyhow::anyhow!("action=delete requires 'library'")
-                    })?;
-                    let id = arg_str(args, "id").ok_or_else(|| {
-                        anyhow::anyhow!("action=delete requires 'id'")
-                    })?;
+                    let library = arg_str(args, "library")
+                        .ok_or_else(|| anyhow::anyhow!("action=delete requires 'library'"))?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=delete requires 'id'"))?;
                     crate::cli::run_delete(library, id).await
                 }
-                other => anyhow::bail!("mind_library: unknown action '{other}' (expected create|delete|list)"),
+                other => anyhow::bail!(
+                    "mind_library: unknown action '{other}' (expected create|delete|list)"
+                ),
             }
         }
 
@@ -760,15 +762,13 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
         // TemporalSingle) or coexist (Multi). Default for unregistered
         // predicates is Multi.
         "mind_predicate" => {
-            let action = arg_str(args, "action").ok_or_else(|| {
-                anyhow::anyhow!("missing required 'action' (register|list|get)")
-            })?;
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (register|list|get)"))?;
             match action {
                 "register" => {
                     let cfg = warm(true)?;
-                    let predicate = arg_str(args, "predicate").ok_or_else(|| {
-                        anyhow::anyhow!("action=register requires 'predicate'")
-                    })?;
+                    let predicate = arg_str(args, "predicate")
+                        .ok_or_else(|| anyhow::anyhow!("action=register requires 'predicate'"))?;
                     let cardinality_str = arg_str(args, "cardinality").ok_or_else(|| {
                         anyhow::anyhow!(
                             "action=register requires 'cardinality' (single|temporal-single|multi)"
@@ -781,9 +781,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                             )
                         })?;
                     crate::knowledge::register_cardinality(cfg, predicate, cardinality).await?;
-                    Ok(format!(
-                        "Registered '{predicate}' as {cardinality:?}."
-                    ))
+                    Ok(format!("Registered '{predicate}' as {cardinality:?}."))
                 }
                 "get" => {
                     let cfg = warm(true)?;
@@ -1259,28 +1257,30 @@ fn tool_definitions() -> Vec<Value> {
     // clients hide tools where `deprecated: true`, but the surface still works
     // for clients that don't honor the field.
     const DEPRECATIONS: &[(&str, &str)] = &[
-        ("mind_quarantine_list",    "mind_quarantine(action=\"list\")"),
-        ("mind_quarantine_show",    "mind_quarantine(action=\"show\")"),
-        ("mind_quarantine_promote", "mind_quarantine(action=\"promote\")"),
-        ("mind_vault_store",        "mind_vault(action=\"store\")"),
-        ("mind_vault_get",          "mind_vault(action=\"get\")"),
-        ("mind_vault_list",         "mind_vault(action=\"list\")"),
-        ("mind_session_start",      "mind_session(action=\"start\")"),
-        ("mind_session_last",       "mind_session(action=\"last\")"),
-        ("mind_session_end",        "mind_session(action=\"end\")"),
-        ("mind_fact_add",           "mind_fact(action=\"add\")"),
-        ("mind_fact_query",         "mind_fact(action=\"query\")"),
-        ("mind_fact_invalidate",    "mind_fact(action=\"invalidate\")"),
-        ("mind_create",             "mind_library(action=\"create\")"),
-        ("mind_list",               "mind_library(action=\"list\")"),
-        ("mind_delete",             "mind_library(action=\"delete\")"),
+        ("mind_quarantine_list", "mind_quarantine(action=\"list\")"),
+        ("mind_quarantine_show", "mind_quarantine(action=\"show\")"),
+        (
+            "mind_quarantine_promote",
+            "mind_quarantine(action=\"promote\")",
+        ),
+        ("mind_vault_store", "mind_vault(action=\"store\")"),
+        ("mind_vault_get", "mind_vault(action=\"get\")"),
+        ("mind_vault_list", "mind_vault(action=\"list\")"),
+        ("mind_session_start", "mind_session(action=\"start\")"),
+        ("mind_session_last", "mind_session(action=\"last\")"),
+        ("mind_session_end", "mind_session(action=\"end\")"),
+        ("mind_fact_add", "mind_fact(action=\"add\")"),
+        ("mind_fact_query", "mind_fact(action=\"query\")"),
+        ("mind_fact_invalidate", "mind_fact(action=\"invalidate\")"),
+        ("mind_create", "mind_library(action=\"create\")"),
+        ("mind_list", "mind_library(action=\"list\")"),
+        ("mind_delete", "mind_library(action=\"delete\")"),
     ];
 
     // Splits the list into "kept" (everyday + the new consolidated) and
     // "deprecated" (singletons), preserving their original order so a
     // backwards-compat smoke test still sees the same handler set.
-    let dep_names: std::collections::HashMap<&str, &str> =
-        DEPRECATIONS.iter().copied().collect();
+    let dep_names: std::collections::HashMap<&str, &str> = DEPRECATIONS.iter().copied().collect();
     let mut kept: Vec<Value> = Vec::new();
     let mut deprecated: Vec<Value> = Vec::new();
     for tool in tools.into_iter() {
@@ -1294,9 +1294,8 @@ fn tool_definitions() -> Vec<Value> {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                let new_desc = format!(
-                    "DEPRECATED — use {replacement}. Removed in v2.0. ({old_desc})"
-                );
+                let new_desc =
+                    format!("DEPRECATED — use {replacement}. Removed in v2.0. ({old_desc})");
                 obj.insert("description".to_string(), Value::String(new_desc));
             }
             deprecated.push(tool);
@@ -1371,10 +1370,7 @@ mod tests {
             if t.get("deprecated").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
-            let desc = t
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let desc = t.get("description").and_then(Value::as_str).unwrap_or("");
             assert!(
                 desc.starts_with("DEPRECATED"),
                 "deprecated tool {} should lead with the death notice, got: {desc}",

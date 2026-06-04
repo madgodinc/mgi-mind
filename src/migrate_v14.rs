@@ -126,9 +126,7 @@ impl DistributionSummary {
 /// walk; allowed-dead until then so the helper lands in a separate
 /// bisectable commit alongside the walk.
 #[allow(dead_code)]
-pub fn propose_cardinality(
-    objects_per_subject: &[Vec<String>],
-) -> CardinalityProposal {
+pub fn propose_cardinality(objects_per_subject: &[Vec<String>]) -> CardinalityProposal {
     if objects_per_subject.is_empty() {
         return CardinalityProposal {
             proposed: Cardinality::Multi,
@@ -146,9 +144,7 @@ pub fn propose_cardinality(
         CardinalityProposal {
             proposed: Cardinality::Single,
             confidence: ProposalConfidence::High,
-            reason: format!(
-                "every subject has ≤ 1 distinct object across {n_subjects} subjects"
-            ),
+            reason: format!("every subject has ≤ 1 distinct object across {n_subjects} subjects"),
         }
     } else if multi_ratio >= 0.20 {
         CardinalityProposal {
@@ -278,16 +274,14 @@ pub async fn run_dependants(
     // Phase 2 reads `dependants_count` directly from the payload at duel
     // time, so this materialises the cache the Phase 2 hot path relies on.
     if apply {
-        eprintln!("  writing dependants_count back to {} facts...", counts.len());
+        eprintln!(
+            "  writing dependants_count back to {} facts...",
+            counts.len()
+        );
         let mut written = 0usize;
         for (id, n) in counts.iter() {
-            crate::knowledge::set_fact_payload_field(
-                config,
-                id,
-                "dependants_count",
-                n.to_string(),
-            )
-            .await?;
+            crate::knowledge::set_fact_payload_field(config, id, "dependants_count", n.to_string())
+                .await?;
             written += 1;
         }
         eprintln!("  wrote dependants_count to {written} facts.");
@@ -302,10 +296,7 @@ pub async fn run_dependants(
 /// Output: a JSON file at the given path with one entry per predicate.
 /// User reviews, edits if needed, and runs the proposals back through
 /// `mind_predicate(action="register")` (or a future bulk-apply command).
-pub async fn run_cardinality_inference(
-    config: &MindConfig,
-    output: PathBuf,
-) -> Result<usize> {
+pub async fn run_cardinality_inference(config: &MindConfig, output: PathBuf) -> Result<usize> {
     // Step 1: enumerate every valid fact, group into (predicate → subject →
     // [objects]).
     let facts = crate::knowledge::list_all_facts(config).await?;
@@ -334,7 +325,11 @@ pub async fn run_cardinality_inference(
     }
     let payload = serde_json::to_vec_pretty(&proposals).map_err(anyhow::Error::from)?;
     std::fs::write(&output, payload).map_err(anyhow::Error::from)?;
-    eprintln!("  wrote {} proposals to {}", proposals.len(), output.display());
+    eprintln!(
+        "  wrote {} proposals to {}",
+        proposals.len(),
+        output.display()
+    );
 
     // Step 4: print a one-line tally per confidence level so the user knows
     // what shape the review will be without opening the file.
@@ -390,15 +385,15 @@ pub async fn run_confirmations(
         eprintln!("  no procedures found — nothing to backfill (other memory types stay at 0).");
         return Ok((0, DistributionSummary::from_counts(&[])));
     }
-    eprintln!("  found {} procedures with success_count history.", procs.len());
+    eprintln!(
+        "  found {} procedures with success_count history.",
+        procs.len()
+    );
 
     // Only procedures with success_count > 0 actually carry confirmation
     // signal. The rest stay at 0 (would be an honest no-op even if
     // written).
-    let with_signal: Vec<(String, i64)> = procs
-        .into_iter()
-        .filter(|(_, succ)| *succ > 0)
-        .collect();
+    let with_signal: Vec<(String, i64)> = procs.into_iter().filter(|(_, succ)| *succ > 0).collect();
 
     let counts: Vec<u32> = with_signal.iter().map(|(_, s)| *s as u32).collect();
     let summary = DistributionSummary::from_counts(&counts);

@@ -163,10 +163,7 @@ pub fn centroid(vectors: &[Vec<f32>]) -> Vec<f32> {
 /// **TODO(phase-4-calibration):** the exact thresholds for "busy" vs
 /// "quiet" are placeholders; Phase 4 picks them against the author's
 /// real edit rate.
-pub fn background_cadence_next(
-    previous_seconds: u64,
-    edits_since_last_pass: usize,
-) -> u64 {
+pub fn background_cadence_next(previous_seconds: u64, edits_since_last_pass: usize) -> u64 {
     if edits_since_last_pass == 0 {
         // Quiet → double the cadence, up to the cap.
         (previous_seconds.saturating_mul(2)).min(BACKGROUND_CADENCE_MAX_SECONDS)
@@ -175,7 +172,10 @@ pub fn background_cadence_next(
         (previous_seconds / 2).max(BACKGROUND_CADENCE_MIN_SECONDS)
     } else {
         // Moderate → hold steady at the default if we drifted away.
-        previous_seconds.clamp(BACKGROUND_CADENCE_MIN_SECONDS, BACKGROUND_CADENCE_MAX_SECONDS)
+        previous_seconds.clamp(
+            BACKGROUND_CADENCE_MIN_SECONDS,
+            BACKGROUND_CADENCE_MAX_SECONDS,
+        )
     }
 }
 
@@ -336,7 +336,7 @@ pub async fn retest_fact_step82(
     fact_id: &str,
 ) -> Result<crate::confidence::RetestTransition> {
     use crate::confidence::{
-        confidence_score, decide_retest_transition, ConfidenceInputs, RetestTransition,
+        ConfidenceInputs, RetestTransition, confidence_score, decide_retest_transition,
     };
 
     let client = crate::storage::get_client(config).await?;
@@ -503,11 +503,8 @@ async fn fetch_citing_confidences(
         citing_ids.iter().map(|id| id.to_string().into()).collect();
     let Ok(resp) = client
         .get_points(
-            qdrant_client::qdrant::GetPointsBuilder::new(
-                crate::storage::MEMORIES_COLLECTION,
-                pids,
-            )
-            .with_payload(true),
+            qdrant_client::qdrant::GetPointsBuilder::new(crate::storage::MEMORIES_COLLECTION, pids)
+                .with_payload(true),
         )
         .await
     else {
@@ -518,9 +515,10 @@ async fn fetch_citing_confidences(
             continue;
         };
         if let Some(raw) = crate::storage::extract_string_pub(&point.payload, "confidence_score")
-            && let Ok(score) = raw.parse::<f32>() {
-                out.insert(pid, score);
-            }
+            && let Ok(score) = raw.parse::<f32>()
+        {
+            out.insert(pid, score);
+        }
     }
     out
 }
@@ -721,8 +719,7 @@ pub fn spawn_background_retest_loop_with_cadence(
             // re-check is_mcp_busy() BETWEEN facts so a tool call
             // that started mid-tick still wins the contention race
             // (guarantee a hole noted by audit).
-            let candidates =
-                select_retest_candidates(&config, BACKGROUND_PER_TICK_CAP).await;
+            let candidates = select_retest_candidates(&config, BACKGROUND_PER_TICK_CAP).await;
 
             let mut n_processed_this_tick: usize = 0;
             for fact_id in &candidates {
@@ -762,10 +759,7 @@ pub fn spawn_background_retest_loop_with_cadence(
 
             eprintln!(
                 "mgimind: background re-test tick (edits since last={}, processed {}/{} cap, next cadence={}s)",
-                edits,
-                n_processed_this_tick,
-                BACKGROUND_PER_TICK_CAP,
-                cadence
+                edits, n_processed_this_tick, BACKGROUND_PER_TICK_CAP, cadence
             );
         }
     }))
@@ -849,7 +843,8 @@ pub fn inherited_count() -> usize {
 ///
 /// parking_lot::Mutex consistent with INHERITED_FACTS — same short
 /// critical-section / no-poisoning rationale.
-static DOUBT_WINDOW_FLAGGED: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static DOUBT_WINDOW_FLAGGED: Lazy<Mutex<HashSet<String>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Flag a memory id for promotion to the doubt window. Called by
 /// `outcome::record` when ≥3 failed test_passed signals land within
@@ -1216,7 +1211,11 @@ mod tests {
         record_edit();
         record_edit();
         assert_eq!(take_edit_count(), 3);
-        assert_eq!(take_edit_count(), 0, "swap should leave the counter at zero");
+        assert_eq!(
+            take_edit_count(),
+            0,
+            "swap should leave the counter at zero"
+        );
     }
 
     // --- v1.5 Phase 8 step 8.1A: drain + per-tick cap ---

@@ -163,7 +163,7 @@ mod tests {
     /// explicitly so the test isn't tied to wall-clock.
     #[test]
     fn distinct_agents_ignores_stale_pointers() {
-        use filetime::{set_file_mtime, FileTime};
+        use filetime::{FileTime, set_file_mtime};
         let tmp = tempfile::tempdir().unwrap();
         let sessions = tmp.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -175,8 +175,8 @@ mod tests {
 
         // Backdate the stale pointer to 60 days ago — well outside the
         // 30-day default window the detector queries with.
-        let sixty_days_ago = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(60 * 86_400);
+        let sixty_days_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 86_400);
         set_file_mtime(&stale, FileTime::from_system_time(sixty_days_ago)).unwrap();
 
         let n = distinct_session_agents_in(&sessions, 30);

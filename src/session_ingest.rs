@@ -220,7 +220,8 @@ mod tests {
 
     #[test]
     fn parses_string_content() {
-        let line = r#"{"type":"user","sessionId":"s1","message":{"role":"user","content":"hello"}}"#;
+        let line =
+            r#"{"type":"user","sessionId":"s1","message":{"role":"user","content":"hello"}}"#;
         let row: Row = serde_json::from_str(line).unwrap();
         assert_eq!(row.row_type, "user");
         assert_eq!(row.session_id.as_deref(), Some("s1"));

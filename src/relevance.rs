@@ -278,10 +278,7 @@ mod tests {
     #[test]
     fn very_short_is_quarantined() {
         let cfg = GateConfig::default();
-        assert_eq!(
-            check_cheap(&cand("yep"), &cfg).reason(),
-            Some("too_short")
-        );
+        assert_eq!(check_cheap(&cand("yep"), &cfg).reason(), Some("too_short"));
     }
 
     #[test]
@@ -299,7 +296,11 @@ mod tests {
         let cfg = GateConfig::default();
         // Short, would normally fail length — but "remember" is a decision marker.
         let v = check_cheap(&cand("remember X"), &cfg);
-        assert!(v.is_accept(), "decision marker should override, got {:?}", v);
+        assert!(
+            v.is_accept(),
+            "decision marker should override, got {:?}",
+            v
+        );
     }
 
     #[test]
@@ -341,10 +342,7 @@ mod tests {
         let mut cfg = GateConfig::default();
         cfg.max_chars = 100;
         let long = "word ".repeat(50); // 250 chars
-        assert_eq!(
-            check_cheap(&cand(&long), &cfg).reason(),
-            Some("too_long")
-        );
+        assert_eq!(check_cheap(&cand(&long), &cfg).reason(), Some("too_long"));
     }
 
     #[test]
@@ -355,20 +353,14 @@ mod tests {
 
     #[test]
     fn novelty_full_overlap() {
-        let n = novelty_ratio(
-            "alpha beta",
-            &["alpha".into(), "beta".into()],
-        );
+        let n = novelty_ratio("alpha beta", &["alpha".into(), "beta".into()]);
         assert!((n - 0.0).abs() < 1e-6);
     }
 
     #[test]
     fn novelty_partial() {
         // 2 of 4 tokens are new -> 0.5
-        let n = novelty_ratio(
-            "alpha beta gamma delta",
-            &["alpha".into(), "beta".into()],
-        );
+        let n = novelty_ratio("alpha beta gamma delta", &["alpha".into(), "beta".into()]);
         assert!((n - 0.5).abs() < 1e-6);
     }
 

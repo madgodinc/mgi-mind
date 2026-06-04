@@ -207,10 +207,7 @@ pub fn weight_new(inputs: NewFactInputs) -> f32 {
 ///
 /// Gate (v1.5 plan): when `mode = ChatOnly` this MUST equal the v1.4
 /// `weight_new` output bit-for-bit. The contract is tested below.
-pub fn weight_new_for_mode(
-    inputs: NewFactInputs,
-    mode: crate::install_mode::InstallMode,
-) -> f32 {
+pub fn weight_new_for_mode(inputs: NewFactInputs, mode: crate::install_mode::InstallMode) -> f32 {
     let weights = mode.weights();
     let conf_term = weights.confirmations * (1.0 + inputs.diverse_confirmations as f32).log2();
 
@@ -409,13 +406,7 @@ pub async fn dampen_loser(config: &MindConfig, fact_id: &str) -> Result<()> {
         EntryStatus::Stale.as_str().to_string(),
     )
     .await?;
-    crate::knowledge::set_fact_payload_field(
-        config,
-        fact_id,
-        "valid_until",
-        now,
-    )
-    .await?;
+    crate::knowledge::set_fact_payload_field(config, fact_id, "valid_until", now).await?;
     Ok(())
 }
 
@@ -476,7 +467,10 @@ mod tests {
         // on age alone.
         let two_years = ent(0, 0, 730);
         let five_years = ent(0, 0, 1825);
-        assert!((two_years - five_years).abs() < 1e-4, "age past 2y should plateau");
+        assert!(
+            (two_years - five_years).abs() < 1e-4,
+            "age past 2y should plateau"
+        );
     }
 
     #[test]
@@ -593,10 +587,7 @@ mod tests {
         for step in 0..30 {
             let w = step as f32 * 0.02;
             let r = rank(resolve_duel(ent_score, w));
-            assert!(
-                r >= last_outcome_rank,
-                "resolution went backwards at w={w}"
-            );
+            assert!(r >= last_outcome_rank, "resolution went backwards at w={w}");
             last_outcome_rank = r;
         }
     }
@@ -778,7 +769,10 @@ mod tests {
             external_signal_score: Some(-0.5),
         };
         let w = weight_new_for_mode(inputs, InstallMode::ChatOnly);
-        assert!(w < 0.0, "negative typed score must produce negative weight, got {w}");
+        assert!(
+            w < 0.0,
+            "negative typed score must produce negative weight, got {w}"
+        );
     }
 
     /// Per-mode external slot weight applies to the typed score too.
@@ -796,6 +790,9 @@ mod tests {
         let dev = weight_new_for_mode(inputs, InstallMode::DevWithCi);
         assert_eq!(chat, 0.2);
         assert_eq!(dev, 0.35);
-        assert!(dev > chat, "DevWithCi external lift must apply to typed score");
+        assert!(
+            dev > chat,
+            "DevWithCi external lift must apply to typed score"
+        );
     }
 }

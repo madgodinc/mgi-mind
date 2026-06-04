@@ -49,7 +49,6 @@ pub enum InstallMode {
     MultiTenant,
 }
 
-
 impl InstallMode {
     /// Per-mode anchors from §6 synthesis. Each mode's weights sum
     /// to 1.0 by construction.
@@ -182,14 +181,8 @@ mod tests {
     /// older configs that pre-date the kebab-case rename.
     #[test]
     fn parse_accepts_kebab_and_snake_case() {
-        assert_eq!(
-            InstallMode::parse("chat-only"),
-            Some(InstallMode::ChatOnly)
-        );
-        assert_eq!(
-            InstallMode::parse("chat_only"),
-            Some(InstallMode::ChatOnly)
-        );
+        assert_eq!(InstallMode::parse("chat-only"), Some(InstallMode::ChatOnly));
+        assert_eq!(InstallMode::parse("chat_only"), Some(InstallMode::ChatOnly));
         assert_eq!(
             InstallMode::parse("DEV-WITH-CI"),
             Some(InstallMode::DevWithCi)

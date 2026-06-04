@@ -65,9 +65,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("Failed to bind 127.0.0.1 on a free port")?;
-    let addr = listener
-        .local_addr()
-        .context("Failed to read bound port")?;
+    let addr = listener.local_addr().context("Failed to read bound port")?;
     let url = format!("http://{}/?token={}", addr, token);
 
     eprintln!();
@@ -77,9 +75,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
     eprintln!("  stop:  Ctrl-C");
     eprintln!();
 
-    if open_browser
-        && let Err(e) = open_in_browser(&url)
-    {
+    if open_browser && let Err(e) = open_in_browser(&url) {
         eprintln!("  (could not auto-open browser: {e})");
     }
 
@@ -131,11 +127,11 @@ fn check_auth(state: &AppState, headers: &HeaderMap, q: &AuthQuery) -> Result<()
     }
     if let Some(auth) = headers.get("authorization")
         && let Ok(s) = auth.to_str()
-            && let Some(t) = s.strip_prefix("Bearer ")
-            && t == state.token.as_str()
-        {
-            return Ok(());
-        }
+        && let Some(t) = s.strip_prefix("Bearer ")
+        && t == state.token.as_str()
+    {
+        return Ok(());
+    }
     Err(StatusCode::UNAUTHORIZED)
 }
 
@@ -184,9 +180,7 @@ async fn api_memories(
 
     let library = q.library.unwrap_or_default();
     if library.is_empty() {
-        return Err(
-            (StatusCode::BAD_REQUEST, "library param required").into_response(),
-        );
+        return Err((StatusCode::BAD_REQUEST, "library param required").into_response());
     }
     let rows = storage::list_memories(&state.config, &library, q.limit)
         .await
@@ -229,9 +223,7 @@ async fn api_delete_memory(
     storage::delete_memory(&state.config, "", &id)
         .await
         .map_err(internal)?;
-    audit::record(
-        audit::AuditEvent::new(audit::AuditOp::Delete, "", &id).actor("viewer"),
-    );
+    audit::record(audit::AuditEvent::new(audit::AuditOp::Delete, "", &id).actor("viewer"));
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
@@ -261,7 +253,9 @@ async fn api_quarantine_list(
     Query(q): Query<QuarantineQuery>,
     headers: HeaderMap,
 ) -> Result<Json<QuarantineListResponse>, Response> {
-    let auth = AuthQuery { token: q.token.clone() };
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
     let page = storage::quarantine_list_page(
         &state.config,
@@ -316,7 +310,9 @@ async fn api_ingest_recent(
     Query(q): Query<IngestRecentQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<MemoryRow>>, Response> {
-    let auth = AuthQuery { token: q.token.clone() };
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
     // Empty `since` means "no lower bound" — pass an ISO sentinel that sorts
     // before any real timestamp. "0000-..." lexicographically precedes any
@@ -353,13 +349,15 @@ async fn api_consolidate_dry_run(
     Query(q): Query<ConsolidateQuery>,
     headers: HeaderMap,
 ) -> Result<Json<crate::consolidate::Report>, Response> {
-    let auth = AuthQuery { token: q.token.clone() };
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
     let opts = crate::consolidate::Options {
         apply: false,
         library: q.library,
-        near_dup_threshold: 0.0,  // with_defaults() will fill to 0.97
-        decay_days: 0,            // with_defaults() will fill to 180
+        near_dup_threshold: 0.0, // with_defaults() will fill to 0.97
+        decay_days: 0,           // with_defaults() will fill to 180
         prune_cold: false,
     }
     .with_defaults();
@@ -423,4 +421,3 @@ struct QuarantineRow {
     reason: String,
     created_at: Option<String>,
 }
-
