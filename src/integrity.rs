@@ -57,6 +57,24 @@ pub const RERANK_BGE_BASE_ONNX: &str =
 pub const RERANK_BGE_BASE_TOKENIZER: &str =
     "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c";
 
+// ===== v1.4 Phase 5: local LLM auto-extractor (Qwen 2.5 family GGUF) =====
+//
+// Both variants come from the Qwen team's official HuggingFace release
+// (Qwen/Qwen2.5-{1.5B,3B}-Instruct-GGUF). Pins are filled in after
+// step 5.2 downloads the artifacts and computes their sha256; until
+// then `pin()` returns None and `util::download_file` issues a warning
+// rather than failing fast — the v1.4 Phase 5 install path is
+// explicitly opt-in, so an unpinned download under a clear warning is
+// acceptable for the bootstrap window.
+
+/// Qwen 2.5 1.5B Instruct Q4_K_M GGUF — the Lite variant of the
+/// auto-extractor. ~990 MB on disk, ~1.5 GB RAM loaded.
+pub const EXTRACTOR_QWEN_1_5B_Q4_K_M: &str = "PIN_ME";
+
+/// Qwen 2.5 3B Instruct Q4_K_M GGUF — the Default variant of the
+/// auto-extractor. ~1.93 GB on disk, ~2.5 GB RAM loaded.
+pub const EXTRACTOR_QWEN_3B_Q4_K_M: &str = "PIN_ME";
+
 /// Treat the placeholder/empty as "no pin available".
 pub fn pin(hash: &str) -> Option<&str> {
     if hash.is_empty() || hash == "PIN_ME" {
