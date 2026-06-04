@@ -3,6 +3,7 @@ mod audit;
 mod bench;
 mod bench_policy;
 mod bench_procedural;
+mod bench_stale;
 mod cli;
 mod config;
 mod consolidate;
