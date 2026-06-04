@@ -10,6 +10,7 @@ mod doubt;
 mod duel;
 mod embedder;
 mod error;
+mod extractor;
 mod ingest;
 mod integrity;
 mod knowledge;
