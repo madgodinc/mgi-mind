@@ -139,10 +139,38 @@ pub struct NewFactInputs {
     /// `diversity_weighted_count()` below.
     pub diverse_confirmations: u32,
 
-    /// External-signal count: deterministic confirmations from tests,
-    /// CI, code-search, etc. These weigh more than any conversational
-    /// repetition (§5 axis 3).
+    /// External-signal count (v1.4 legacy slot): deterministic
+    /// confirmations from tests, CI, code-search, etc. These weigh
+    /// more than any conversational repetition (§5 axis 3). When
+    /// v1.5 Phase 7 typed signals are present (see
+    /// `external_signal_score`), they take precedence over this
+    /// raw count.
     pub external_signals: u32,
+
+    /// v1.5 Phase 7 step 7.2: pre-computed signed score from the
+    /// typed `external_signals_v15` log. When `Some(_)`, weight_new
+    /// uses this directly instead of the log2-shape applied to the
+    /// raw count above. `None` falls back to v1.4 behaviour, which
+    /// matters because Phase 1 migration writes the legacy count
+    /// (`external_signals: u32`) but Phase 7's typed log is empty
+    /// until users start posting `mind_outcome` calls.
+    pub external_signal_score: Option<f32>,
+}
+
+impl Default for NewFactInputs {
+    /// All-zero / no-signal default. Tests and call sites that only
+    /// care about a subset of fields use `..NewFactInputs::default()`
+    /// to populate the rest. The default represents "a fresh
+    /// first-mention live fact with no diversity, no external signals,
+    /// no typed-score" — the baseline F_new in §5.
+    fn default() -> Self {
+        Self {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 0,
+            external_signal_score: None,
+        }
+    }
 }
 
 /// Compute the weight of a fresh fact for the duel using the
@@ -179,7 +207,17 @@ pub fn weight_new_for_mode(
 ) -> f32 {
     let weights = mode.weights();
     let conf_term = weights.confirmations * (1.0 + inputs.diverse_confirmations as f32).log2();
-    let ext_term = weights.external * (1.0 + inputs.external_signals as f32).log2();
+
+    // v1.5 Phase 7 step 7.2: prefer the typed-signal score when
+    // present. The typed score is signed (failures pull negative)
+    // and already incorporates per-type weights, so we just multiply
+    // by the install-mode external slot weight. Falling back to the
+    // legacy log2 shape on Phase 1-migrated facts keeps the count
+    // useful until users adopt mind_outcome.
+    let ext_term = match inputs.external_signal_score {
+        Some(typed_score) => weights.external * typed_score,
+        None => weights.external * (1.0 + inputs.external_signals as f32).log2(),
+    };
 
     let raw = conf_term + ext_term;
 
@@ -400,6 +438,7 @@ mod tests {
             from_live_session: live,
             diverse_confirmations: conf,
             external_signals: ext,
+            ..NewFactInputs::default()
         })
     }
 
@@ -572,6 +611,7 @@ mod tests {
                         from_live_session: from_live,
                         diverse_confirmations: diverse,
                         external_signals: ext,
+                        ..NewFactInputs::default()
                     };
                     let legacy = weight_new(inputs);
                     let modal = weight_new_for_mode(inputs, InstallMode::ChatOnly);
@@ -601,6 +641,7 @@ mod tests {
             from_live_session: true,
             diverse_confirmations: 0,
             external_signals: 5,
+            ..NewFactInputs::default()
         };
         let chat = weight_new_for_mode(with_ext, InstallMode::ChatOnly);
         let dev = weight_new_for_mode(with_ext, InstallMode::DevWithCi);
@@ -627,6 +668,7 @@ mod tests {
             from_live_session: true,
             diverse_confirmations: 5,
             external_signals: 0,
+            ..NewFactInputs::default()
         };
         let chat = weight_new_for_mode(with_conf, InstallMode::ChatOnly);
         let multi = weight_new_for_mode(with_conf, InstallMode::MultiTenant);
@@ -653,6 +695,7 @@ mod tests {
                 from_live_session: false,
                 diverse_confirmations: 3,
                 external_signals: 3,
+                ..NewFactInputs::default()
             };
             let inherited = weight_new_for_mode(inputs, mode);
             let live = weight_new_for_mode(
@@ -668,5 +711,85 @@ mod tests {
                 mode
             );
         }
+    }
+
+    // --- v1.5 Phase 7 step 7.2: typed external_signal_score path ---
+
+    /// When `external_signal_score: None`, the formula falls back to
+    /// the v1.4 log2 shape on `external_signals: u32`. Catches
+    /// accidental override of the fallback by stub callers.
+    #[test]
+    fn typed_score_none_falls_back_to_legacy_count() {
+        use crate::install_mode::InstallMode;
+        let inputs = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 3,
+            external_signal_score: None,
+        };
+        let with_explicit_legacy = weight_new_for_mode(inputs, InstallMode::ChatOnly);
+
+        // For external_signals=3, the legacy ext_term is
+        // 0.2 * log2(1 + 3) = 0.2 * 2 = 0.4.
+        let expected = 0.4;
+        assert!(
+            (with_explicit_legacy - expected).abs() < 1e-5,
+            "legacy fallback broken: got {with_explicit_legacy}, expected {expected}"
+        );
+    }
+
+    /// When typed score is positive, it replaces the log2 shape on
+    /// `external_signals`. A score of 1.7 (= test_passed=1.0 +
+    /// user_confirmed=0.7) under ChatOnly yields ext_term = 0.2 * 1.7
+    /// = 0.34, irrespective of the legacy count.
+    #[test]
+    fn typed_score_some_replaces_legacy_count() {
+        use crate::install_mode::InstallMode;
+        let inputs = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 999, // ignored when typed score is Some
+            external_signal_score: Some(1.7),
+        };
+        let w = weight_new_for_mode(inputs, InstallMode::ChatOnly);
+        let expected = 0.2 * 1.7;
+        assert!(
+            (w - expected).abs() < 1e-5,
+            "typed-score override broken: got {w}, expected {expected}"
+        );
+    }
+
+    /// A failed test pulls the typed score negative; weight_new can
+    /// then go negative too (which is correct — failed evidence is
+    /// real evidence the claim is wrong).
+    #[test]
+    fn typed_score_negative_pulls_weight_negative() {
+        use crate::install_mode::InstallMode;
+        let inputs = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 0,
+            external_signal_score: Some(-0.5),
+        };
+        let w = weight_new_for_mode(inputs, InstallMode::ChatOnly);
+        assert!(w < 0.0, "negative typed score must produce negative weight, got {w}");
+    }
+
+    /// Per-mode external slot weight applies to the typed score too.
+    /// DevWithCi (0.35) lifts a positive typed score above ChatOnly (0.2).
+    #[test]
+    fn typed_score_respects_per_mode_external_weight() {
+        use crate::install_mode::InstallMode;
+        let inputs = NewFactInputs {
+            from_live_session: true,
+            diverse_confirmations: 0,
+            external_signals: 0,
+            external_signal_score: Some(1.0),
+        };
+        let chat = weight_new_for_mode(inputs, InstallMode::ChatOnly);
+        let dev = weight_new_for_mode(inputs, InstallMode::DevWithCi);
+        assert_eq!(chat, 0.2);
+        assert_eq!(dev, 0.35);
+        assert!(dev > chat, "DevWithCi external lift must apply to typed score");
     }
 }
