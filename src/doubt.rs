@@ -314,6 +314,148 @@ async fn write_doubt_count(config: &MindConfig, fact_id: &str, count: u32) -> Re
     Ok(())
 }
 
+// ===== Background re-test pass (Phase 3 step 3) =====
+//
+// Doubt window with retrieval triggers alone (step 2) has a blind
+// spot: facts that stop being retrieved never enter the window, so
+// they ossify in their last-confidence state and resist correction.
+// The background pass closes the loop — it walks top-N entrenched-
+// low-traffic facts on an adaptive cadence and runs the same drift
+// check that step 2 runs.
+//
+// Three hard guarantees (synthesis §10 question 5):
+//
+//   (a) Never runs while an MCP tool call is in flight. A simple
+//       atomic flag set on enter, cleared on exit. The background
+//       loop yields if the flag is set.
+//   (b) Caps per-tick scan at BACKGROUND_PER_TICK_CAP facts. The
+//       walk is amortised across many ticks rather than done in one
+//       breath; pathological "all facts at once" is structurally
+//       impossible.
+//   (c) Adaptive cadence via `background_cadence_next`. Quiet
+//       graphs slow down (up to 24h cap), busy ones speed up (down
+//       to 5min floor), so the pass tracks "how stale could the
+//       cache plausibly be" rather than a hardcoded clock.
+//
+// **Cost narrative for the public README.** "Single warm process, ms
+// lookup" remains true on the retrieval path. Background pass is a
+// separate low-priority loop scheduled to yield when the retrieval
+// path is busy. That idle budget is the price of not ossifying.
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Set true while any MCP tool call is in flight. The background pass
+/// yields when this is true (synthesis §10 q5 guarantee a).
+static MCP_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Cumulative count of graph edits (fact adds, dampenings, payload
+/// updates) observed since the last background tick. Feeds the
+/// adaptive cadence calculation (synthesis §10 q5 guarantee c).
+static EDITS_SINCE_LAST_TICK: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII guard that raises MCP_BUSY on construction and lowers it on
+/// drop. Wrap every tool-dispatch entry point in `let _g = BusyGuard::new();`
+/// so the background pass cannot collide with a live call even if
+/// the call panics.
+pub struct BusyGuard;
+
+impl BusyGuard {
+    pub fn new() -> Self {
+        MCP_BUSY.store(true, Ordering::Release);
+        BusyGuard
+    }
+}
+
+impl Default for BusyGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        MCP_BUSY.store(false, Ordering::Release);
+    }
+}
+
+/// Record a graph edit. Called by `add_fact`, by the Phase 1.1
+/// dependants writer, and by the duel-rule dampening path. Cheap
+/// (one atomic add); fine to call from hot paths.
+pub fn record_edit() {
+    EDITS_SINCE_LAST_TICK.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the edit count and reset it to zero atomically. Called by
+/// the background loop once per tick before computing the next cadence.
+pub fn take_edit_count() -> usize {
+    EDITS_SINCE_LAST_TICK.swap(0, Ordering::AcqRel)
+}
+
+/// Whether an MCP call is currently in flight. The background loop
+/// reads this and yields if true.
+pub fn is_mcp_busy() -> bool {
+    MCP_BUSY.load(Ordering::Acquire)
+}
+
+/// Spawn the background re-test loop. Call once from `mcp::serve`
+/// after Qdrant is up. The returned `JoinHandle` lets the caller
+/// abort the loop on shutdown if needed; in practice the loop runs
+/// for the lifetime of the warm `mgimind mcp` process and is
+/// dropped when the process exits.
+///
+/// The loop iterates:
+///   1. Sleep for the current cadence.
+///   2. If MCP_BUSY is true at wake, skip this tick and sleep again
+///      with the current cadence.
+///   3. Otherwise: scan up to BACKGROUND_PER_TICK_CAP entrenched-
+///      low-traffic facts, run `apply_doubt_check_to_fact` on each,
+///      and update the cadence based on the edit count since the
+///      last tick.
+///
+/// **Scaffold note.** The actual fact selection (top-N by
+/// entrenchment, filtered by low recent-access) needs the Phase 1
+/// `dependants_count` payload field + an access-count tracker. Until
+/// those land, the loop calls `eprintln!` once per tick describing
+/// what it would do, then yields. Wiring lands when the Phase 1
+/// merge order is fixed.
+pub fn spawn_background_retest_loop(
+    config: crate::config::MindConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut cadence = BACKGROUND_CADENCE_DEFAULT_SECONDS;
+        eprintln!(
+            "mgimind: background doubt-window re-test loop started (default cadence {}s)",
+            cadence
+        );
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(cadence)).await;
+
+            if is_mcp_busy() {
+                // Guarantee (a): yield rather than contend with the
+                // retrieval hot path. We do not reset the cadence —
+                // a busy graph is exactly when the next tick should
+                // probably be sooner, so we recompute from edit
+                // counts below.
+                eprintln!("mgimind: background re-test yielded (MCP call in flight)");
+                continue;
+            }
+
+            let edits = take_edit_count();
+            cadence = background_cadence_next(cadence, edits);
+
+            // Phase 3 step 3 scaffold: the fact-selection walk lives
+            // here. Wiring depends on Phase 1's dependants_count
+            // payload field being present; until then we log the
+            // intent so operations are visible.
+            eprintln!(
+                "mgimind: background re-test tick (edits since last={}, next cadence={}s)",
+                edits, cadence
+            );
+            let _ = &config; // silence unused-borrow warning until walk lands
+        }
+    })
+}
+
 // ===== Inheritance flag — per-process registry =====
 //
 // Synthesis §3 mechanism 3: facts entering a session from memory
@@ -592,5 +734,39 @@ mod tests {
         mark_inherited("dup");
         assert!(is_inherited("dup"));
         assert_eq!(inherited_count(), 1);
+    }
+
+    // --- BusyGuard + edit counter ---
+    //
+    // These tests share process-global state with the background loop
+    // (when running). For unit-test isolation they rely on the test
+    // binary running tests in a single thread by default (`cargo test`
+    // serialises tests within one binary), and on the fact that the
+    // background loop is only spawned by `mcp::serve` which is never
+    // entered from a test.
+
+    #[test]
+    fn busy_guard_raises_and_lowers_on_drop() {
+        // Drop the guard explicitly to make the test deterministic.
+        // We don't run other tests that touch MCP_BUSY at the same
+        // time; this test brackets its assertion narrowly.
+        assert!(!is_mcp_busy(), "expected idle at test start");
+        {
+            let _g = BusyGuard::new();
+            assert!(is_mcp_busy(), "guard should raise the flag");
+        }
+        assert!(!is_mcp_busy(), "guard drop should lower the flag");
+    }
+
+    #[test]
+    fn edit_count_accumulates_and_resets() {
+        // Drain any leftover state first so the assertion is
+        // independent of test ordering.
+        let _ = take_edit_count();
+        record_edit();
+        record_edit();
+        record_edit();
+        assert_eq!(take_edit_count(), 3);
+        assert_eq!(take_edit_count(), 0, "swap should leave the counter at zero");
     }
 }
