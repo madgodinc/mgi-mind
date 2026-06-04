@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v1.6.1](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.1)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)**
+**[Latest release: v1.6.2](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.2)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)**
 
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
