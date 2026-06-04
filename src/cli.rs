@@ -1597,11 +1597,88 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
     if config::is_initialized() {
         let cfg = crate::config::load_cached()?;
         if let Ok(predicates) = crate::knowledge::list_cardinalities(&cfg).await {
+            let registered = predicates.len();
             let _ = writeln!(
                 out,
-                "[OK]   v1.4 predicate registry: {} predicate(s) with explicit cardinality",
-                predicates.len()
+                "[OK]   v1.4 predicate registry: {registered} predicate(s) with explicit cardinality"
             );
+
+            // v1.6.4: detect High-confidence cardinality proposals
+            // still in the JSON file. If any are pending, surface them
+            // and offer `--fix` to bulk-register.
+            let proposals_path = crate::config::mind_home()
+                .join("migration")
+                .join("cardinality-proposals.json");
+            if proposals_path.exists() {
+                let raw = std::fs::read_to_string(&proposals_path).unwrap_or_default();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+                let pending_high: Vec<(String, String)> = parsed
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .filter(|(_, v)| {
+                                v.get("confidence").and_then(|c| c.as_str())
+                                    == Some("High")
+                            })
+                            .filter(|(name, _)| {
+                                !predicates.iter().any(|(p, _)| p == *name)
+                            })
+                            .map(|(name, v)| {
+                                let proposed = v
+                                    .get("proposed")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("?")
+                                    .to_string();
+                                (name.clone(), proposed)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if !pending_high.is_empty() {
+                    let n_pending = pending_high.len();
+                    if fix {
+                        // --fix path: register every pending High-
+                        // confidence proposal via the same path
+                        // `migrate-v14 cardinality --apply` uses.
+                        let mut registered_now = 0usize;
+                        let mut errs = 0usize;
+                        for (predicate, proposed) in &pending_high {
+                            let card = match crate::knowledge::Cardinality::parse(
+                                proposed,
+                            ) {
+                                Some(c) => c,
+                                None => {
+                                    errs += 1;
+                                    continue;
+                                }
+                            };
+                            if crate::knowledge::register_cardinality(
+                                &cfg, predicate, card,
+                            )
+                            .await
+                            .is_ok()
+                            {
+                                registered_now += 1;
+                            } else {
+                                errs += 1;
+                            }
+                        }
+                        fixed += registered_now;
+                        let _ = writeln!(
+                            out,
+                            "[FIX]  registered {registered_now} pending High-confidence cardinality proposal(s) ({errs} errors)"
+                        );
+                    } else {
+                        issues += 1;
+                        let _ = writeln!(
+                            out,
+                            "[INFO] {n_pending} High-confidence cardinality proposal(s) waiting — run `mgimind doctor --fix` or `mgimind migrate-v14 cardinality --apply`"
+                        );
+                    }
+                }
+            }
         }
         if let Ok((contested, shadowed)) = crate::knowledge::count_pending_conflicts(&cfg).await {
             if contested == 0 && shadowed == 0 {
