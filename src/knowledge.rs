@@ -365,9 +365,16 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         return Ok(Vec::new());
     }
 
-    // valid = true AND (subject ~ q OR predicate ~ q OR object ~ q).
+    // valid = true AND status != stale AND (subject ~ q OR predicate ~ q OR object ~ q).
+    //
+    // Bug fix (issue #25, 2026-06-05): without the status-stale exclusion,
+    // dampened losers from the duel rule (status="stale", valid_until=now)
+    // remained visible in queries because `dampen_loser` only touches the
+    // `status` field, not `valid`. This made the headline conflict-resolution
+    // feature appear broken from a user perspective.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![Condition::matches("status", "stale".to_string())],
         should: vec![
             Condition::matches_text("subject", query),
             Condition::matches_text("predicate", query),
@@ -760,6 +767,11 @@ pub async fn find_facts_by_subject_predicate(
             Condition::matches("subject", subject.to_string()),
             Condition::matches("predicate", predicate.to_string()),
         ],
+        // Bug fix (issue #25, 2026-06-05): exclude already-stale facts from
+        // the "existing" set fed to the duel rule. Otherwise an already-
+        // dampened loser would still be considered live by find_*, causing
+        // the new fact to duel against a tombstone.
+        must_not: vec![Condition::matches("status", "stale".to_string())],
         ..Default::default()
     };
 
