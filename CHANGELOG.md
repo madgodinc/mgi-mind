@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.6.1 — CLI surfaces for v1.5 / v1.6 features
+
+Four CLI usability fixes. No schema changes, no MCP surface
+changes, no formula changes.
+
+### `mgimind outcome <id> <signal_type>`
+
+`mind_outcome` was MCP-only. Now also available from the terminal
+for debugging the error-rate guardrail and confidence_score paths
+without a running MCP client.
+
+### `mgimind audit list --op X --since-hours N`
+
+`audit list` already showed recent events. Now filterable by op
+type and time window. Useful right after extraction:
+
+```sh
+mgimind audit list --op retest_promote --since-hours 1
+```
+
+### `mgimind doctor` + `mgimind config install-mode` show weights
+
+Both surfaces now print the install-mode AND the per-mode anchors
+they imply:
+
+```
+[OK]   install-mode: chat-only [d=0.70 c=0.10 e=0.20] (matches auto-detect)
+```
+
+### `mgimind stats` shows fact graph distribution
+
+```
+KG facts:       2399
+  dependants:   min=0 p50=0 p90=0 p99=0 max=1 mean=0.00
+                4/2398 facts have ≥1 dependant (0.2%)
+  in-doubt:     0 flagged for retest
+  inherited:    0 (cleared on session end)
+```
+
+Calibration signal: if p90 stays 0 after `migrate-v14 dependants
+--apply`, the dependants weight contributes nothing.
+
+### Tests
+
+290 unit + 6 integration tests, 0 failed.
+
 ## 1.6.0 — closing v1.5 honest limits
 
 A polish release that closes three TBD items declared in v1.5's
