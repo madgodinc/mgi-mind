@@ -291,8 +291,49 @@ pub async fn run_cardinality_inference(
     config: &MindConfig,
     output: PathBuf,
 ) -> Result<usize> {
-    let _ = (config, output); // implementation lands in step 1.2
-    Ok(0)
+    // Step 1: enumerate every valid fact, group into (predicate → subject →
+    // [objects]).
+    let facts = crate::knowledge::list_all_facts(config).await?;
+    if facts.is_empty() {
+        eprintln!("  no facts in the knowledge graph — nothing to propose.");
+        return Ok(0);
+    }
+    eprintln!("  inspecting {} facts...", facts.len());
+    let grouped = group_facts_by_predicate(&facts);
+    eprintln!("  {} distinct predicates observed.", grouped.len());
+
+    // Step 2: for every predicate, run the heuristic against the observed
+    // objects-per-subject and produce a proposal.
+    let mut proposals: HashMap<String, CardinalityProposal> = HashMap::new();
+    for (pred, observations) in &grouped {
+        proposals.insert(pred.clone(), propose_cardinality(observations));
+    }
+
+    // Step 3: serialise to JSON for user review. The reviewer either edits
+    // the file in place or runs each proposal through
+    // `mind_predicate(action="register")`. Auto-applying is deliberately not
+    // offered — recalibrating predicate cardinality without consent is the
+    // exact failure mode the synthesis §10 question 6 names.
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    }
+    let payload = serde_json::to_vec_pretty(&proposals).map_err(anyhow::Error::from)?;
+    std::fs::write(&output, payload).map_err(anyhow::Error::from)?;
+    eprintln!("  wrote {} proposals to {}", proposals.len(), output.display());
+
+    // Step 4: print a one-line tally per confidence level so the user knows
+    // what shape the review will be without opening the file.
+    let high = proposals
+        .values()
+        .filter(|p| p.confidence == ProposalConfidence::High)
+        .count();
+    let low = proposals.len() - high;
+    eprintln!(
+        "  proposal summary: {} high-confidence, {} low-confidence (review the JSON)",
+        high, low
+    );
+
+    Ok(proposals.len())
 }
 
 /// Backfill `confirmations_count` for memories with a derivable signal.
