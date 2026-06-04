@@ -478,54 +478,51 @@ pub fn spawn_background_retest_loop(
 // or process restart (in-process state is intentionally ephemeral).
 
 use std::collections::HashSet;
-use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
+// Post-critic switch from std::sync::Mutex to parking_lot::Mutex —
+// std::sync::Mutex.lock() can block tokio runtime workers when
+// contended; parking_lot::Mutex is non-poisoning and faster on
+// short critical sections (insert/contains/remove on a HashSet).
+// The lock is acquired only inside these functions and released
+// before returning, never held across .await.
 static INHERITED_FACTS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Mark a fact id as inherited-from-memory in the current process.
 /// Called by `mind_session(action="last")` and the briefing path for
 /// every fact reference they surface.
 pub fn mark_inherited(fact_id: &str) {
-    if let Ok(mut set) = INHERITED_FACTS.lock() {
-        set.insert(fact_id.to_string());
-    }
+    INHERITED_FACTS.lock().insert(fact_id.to_string());
 }
 
 /// Check whether a fact is currently flagged as inherited-unverified.
 /// Consumed by the duel rule (`weight_new` slot) and by the ranking
 /// layer (confidence multiplier).
 pub fn is_inherited(fact_id: &str) -> bool {
-    INHERITED_FACTS
-        .lock()
-        .map(|set| set.contains(fact_id))
-        .unwrap_or(false)
+    INHERITED_FACTS.lock().contains(fact_id)
 }
 
 /// Clear a fact's inheritance flag — called when a live in-session
 /// observation confirms the fact (a re-assertion of the same triple
 /// without contradiction).
 pub fn clear_inherited(fact_id: &str) {
-    if let Ok(mut set) = INHERITED_FACTS.lock() {
-        set.remove(fact_id);
-    }
+    INHERITED_FACTS.lock().remove(fact_id);
 }
 
 /// Bulk clear — used by tests and by `mind_session(action="end")` so a
 /// closed session does not leak inheritance state into the next one
 /// that starts in the same warm process.
 pub fn clear_all_inherited() {
-    if let Ok(mut set) = INHERITED_FACTS.lock() {
-        set.clear();
-    }
+    INHERITED_FACTS.lock().clear();
 }
 
 /// Count of currently-inherited facts. Surfaced by `mgimind doctor`
 /// alongside the conflict counts so the user can see how much of the
 /// active session's context came from memory vs the live conversation.
 pub fn inherited_count() -> usize {
-    INHERITED_FACTS.lock().map(|set| set.len()).unwrap_or(0)
+    INHERITED_FACTS.lock().len()
 }
 
 // ===== Tests =====
