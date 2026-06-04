@@ -267,6 +267,53 @@ pub enum Commands {
         input: String,
     },
 
+    /// STALE bench scaffold (Phase 4): runs the bench-stale harness over
+    /// a single configuration. The actual STALE protocol adapter is not
+    /// implemented yet — this is the CLI surface so calibration sweep
+    /// tooling can be developed against the type contracts.
+    BenchStale {
+        /// Path to the STALE dataset JSON (Appendix G of arxiv 2605.06527).
+        dataset: String,
+        /// LLM judge model identifier (e.g. `gpt-4o-mini`, `claude-haiku-4.5`).
+        /// Requires MGIMIND_STALE_JUDGE_KEY env var.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        judge: String,
+        /// Override DUEL_FLIP_RATIO for this run (sweep tooling sets
+        /// this; default = production constant).
+        #[arg(long, value_name = "F")]
+        duel_flip_ratio: Option<f32>,
+        /// Override DUEL_CONTESTED_RATIO for this run.
+        #[arg(long, value_name = "F")]
+        duel_contested_ratio: Option<f32>,
+        /// Override DOUBT_DRIFT_THRESHOLD for this run.
+        #[arg(long, value_name = "F")]
+        doubt_drift_threshold: Option<f32>,
+        /// Run only the first N scenarios (smoke test).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Write the result report to this JSON path.
+        #[arg(long, default_value = "stale-result.json")]
+        output: String,
+    },
+
+    /// STALE bench sweep: walk a small grid of constant overrides and
+    /// emit per-run results into a directory. Scaffold — wraps the
+    /// existing bench-stale single-run harness so calibration tooling
+    /// has a CLI surface ready when the harness adapter lands.
+    BenchStaleSweep {
+        /// Path to the STALE dataset JSON.
+        dataset: String,
+        /// LLM judge model identifier.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        judge: String,
+        /// Output directory. Each run writes a JSON file inside.
+        #[arg(long, default_value = "stale-sweep-out")]
+        output_dir: String,
+        /// Run only the first N scenarios per configuration.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
     /// Consolidate memory: merge duplicates / near-duplicates and report cold
     /// (old, unused) entries (phase Д2). Dry-run unless --apply.
     Consolidate {
@@ -695,6 +742,45 @@ pub async fn run(cli: Cli) -> Result<()> {
             output,
         } => cmd_bench_procedural(&dataset, limit, output.as_deref()).await,
         Commands::BenchPolicy { input } => cmd_bench_policy(&input).await,
+        Commands::BenchStale {
+            dataset,
+            judge,
+            duel_flip_ratio,
+            duel_contested_ratio,
+            doubt_drift_threshold,
+            limit,
+            output,
+        } => {
+            let mut overrides = crate::bench_stale::CalibrationOverrides::default();
+            overrides.duel_flip_ratio = duel_flip_ratio;
+            overrides.duel_contested_ratio = duel_contested_ratio;
+            overrides.doubt_drift_threshold = doubt_drift_threshold;
+            let report = crate::bench_stale::run(
+                std::path::PathBuf::from(&dataset),
+                &judge,
+                limit,
+                overrides,
+                std::path::PathBuf::from(&output),
+            )
+            .await?;
+            println!("STALE run done. Total scenarios: {}", report.scenarios_run);
+            println!("Overall: {:.1}%", report.overall_pct);
+            println!(
+                "State-resolution rate: {:.1}%",
+                report.by_metric.state_resolution_pct
+            );
+            println!(
+                "Premise-resistance rate: {:.1}%",
+                report.by_metric.premise_resistance_pct
+            );
+            Ok(())
+        }
+        Commands::BenchStaleSweep {
+            dataset,
+            judge,
+            output_dir,
+            limit,
+        } => cmd_bench_stale_sweep(&dataset, &judge, &output_dir, limit).await,
         Commands::Consolidate {
             apply,
             library,
@@ -959,6 +1045,89 @@ async fn cmd_bench_procedural(
 async fn cmd_bench_policy(input: &str) -> Result<()> {
     let report = crate::bench_policy::run(std::path::Path::new(input))?;
     println!("{report}");
+    Ok(())
+}
+
+async fn cmd_bench_stale_sweep(
+    dataset: &str,
+    judge: &str,
+    output_dir: &str,
+    limit: Option<usize>,
+) -> Result<()> {
+    use crate::bench_stale::CalibrationOverrides;
+
+    std::fs::create_dir_all(output_dir)?;
+    eprintln!("STALE sweep: writing per-run reports into {output_dir}");
+    eprintln!("             judge model: {judge}");
+    eprintln!("             dataset:     {dataset}");
+
+    // v1.6.3 sweep grid: ±25% / ±50% around the production defaults
+    // for the three thresholds Phase 4 calibration cares about most.
+    // 3 thresholds × 3 multipliers + baseline = 10 runs. Future
+    // expansion adds dependants weighting + age decay sweeps.
+    let multipliers: &[(&str, f32)] = &[
+        ("baseline", 1.00),
+        ("flip-low", 0.50),
+        ("flip-high", 1.50),
+        ("contested-low", 0.50),
+        ("contested-high", 1.50),
+        ("doubt-low", 0.50),
+        ("doubt-high", 1.50),
+    ];
+
+    let mut summary = serde_json::json!({
+        "judge": judge,
+        "dataset": dataset,
+        "runs": [],
+    });
+
+    for &(name, mult) in multipliers {
+        let mut overrides = CalibrationOverrides::default();
+        if name.starts_with("flip-") {
+            overrides.duel_flip_ratio = Some(1.5 * mult);
+        } else if name.starts_with("contested-") {
+            overrides.duel_contested_ratio = Some(0.5 * mult);
+        } else if name.starts_with("doubt-") {
+            overrides.doubt_drift_threshold = Some(0.4 * mult);
+        }
+
+        let out_path =
+            std::path::Path::new(output_dir).join(format!("stale-{name}.json"));
+        eprintln!(
+            "STALE sweep: running '{name}' (overrides: {}) → {}",
+            overrides.tag(),
+            out_path.display()
+        );
+
+        let report = crate::bench_stale::run(
+            std::path::PathBuf::from(dataset),
+            judge,
+            limit,
+            overrides,
+            out_path.clone(),
+        )
+        .await?;
+
+        let entry = serde_json::json!({
+            "name": name,
+            "output": out_path.display().to_string(),
+            "scenarios": report.scenarios_run,
+            "overall_pct": report.overall_pct,
+            "state_resolution_pct": report.by_metric.state_resolution_pct,
+            "premise_resistance_pct": report.by_metric.premise_resistance_pct,
+        });
+        if let Some(arr) = summary["runs"].as_array_mut() {
+            arr.push(entry);
+        }
+    }
+
+    let summary_path = std::path::Path::new(output_dir).join("summary.json");
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)?;
+    println!(
+        "STALE sweep done. {} runs. Summary: {}",
+        multipliers.len(),
+        summary_path.display()
+    );
     Ok(())
 }
 
