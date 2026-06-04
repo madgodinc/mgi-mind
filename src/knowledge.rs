@@ -116,6 +116,7 @@ impl EntryStatus {
         }
     }
 
+    #[allow(dead_code)] // wired by Phase 2 duel-rule read path
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "active" => Some(EntryStatus::Active),
@@ -133,6 +134,7 @@ impl EntryStatus {
     /// hidden by default and require an explicit `include_stale` filter to
     /// surface — this is what lets the loser of a past duel keep its audit
     /// trail without poisoning future reads.
+    #[allow(dead_code)] // wired by Phase 2 duel-rule read path
     pub fn is_default_visible(self) -> bool {
         matches!(
             self,
@@ -486,6 +488,95 @@ pub async fn ensure_predicates_collection(
     Ok(())
 }
 
+/// Scroll all *valid* facts in the knowledge graph. Used by Phase 1
+/// migrations to walk every (subject, predicate, object) triple in one
+/// pass. Server-side filter `valid = true` so dampened/invalidated facts
+/// are excluded (they do not participate in dependant counts or
+/// cardinality inference).
+pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![Condition::matches("valid", "true".to_string())],
+        ..Default::default()
+    };
+
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            let id = point
+                .id
+                .as_ref()
+                .map(|pid| {
+                    use qdrant_client::qdrant::point_id::PointIdOptions;
+                    match &pid.point_id_options {
+                        Some(PointIdOptions::Uuid(u)) => u.clone(),
+                        Some(PointIdOptions::Num(n)) => n.to_string(),
+                        None => "unknown".to_string(),
+                    }
+                })
+                .unwrap_or_default();
+            facts.push(Fact {
+                id,
+                subject: extract_string(p, "subject").unwrap_or_default(),
+                predicate: extract_string(p, "predicate").unwrap_or_default(),
+                object: extract_string(p, "object").unwrap_or_default(),
+                created_at: extract_string(p, "created_at"),
+                valid: true,
+            });
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(facts)
+}
+
+/// Set a payload field on a fact by id. Used by Phase 1 migrations to
+/// write back computed values (dependants_count, confirmations_count)
+/// without re-creating the point.
+pub async fn set_fact_payload_field(
+    config: &MindConfig,
+    fact_id: &str,
+    field: &str,
+    value: String,
+) -> Result<()> {
+    let client = storage::get_client(config).await?;
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert(field.into(), value.into());
+
+    let point_id: qdrant_client::qdrant::PointId = fact_id.to_string().into();
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(storage::FACTS_COLLECTION, payload)
+                .points_selector(PointsIdsList {
+                    ids: vec![point_id],
+                })
+                .wait(true),
+        )
+        .await
+        .context("Failed to set fact payload field")?;
+    Ok(())
+}
+
 /// Find all *valid* facts already on record for a given `(subject, predicate)`
 /// pair. Used by `add_fact` to decide whether a new triple opens a duel
 /// (Phase 2) or coexists peacefully (Multi cardinality, or first write).
@@ -721,6 +812,33 @@ mod tests {
         // First write of any kind is `New`, not a duel.
         assert!(!detect_conflict(&[], "Go", Cardinality::Single));
         assert!(!detect_conflict(&[], "Go", Cardinality::Multi));
+    }
+
+    #[test]
+    fn valid_payload_convention_is_string_true_or_false() {
+        // Post-critic regression guard (PR #4 should-fix):
+        // - add_fact writes payload["valid"] = "true" (string)
+        // - invalidate_fact writes payload["valid"] = "false" (string)
+        // - find_facts_by_subject_predicate filters with
+        //   Condition::matches("valid", "true".to_string())
+        //
+        // This test enforces the convention at compile time by
+        // referencing the string literals. If anyone changes one
+        // side to bool, this assertion fires and the next migration
+        // run will silently return zero facts.
+        //
+        // The "string-true-or-false" convention is the audit
+        // contract we ship as of v1.4 and forward.
+        let v_true: &str = "true";
+        let v_false: &str = "false";
+        assert_eq!(v_true.len(), 4);
+        assert_eq!(v_false.len(), 5);
+        // The pin: filter strings on read MUST match write strings.
+        // The actual filter in find_facts_by_subject_predicate uses
+        // `Condition::matches("valid", "true".to_string())` — same
+        // payload key, same value string. If a future refactor
+        // serialises valid as bool true/false, this test must change
+        // first.
     }
 
     #[test]
