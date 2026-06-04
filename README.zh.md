@@ -2,6 +2,8 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
+**[最新版本：v1.6.3](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.3)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+
 面向 AI 助手的本地长期记忆。一个 Rust 程序，本地 Qdrant 向量数据库，本地
 ONNX 模型。通过 MCP 协议，Claude Code 等助手可以自己读写记忆。同时也是一个普通的
 CLI 工具。
