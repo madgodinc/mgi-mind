@@ -226,13 +226,59 @@ pub async fn run_dependants(
     threshold: f32,
     apply: bool,
 ) -> Result<(HashMap<String, u32>, DistributionSummary)> {
-    let _ = (config, threshold, apply); // Phase 1 implementation lands in step 1.1
-    // For now: an empty result so the CLI scaffold compiles and the gate
-    // wiring is testable. The actual walk uses
-    // crate::storage::search_by_vector + the existing embedder pool;
-    // landing it as a separate commit on this branch keeps the diff
-    // bisectable.
-    Ok((HashMap::new(), DistributionSummary::from_counts(&[])))
+    // Step 1: enumerate every active fact in the knowledge graph.
+    let facts = crate::knowledge::list_all_facts(config).await?;
+    if facts.is_empty() {
+        eprintln!("  no facts in the knowledge graph yet — nothing to count.");
+        return Ok((HashMap::new(), DistributionSummary::from_counts(&[])));
+    }
+    eprintln!("  scanning {} facts...", facts.len());
+
+    // Step 2: for each fact, build the canonical text and ask the existing
+    // hybrid search (dense + sparse + optional reranker) for a wide candidate
+    // set. We then count how many of those candidates clear the threshold.
+    //
+    // Cost: one embedding inference per fact + one HNSW query per fact. On a
+    // ~12k-memory base with ~50 facts that is ~50 * (30ms embed + 10ms HNSW)
+    // = ~2 seconds on CPU MiniLM INT8.
+    //
+    // Hybrid score is dense + sparse, so the threshold is calibrated against
+    // that combined scale (not pure cosine). The default 0.7 was chosen for
+    // pure cosine; for hybrid it tends to be slightly higher. Phase 4 may
+    // revise once we see the real distribution.
+    const PROBE_LIMIT: usize = 256;
+    let mut counts: HashMap<String, u32> = HashMap::with_capacity(facts.len());
+
+    for f in &facts {
+        let canonical = format!("{} {} {}", f.subject, f.predicate, f.object);
+        let hits = crate::storage::search(config, &canonical, None, PROBE_LIMIT, 2).await?;
+        let count = hits.iter().filter(|h| h.score >= threshold).count() as u32;
+        counts.insert(f.id.clone(), count);
+    }
+
+    let count_vec: Vec<u32> = counts.values().copied().collect();
+    let summary = DistributionSummary::from_counts(&count_vec);
+
+    // Step 3 (optional): persist the counts back into each fact's payload.
+    // Phase 2 reads `dependants_count` directly from the payload at duel
+    // time, so this materialises the cache the Phase 2 hot path relies on.
+    if apply {
+        eprintln!("  writing dependants_count back to {} facts...", counts.len());
+        let mut written = 0usize;
+        for (id, n) in counts.iter() {
+            crate::knowledge::set_fact_payload_field(
+                config,
+                id,
+                "dependants_count",
+                n.to_string(),
+            )
+            .await?;
+            written += 1;
+        }
+        eprintln!("  wrote dependants_count to {written} facts.");
+    }
+
+    Ok((counts, summary))
 }
 
 /// Walk all distinct `(subject, predicate)` groupings in the knowledge
