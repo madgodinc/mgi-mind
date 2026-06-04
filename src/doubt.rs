@@ -315,6 +315,117 @@ pub async fn apply_doubt_check_to_fact(
     Ok(state)
 }
 
+/// v1.5 Phase 8 step 8.2: re-test one fact and apply the transition.
+///
+/// Reads the fact's cached `confidence_score` (last computed by the
+/// previous tick or by add_fact at write time), recomputes from
+/// current payload signals, asks `confidence::decide_retest_transition`
+/// what to do, and applies the verdict:
+///
+/// - PromoteToDoubt → bump doubt counter to threshold, write back.
+/// - RecoverFromDoubt → reset doubt counter to 0.
+/// - NoChange → write back new score for next-tick comparison.
+///
+/// Never deletes. Mechanism 1 invariant.
+///
+/// Returns the resulting `RetestTransition` so the loop can count
+/// and log per-tick promote/recover/noop totals (and Step 8.4 audit
+/// log can record them).
+pub async fn retest_fact_step82(
+    config: &MindConfig,
+    fact_id: &str,
+) -> Result<crate::confidence::RetestTransition> {
+    use crate::confidence::{
+        confidence_score, decide_retest_transition, ConfidenceInputs, RetestTransition,
+    };
+
+    let client = crate::storage::get_client(config).await?;
+
+    // Read every payload field we need. Four separate fetches —
+    // could be optimised into one batched Qdrant call later, but
+    // for the v1.5 release each retest is bounded to
+    // BACKGROUND_PER_TICK_CAP per tick (50) so the overhead is
+    // negligible.
+    async fn read_field(
+        client: &qdrant_client::Qdrant,
+        fact_id: &str,
+        key: &str,
+    ) -> Option<String> {
+        crate::storage::existing_payload_string(
+            client,
+            crate::storage::FACTS_COLLECTION,
+            fact_id,
+            key,
+        )
+        .await
+    }
+
+    let dependants = read_field(&client, fact_id, "dependants_count")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let confirmations = read_field(&client, fact_id, "confirmations_count")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let legacy_external_count = read_field(&client, fact_id, "external_signals")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let cached_score = read_field(&client, fact_id, "confidence_score")
+        .await
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.5);
+
+    // Phase 7 typed external_signal_score: derive from the
+    // external_signals_v15 log if present.
+    let typed_signals = crate::storage::read_external_signals(config, fact_id)
+        .await
+        .unwrap_or_default();
+    let external_signal_score = if typed_signals.is_empty() {
+        None
+    } else {
+        Some(crate::outcome::compute_external_signal_score(
+            &typed_signals,
+            |_citing_id| None, // §7 self-citation guard — no chain following in v1.5
+        ))
+    };
+
+    let inputs = ConfidenceInputs {
+        dependants,
+        confirmations,
+        external_signal_score,
+        legacy_external_count,
+        inherited_unverified: is_inherited(fact_id),
+    };
+    let new_score = confidence_score(inputs, config.install_mode);
+    let currently_in_doubt = read_doubt_count(config, fact_id).await >= DOUBT_WINDOW_N_RETRIEVALS;
+    let transition = decide_retest_transition(cached_score, new_score, currently_in_doubt);
+
+    match transition {
+        RetestTransition::PromoteToDoubt => {
+            write_doubt_count(config, fact_id, DOUBT_WINDOW_N_RETRIEVALS).await?;
+        }
+        RetestTransition::RecoverFromDoubt => {
+            write_doubt_count(config, fact_id, 0).await?;
+        }
+        RetestTransition::NoChange => {}
+    }
+
+    // Always write the freshly-computed score back, so next tick
+    // compares against the most recent value rather than a stale
+    // cache.
+    crate::knowledge::set_fact_payload_field(
+        config,
+        fact_id,
+        "confidence_score",
+        format!("{new_score:.6}"),
+    )
+    .await?;
+
+    Ok(transition)
+}
+
 async fn read_doubt_count(config: &MindConfig, fact_id: &str) -> u32 {
     let Ok(client) = crate::storage::get_client(config).await else {
         return 0;
@@ -507,25 +618,23 @@ pub fn spawn_background_retest_loop(
                     );
                     break;
                 }
-                // Step 8.2 will compute new confidence_score and
-                // decide promote/demote here. For the v1.5 Phase 8
-                // step 8.1B landing we apply the doubt-window state
-                // transition using the existing
-                // `apply_doubt_check_to_fact` plumbing (treats a
-                // flagged-and-drained candidate as "drifted" → enters
-                // the doubt window). The re-evaluation lands in 8.2.
-                if let Err(e) =
-                    apply_doubt_check_to_fact(&config, fact_id, true /*drifted*/).await
-                {
-                    tracing::debug!(
-                        "mgimind: background re-test apply_doubt_check_to_fact({fact_id}) failed: {e}"
-                    );
-                    // Re-flag so the next tick gets another shot.
-                    flag_for_doubt_window(fact_id);
-                    continue;
+                // v1.5 Phase 8 step 8.2: real re-test pass. Reads
+                // current payload signals, recomputes confidence_score,
+                // applies promote/recover/noop verdict. Never deletes
+                // (Mechanism 1 invariant).
+                match retest_fact_step82(&config, fact_id).await {
+                    Ok(_transition) => {
+                        clear_doubt_window_flag(fact_id);
+                        n_processed_this_tick += 1;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "mgimind: background re-test retest_fact_step82({fact_id}) failed: {e}"
+                        );
+                        // Re-flag so the next tick gets another shot.
+                        flag_for_doubt_window(fact_id);
+                    }
                 }
-                clear_doubt_window_flag(fact_id);
-                n_processed_this_tick += 1;
             }
 
             assert!(
