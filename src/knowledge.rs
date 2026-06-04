@@ -66,6 +66,81 @@ impl Cardinality {
     }
 }
 
+/// Per-fact lifecycle status — refined from a bool `conflict_pending` after the
+/// STALE benchmark read showed our two-state model can't express Type II
+/// (propagated) conflicts. CUPMem (STALE's own architecture) uses a four-state
+/// label (KEEP / STALE / REPLACE / UNKNOWN); we use a similar small enum so
+/// Phase 2 duel resolution and Phase 3 background re-test have somewhere to
+/// write outcomes without overloading a single boolean.
+///
+/// - `Active` — the default. Fact is live, no contestation, no propagation
+///   shadow. Legacy facts (written before v1.4) read as `Active` since their
+///   payload has no status field.
+/// - `Contested` — Type I direct conflict pending. A different-object write
+///   came in for the same `(subject, predicate)` on a Single or
+///   TemporalSingle predicate. Phase 2 duel rule resolves.
+/// - `Stale` — fact's belief is no longer current (e.g. lost a duel,
+///   superseded by `valid_until`). Kept as audit trace, hidden from default
+///   ranking.
+/// - `PropagationShadowed` — Type II propagated conflict: a sibling fact's
+///   update cascaded through logical dependency to make this one suspect
+///   without directly contradicting it. The doubt-window / re-test path
+///   uses this to flag for re-verification rather than dampening directly.
+/// - `Unknown` — placeholder for facts the writer was unsure about; treated
+///   as `Active` by default ranking but surfaced separately by `doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryStatus {
+    Active,
+    Contested,
+    Stale,
+    PropagationShadowed,
+    Unknown,
+}
+
+impl Default for EntryStatus {
+    fn default() -> Self {
+        EntryStatus::Active
+    }
+}
+
+impl EntryStatus {
+    /// Lowercase wire format. Stable since v1.4 — do not rename existing
+    /// variants; new variants append.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryStatus::Active => "active",
+            EntryStatus::Contested => "contested",
+            EntryStatus::Stale => "stale",
+            EntryStatus::PropagationShadowed => "propagation_shadowed",
+            EntryStatus::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "active" => Some(EntryStatus::Active),
+            "contested" => Some(EntryStatus::Contested),
+            "stale" => Some(EntryStatus::Stale),
+            "propagation_shadowed" | "propagation-shadowed" | "shadowed" => {
+                Some(EntryStatus::PropagationShadowed)
+            }
+            "unknown" => Some(EntryStatus::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Should the fact appear in default search rankings? Stale/Shadowed are
+    /// hidden by default and require an explicit `include_stale` filter to
+    /// surface — this is what lets the loser of a past duel keep its audit
+    /// trail without poisoning future reads.
+    pub fn is_default_visible(self) -> bool {
+        matches!(
+            self,
+            EntryStatus::Active | EntryStatus::Contested | EntryStatus::Unknown
+        )
+    }
+}
+
 /// Pure (no Qdrant) conflict detector for the duel rule.
 ///
 /// Inputs: the facts already on record for this `(subject, predicate)` pair
@@ -144,20 +219,30 @@ pub async fn add_fact(
             .await
             .unwrap_or_else(|| now.clone());
 
-    // v1.4 Phase 0 step 3: cardinality-aware conflict detection.
+    // v1.4 Phase 0 step 3+4: cardinality-aware conflict detection.
     // Look up the predicate's registered cardinality (default Multi when
     // unregistered) and check the existing facts for this (subject,
     // predicate) pair. If the cardinality admits conflict and an existing
-    // *different-object* fact is on record, flag this write as
-    // `conflict_pending`. The Phase 2 duel rule resolves the flag; for now
-    // the write still goes through, both facts stay live, and `mgimind
+    // *different-object* fact is on record, flag this write as `Contested`
+    // (EntryStatus). The Phase 2 duel rule resolves the contestation; for
+    // now the write still goes through, both facts stay live, and `mgimind
     // doctor` surfaces the pending count.
+    //
+    // Step 4 extends the original boolean conflict_pending into the wider
+    // EntryStatus enum so Phase 3 can also write `PropagationShadowed`
+    // (Type II conflict from STALE) and Phase 2 can write `Stale` on a
+    // duel loser without overloading the boolean. New facts default to
+    // `Active` unless a Type I conflict is detected at write time.
     let cardinality = get_cardinality(config, predicate).await?;
-    let conflict_pending = if cardinality.admits_conflict() {
+    let status = if cardinality.admits_conflict() {
         let existing = find_facts_by_subject_predicate(config, subject, predicate).await?;
-        detect_conflict(&existing, object, cardinality)
+        if detect_conflict(&existing, object, cardinality) {
+            EntryStatus::Contested
+        } else {
+            EntryStatus::Active
+        }
     } else {
-        false
+        EntryStatus::Active
     };
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
@@ -168,9 +253,7 @@ pub async fn add_fact(
     payload.insert("updated_at".into(), now.into());
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
-    if conflict_pending {
-        payload.insert("conflict_pending".into(), "true".into());
-    }
+    payload.insert("status".into(), status.as_str().into());
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
@@ -475,35 +558,51 @@ pub async fn find_facts_by_subject_predicate(
     Ok(facts)
 }
 
-/// Count facts currently flagged as having an unresolved conflict event.
-/// Phase 0: this is just a count surfaced by `mgimind doctor` so the user
-/// sees the volume of pending duels. Phase 2 wires the actual resolution.
-pub async fn count_pending_conflicts(config: &MindConfig) -> Result<u64> {
+/// Count facts whose lifecycle status indicates an unresolved conflict.
+/// Phase 0: surface counts by category for `mgimind doctor`. Phase 2 owns
+/// the actual resolution.
+///
+/// Returns (contested, propagation_shadowed). Contested = Type I (direct
+/// `(subject, predicate)` conflict). PropagationShadowed = Type II (sibling
+/// update cascaded suspicion). Phase 3 background re-test sets the second.
+pub async fn count_pending_conflicts(config: &MindConfig) -> Result<(u64, u64)> {
     let client = storage::get_client(config).await?;
     if !client
         .collection_exists(storage::FACTS_COLLECTION)
         .await
         .unwrap_or(false)
     {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
-    let filter = Filter {
-        must: vec![
-            Condition::matches("valid", "true".to_string()),
-            Condition::matches("conflict_pending", "true".to_string()),
-        ],
-        ..Default::default()
+    let one = |status: &str| {
+        Filter {
+            must: vec![
+                Condition::matches("valid", "true".to_string()),
+                Condition::matches("status", status.to_string()),
+            ],
+            ..Default::default()
+        }
     };
 
-    let response = client
+    let contested = client
         .count(
             qdrant_client::qdrant::CountPointsBuilder::new(storage::FACTS_COLLECTION)
-                .filter(filter)
+                .filter(one(EntryStatus::Contested.as_str()))
                 .exact(true),
         )
         .await?;
-    Ok(response.result.map(|r| r.count).unwrap_or(0))
+    let shadowed = client
+        .count(
+            qdrant_client::qdrant::CountPointsBuilder::new(storage::FACTS_COLLECTION)
+                .filter(one(EntryStatus::PropagationShadowed.as_str()))
+                .exact(true),
+        )
+        .await?;
+    Ok((
+        contested.result.map(|r| r.count).unwrap_or(0),
+        shadowed.result.map(|r| r.count).unwrap_or(0),
+    ))
 }
 
 // ===== v1.4 Phase 0: cardinality + conflict detector =====
@@ -638,6 +737,56 @@ mod tests {
             "different predicate must map to different ids — no collisions in the cardinality registry"
         );
         assert!(uuid::Uuid::parse_str(&a).is_ok());
+    }
+
+    #[test]
+    fn entry_status_default_is_active() {
+        // Legacy facts with no status field must read as Active so reads of
+        // pre-v1.4 data behave identically to v1.1.
+        assert_eq!(EntryStatus::default(), EntryStatus::Active);
+    }
+
+    #[test]
+    fn entry_status_wire_format_round_trips() {
+        for s in [
+            EntryStatus::Active,
+            EntryStatus::Contested,
+            EntryStatus::Stale,
+            EntryStatus::PropagationShadowed,
+            EntryStatus::Unknown,
+        ] {
+            assert_eq!(EntryStatus::parse(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn entry_status_parse_is_tolerant() {
+        assert_eq!(
+            EntryStatus::parse("propagation-shadowed"),
+            Some(EntryStatus::PropagationShadowed)
+        );
+        assert_eq!(
+            EntryStatus::parse("shadowed"),
+            Some(EntryStatus::PropagationShadowed)
+        );
+        assert_eq!(
+            EntryStatus::parse("  ACTIVE  "),
+            Some(EntryStatus::Active)
+        );
+        assert_eq!(EntryStatus::parse("totally-bogus"), None);
+    }
+
+    #[test]
+    fn default_visibility_hides_stale_and_shadowed() {
+        // Default search must not surface losers or propagation-shadowed
+        // facts — they are audit traces, not active beliefs. Active /
+        // Contested / Unknown are still visible so users can see what's
+        // live and what's pending resolution.
+        assert!(EntryStatus::Active.is_default_visible());
+        assert!(EntryStatus::Contested.is_default_visible());
+        assert!(EntryStatus::Unknown.is_default_visible());
+        assert!(!EntryStatus::Stale.is_default_visible());
+        assert!(!EntryStatus::PropagationShadowed.is_default_visible());
     }
 
     #[test]

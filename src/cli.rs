@@ -1048,13 +1048,13 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
                 predicates.len()
             );
         }
-        if let Ok(pending) = crate::knowledge::count_pending_conflicts(&cfg).await {
-            if pending == 0 {
+        if let Ok((contested, shadowed)) = crate::knowledge::count_pending_conflicts(&cfg).await {
+            if contested == 0 && shadowed == 0 {
                 let _ = writeln!(out, "[OK]   No pending fact conflicts");
             } else {
                 let _ = writeln!(
                     out,
-                    "[INFO] {pending} fact(s) flagged conflict_pending — duel rule resolution arrives in Phase 2"
+                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); duel rule resolution arrives in Phase 2"
                 );
             }
         }
