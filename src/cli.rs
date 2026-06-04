@@ -163,6 +163,7 @@ pub enum Commands {
     /// v1.4 Phase 5: install, inspect, or uninstall the local LLM auto-extractor
     /// (Qwen 2.5 family GGUF). The extractor populates the knowledge graph
     /// automatically from new memories via background extraction.
+    #[cfg(feature = "extractor")]
     Extractor {
         #[command(subcommand)]
         what: ExtractorCmd,
@@ -340,6 +341,7 @@ pub enum MigrateV14Cmd {
     },
 }
 
+#[cfg(feature = "extractor")]
 #[derive(Subcommand)]
 pub enum ExtractorCmd {
     /// Install the llama-server binary + chosen Qwen 2.5 GGUF model.
@@ -537,6 +539,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
+        #[cfg(feature = "extractor")]
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
         Commands::MigrateV14 { what } => match what {
@@ -2051,6 +2054,7 @@ async fn cmd_stop() -> Result<()> {
 
 // ===== v1.4 Phase 5: extractor command handler =====
 
+#[cfg(feature = "extractor")]
 async fn cmd_extractor(what: ExtractorCmd) -> Result<()> {
     match what {
         ExtractorCmd::Install { variant } => {

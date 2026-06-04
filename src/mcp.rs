@@ -106,6 +106,7 @@ pub async fn serve() -> Result<()> {
     // a port). Calling shutdown_server here covers the EOF / clean-stdin
     // case; SIGTERM/SIGKILL paths are covered by PR_SET_PDEATHSIG set on
     // the child at spawn time.
+    #[cfg(feature = "extractor")]
     crate::extractor::shutdown_server();
     Ok(())
 }
