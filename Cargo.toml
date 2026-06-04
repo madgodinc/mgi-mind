@@ -89,7 +89,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Native HTTP + archive extraction (replaces curl/tar/unzip shellouts) — audit #19
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -107,6 +107,12 @@ regex = "1"
 [dev-dependencies]
 tempfile = "3"
 
+# v1.4 Phase 5: PR_SET_PDEATHSIG via libc::prctl for llama-server
+# orphan prevention. Linux-only — covers SIGKILL/OOM paths where the
+# parent mgimind dies without running shutdown_server.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 # Optional CUDA build for the bench / power-user GPU path. Enabled by the
 # Dockerfile in docker/cuda/, never by the default release. Activates the
 # CUDA execution provider in embedder.rs and reranker.rs (also gated by
@@ -115,3 +121,11 @@ tempfile = "3"
 [features]
 default = []
 cuda = ["ort/cuda"]
+# v1.4 Phase 5 — auto-extractor (Qwen 2.5 GGUF via subprocess llama-server).
+# Default off because the auto-ingest hook calls knowledge::add_fact, which in
+# Phase 2+ runs the duel rule + per-(subject,predicate) lock + quarantine
+# routing. Until users understand the model semantics, default-on would let an
+# auto-installed extractor write through a path they did not explicitly opt
+# into. Enable with `cargo build --release --features extractor`, then `mgimind
+# extractor install`.
+extractor = []

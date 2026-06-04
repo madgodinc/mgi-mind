@@ -100,6 +100,14 @@ pub async fn serve() -> Result<()> {
         }
     }
 
+    // v1.4 Phase 5 post-critic fix: shut down the llama-server subprocess
+    // explicitly. The static OnceCell holding the handle is never Dropped
+    // on normal exit, so the child llama-server would leak (~2 GB RAM and
+    // a port). Calling shutdown_server here covers the EOF / clean-stdin
+    // case; SIGTERM/SIGKILL paths are covered by PR_SET_PDEATHSIG set on
+    // the child at spawn time.
+    #[cfg(feature = "extractor")]
+    crate::extractor::shutdown_server();
     Ok(())
 }
 

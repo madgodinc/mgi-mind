@@ -10,6 +10,8 @@ mod doubt;
 mod duel;
 mod embedder;
 mod error;
+#[cfg(feature = "extractor")]
+mod extractor;
 mod ingest;
 mod integrity;
 mod knowledge;

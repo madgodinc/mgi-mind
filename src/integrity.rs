@@ -57,6 +57,41 @@ pub const RERANK_BGE_BASE_ONNX: &str =
 pub const RERANK_BGE_BASE_TOKENIZER: &str =
     "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c";
 
+// ===== v1.4 Phase 5: local LLM auto-extractor (Qwen 2.5 family GGUF) =====
+//
+// Both variants come from the Qwen team's official HuggingFace release
+// (Qwen/Qwen2.5-{1.5B,3B}-Instruct-GGUF). Pins are filled in after
+// step 5.2 downloads the artifacts and computes their sha256; until
+// then `pin()` returns None and `util::download_file` issues a warning
+// rather than failing fast — the v1.4 Phase 5 install path is
+// explicitly opt-in, so an unpinned download under a clear warning is
+// acceptable for the bootstrap window.
+
+/// Qwen 2.5 1.5B Instruct Q4_K_M GGUF — the Lite variant of the
+/// auto-extractor. ~990 MB on disk, ~1.5 GB RAM loaded.
+/// Pinned 2026-06-04 from Qwen/Qwen2.5-1.5B-Instruct-GGUF official release.
+pub const EXTRACTOR_QWEN_1_5B_Q4_K_M: &str =
+    "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e";
+
+/// Qwen 2.5 3B Instruct Q4_K_M GGUF — the Default variant of the
+/// auto-extractor. ~1.93 GB on disk, ~2.5 GB RAM loaded.
+/// Pinned 2026-06-04 from Qwen/Qwen2.5-3B-Instruct-GGUF official release.
+pub const EXTRACTOR_QWEN_3B_Q4_K_M: &str =
+    "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d";
+
+/// llama.cpp Vulkan-enabled prebuilt binary archive for Linux x86_64
+/// (build b9496). Vulkan was chosen as the GPU backend because it works
+/// on both NVIDIA and AMD without a separate per-vendor build, and the
+/// upstream llama.cpp project does NOT ship a CUDA-Linux prebuilt — only
+/// CUDA-Windows. Vulkan keeps us prebuilt-only across platforms.
+///
+/// On a single-binary distribution model, `mgimind extractor install`
+/// downloads this tarball, extracts the `llama-server` binary + its
+/// shared libraries into `$MGIMIND_HOME/bin/extractor/`, and pins this
+/// hash for fail-closed verification.
+pub const LLAMA_CPP_LINUX_VULKAN_B9496: &str =
+    "e4956d4945b4929cf412e9954712267f58d8d179c44f8b6b65d372c4725a5350";
+
 /// Treat the placeholder/empty as "no pin available".
 pub fn pin(hash: &str) -> Option<&str> {
     if hash.is_empty() || hash == "PIN_ME" {

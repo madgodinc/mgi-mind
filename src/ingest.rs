@@ -303,6 +303,14 @@ pub async fn run_ingest(
                     crate::storage::add_memory(config, library, &content, Some("ingest")).await?;
                 if n > 0 {
                     report.stored_memories += 1;
+                    // v1.4 Phase 5 step 5.5: fire-and-forget auto-extraction
+                    // through a bounded mpsc queue (post-critic fix). The
+                    // worker is a single dedicated task; bursts drop
+                    // overflow rather than spawn unbounded futures.
+                    #[cfg(feature = "extractor")]
+                    if crate::extractor::is_llama_server_installed() {
+                        crate::extractor::enqueue_auto_extract(config, &content);
+                    }
                 }
             }
             Candidate::Fact {
