@@ -355,6 +355,10 @@ pub async fn add_fact(
         .upsert_points(UpsertPointsBuilder::new(storage::FACTS_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to add fact")?;
+    // v1.5 Phase 8 step 8.1D: graph just gained a fact. The
+    // background re-test loop watches this counter so the cadence
+    // speeds up after a burst of additions.
+    crate::doubt::record_edit();
 
     // Phase 2 step 2.3: if the duel produced a Flip, dampen the loser
     // *after* the winner is in the store. Doing it after the upsert
@@ -651,6 +655,72 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
     Ok(facts)
 }
 
+/// v1.5 Phase 8 step 8.1A: scroll every valid fact and return the
+/// top-N by `dependants_count` payload. Used by the background
+/// re-test loop to pick "load-bearing" facts to re-evaluate first.
+///
+/// O(total_facts) — every tick scans the full base, then sorts the
+/// top-N in memory. For Mad's ~12k-fact target the scan is one round
+/// of Qdrant scroll + an O(N log K) selection, well inside the
+/// per-tick budget (default cadence 60min = 3600s).
+///
+/// Returns `(fact_id, dependants_count)` pairs in descending order.
+/// Facts without an explicit `dependants_count` payload (Phase 1
+/// migration not yet run on legacy facts) are treated as 0 and rank
+/// at the bottom — those are the candidates the re-test loop will
+/// re-evaluate last.
+pub async fn list_top_dependants_facts(
+    config: &MindConfig,
+    top_n: usize,
+) -> Result<Vec<(String, u32)>> {
+    if top_n == 0 {
+        return Ok(Vec::new());
+    }
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![Condition::matches("valid", "true".to_string())],
+        ..Default::default()
+    };
+
+    let mut pairs: Vec<(String, u32)> = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let id = point.id.as_ref().map(storage::format_point_id).unwrap_or_default();
+            let dep = extract_string(&point.payload, "dependants_count")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            pairs.push((id, dep));
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    // Sort descending by dependants_count; tie-break by id for
+    // determinism in tests.
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pairs.truncate(top_n);
+    Ok(pairs)
+}
+
 /// Set a payload field on a fact by id. Used by Phase 1 migrations to
 /// write back computed values (dependants_count, confirmations_count)
 /// without re-creating the point.
@@ -675,6 +745,11 @@ pub async fn set_fact_payload_field(
         )
         .await
         .context("Failed to set fact payload field")?;
+    // v1.5 Phase 8 step 8.1D: signal that the graph changed. The
+    // background re-test loop watches this counter to speed up its
+    // cadence after a burst of edits. Cheap atomic add — fine to call
+    // from hot paths.
+    crate::doubt::record_edit();
     Ok(())
 }
 

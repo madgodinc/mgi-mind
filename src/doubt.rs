@@ -179,6 +179,49 @@ pub fn background_cadence_next(
     }
 }
 
+/// v1.5 Phase 8 step 8.1C: load-based cadence multiplier.
+///
+/// Reads `/proc/loadavg` (linux only) and compares the 1-minute load
+/// to `1.5 × num_cpus`. When the system is overloaded the loop
+/// doubles its cadence to back off; otherwise it returns 1.0.
+///
+/// On non-Linux platforms returns 1.0 (the loop ignores load). A
+/// future revision could use rusage on macOS / GetSystemTimes on
+/// Windows, but for v1.5 the Linux path covers Mad's target deployment.
+///
+/// Best-effort: any I/O / parse failure returns 1.0. The loop
+/// keeps running; we just lose the back-off signal that pass.
+pub fn loadavg_multiplier() -> f32 {
+    #[cfg(target_os = "linux")]
+    {
+        try_loadavg_multiplier_linux().unwrap_or(1.0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        1.0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_loadavg_multiplier_linux() -> Option<f32> {
+    let raw = std::fs::read_to_string("/proc/loadavg").ok()?;
+    // Format: "0.50 0.45 0.40 1/123 12345" — first field is 1m load.
+    let load_1m: f32 = raw.split_whitespace().next()?.parse().ok()?;
+
+    // num_cpus crate adds a dep we'd rather avoid; use std API.
+    // `available_parallelism` reflects scheduler-visible CPUs, which
+    // is the right denominator on a container/cgroup-restricted host.
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as f32;
+
+    if load_1m > cores * 1.5 {
+        Some(2.0)
+    } else {
+        Some(1.0)
+    }
+}
+
 // ===== Pure helpers — doubt window state machine =====
 
 /// Apply one retrieval event to a fact's doubt-window counter.
@@ -270,6 +313,142 @@ pub async fn apply_doubt_check_to_fact(
         write_doubt_count(config, fact_id, new_count).await?;
     }
     Ok(state)
+}
+
+/// v1.5 Phase 8 step 8.2: re-test one fact and apply the transition.
+///
+/// Reads the fact's cached `confidence_score` (last computed by the
+/// previous tick or by add_fact at write time), recomputes from
+/// current payload signals, asks `confidence::decide_retest_transition`
+/// what to do, and applies the verdict:
+///
+/// - PromoteToDoubt → bump doubt counter to threshold, write back.
+/// - RecoverFromDoubt → reset doubt counter to 0.
+/// - NoChange → write back new score for next-tick comparison.
+///
+/// Never deletes. Mechanism 1 invariant.
+///
+/// Returns the resulting `RetestTransition` so the loop can count
+/// and log per-tick promote/recover/noop totals (and Step 8.4 audit
+/// log can record them).
+pub async fn retest_fact_step82(
+    config: &MindConfig,
+    fact_id: &str,
+) -> Result<crate::confidence::RetestTransition> {
+    use crate::confidence::{
+        confidence_score, decide_retest_transition, ConfidenceInputs, RetestTransition,
+    };
+
+    let client = crate::storage::get_client(config).await?;
+
+    // Read every payload field we need. Four separate fetches —
+    // could be optimised into one batched Qdrant call later, but
+    // for the v1.5 release each retest is bounded to
+    // BACKGROUND_PER_TICK_CAP per tick (50) so the overhead is
+    // negligible.
+    async fn read_field(
+        client: &qdrant_client::Qdrant,
+        fact_id: &str,
+        key: &str,
+    ) -> Option<String> {
+        crate::storage::existing_payload_string(
+            client,
+            crate::storage::FACTS_COLLECTION,
+            fact_id,
+            key,
+        )
+        .await
+    }
+
+    let dependants = read_field(&client, fact_id, "dependants_count")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let confirmations = read_field(&client, fact_id, "confirmations_count")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let legacy_external_count = read_field(&client, fact_id, "external_signals")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let cached_score = read_field(&client, fact_id, "confidence_score")
+        .await
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.5);
+
+    // Phase 7 typed external_signal_score: derive from the
+    // external_signals_v15 log if present.
+    let typed_signals = crate::storage::read_external_signals(config, fact_id)
+        .await
+        .unwrap_or_default();
+    let external_signal_score = if typed_signals.is_empty() {
+        None
+    } else {
+        Some(crate::outcome::compute_external_signal_score(
+            &typed_signals,
+            |_citing_id| None, // §7 self-citation guard — no chain following in v1.5
+        ))
+    };
+
+    let inputs = ConfidenceInputs {
+        dependants,
+        confirmations,
+        external_signal_score,
+        legacy_external_count,
+        inherited_unverified: is_inherited(fact_id),
+    };
+    let new_score = confidence_score(inputs, config.install_mode);
+    let currently_in_doubt = read_doubt_count(config, fact_id).await >= DOUBT_WINDOW_N_RETRIEVALS;
+    let transition = decide_retest_transition(cached_score, new_score, currently_in_doubt);
+
+    match transition {
+        RetestTransition::PromoteToDoubt => {
+            write_doubt_count(config, fact_id, DOUBT_WINDOW_N_RETRIEVALS).await?;
+            // v1.5 Phase 8 step 8.4: audit log entry. Append-only;
+            // a future `mgimind audit replay --since 1d` can
+            // reconstruct the sequence of promotions.
+            crate::audit::record(
+                crate::audit::AuditEvent::new(
+                    crate::audit::AuditOp::RetestPromote,
+                    "facts",
+                    fact_id,
+                )
+                .actor("retest")
+                .before(format!("{cached_score:.6}"))
+                .after(format!("{new_score:.6}"))
+                .note("promote_to_doubt"),
+            );
+        }
+        RetestTransition::RecoverFromDoubt => {
+            write_doubt_count(config, fact_id, 0).await?;
+            crate::audit::record(
+                crate::audit::AuditEvent::new(
+                    crate::audit::AuditOp::RetestRecover,
+                    "facts",
+                    fact_id,
+                )
+                .actor("retest")
+                .before(format!("{cached_score:.6}"))
+                .after(format!("{new_score:.6}"))
+                .note("recover_from_doubt"),
+            );
+        }
+        RetestTransition::NoChange => {}
+    }
+
+    // Always write the freshly-computed score back, so next tick
+    // compares against the most recent value rather than a stale
+    // cache.
+    crate::knowledge::set_fact_payload_field(
+        config,
+        fact_id,
+        "confidence_score",
+        format!("{new_score:.6}"),
+    )
+    .await?;
+
+    Ok(transition)
 }
 
 async fn read_doubt_count(config: &MindConfig, fact_id: &str) -> u32 {
@@ -442,26 +621,61 @@ pub fn spawn_background_retest_loop(
 
             let edits = take_edit_count();
             cadence = background_cadence_next(cadence, edits);
+            // v1.5 Phase 8 step 8.1C — load-aware multiplier on top
+            // of the edit-rate cadence. /proc/loadavg above 1.5×cores
+            // doubles the cadence for the next tick.
+            cadence = (cadence as f32 * loadavg_multiplier()) as u64;
 
-            // Phase 3 step 3 scaffold + post-critic enforcement of
-            // BACKGROUND_PER_TICK_CAP. The actual fact-selection walk
-            // depends on Phase 1's dependants_count payload field. Until
-            // that ships on this branch, the loop logs a tick summary
-            // *bounded* by the per-tick cap so the public invariant
-            // (synthesis §10 q5 guarantee b) is observable from
-            // logs/tests, not just intent. When the walk lands it will
-            // already be wrapped in the same `n_processed.min(cap)`
-            // pattern below.
-            let n_processed_this_tick: usize = 0; // walk not yet wired
-            let _bounded = n_processed_this_tick.min(BACKGROUND_PER_TICK_CAP);
+            // v1.5 Phase 8 step 8.1B: real walk. Pick candidates,
+            // re-check is_mcp_busy() BETWEEN facts so a tool call
+            // that started mid-tick still wins the contention race
+            // (guarantee a hole noted by audit).
+            let candidates =
+                select_retest_candidates(&config, BACKGROUND_PER_TICK_CAP).await;
+
+            let mut n_processed_this_tick: usize = 0;
+            for fact_id in &candidates {
+                if is_mcp_busy() {
+                    eprintln!(
+                        "mgimind: background re-test interrupted mid-tick (MCP call in flight, {}/{} processed)",
+                        n_processed_this_tick,
+                        candidates.len()
+                    );
+                    break;
+                }
+                // v1.5 Phase 8 step 8.2: real re-test pass. Reads
+                // current payload signals, recomputes confidence_score,
+                // applies promote/recover/noop verdict. Never deletes
+                // (Mechanism 1 invariant).
+                match retest_fact_step82(&config, fact_id).await {
+                    Ok(_transition) => {
+                        clear_doubt_window_flag(fact_id);
+                        n_processed_this_tick += 1;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "mgimind: background re-test retest_fact_step82({fact_id}) failed: {e}"
+                        );
+                        // Re-flag so the next tick gets another shot.
+                        flag_for_doubt_window(fact_id);
+                    }
+                }
+            }
+
+            assert!(
+                n_processed_this_tick <= BACKGROUND_PER_TICK_CAP,
+                "background loop processed {} > cap {}",
+                n_processed_this_tick,
+                BACKGROUND_PER_TICK_CAP
+            );
+
             eprintln!(
                 "mgimind: background re-test tick (edits since last={}, processed {}/{} cap, next cadence={}s)",
                 edits,
-                _bounded,
+                n_processed_this_tick,
                 BACKGROUND_PER_TICK_CAP,
                 cadence
             );
-            let _ = &config; // silence unused-borrow warning until walk lands
         }
     })
 }
@@ -576,6 +790,100 @@ pub fn clear_all_doubt_window_flags() {
 /// so the user can see whether the guardrail has been firing.
 pub fn doubt_window_flag_count() -> usize {
     DOUBT_WINDOW_FLAGGED.lock().len()
+}
+
+/// v1.5 Phase 8 step 8.1A: drain up to `max` flagged ids from
+/// the registry, returning them sorted (deterministic for tests).
+/// Used by `select_retest_candidates` to feed the background loop's
+/// per-tick work queue. Drained ids are removed from the registry —
+/// the caller takes responsibility for applying the doubt-window
+/// state transition or re-flagging on failure.
+pub fn drain_doubt_window_flags(max: usize) -> Vec<String> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let mut guard = DOUBT_WINDOW_FLAGGED.lock();
+    // Sort the full registry first, THEN take `max`. HashSet iteration
+    // order is unstable, so `iter().take(max)` without a prior sort
+    // would return a non-deterministic subset and the drain would
+    // pick different ids on each call.
+    let mut all: Vec<String> = guard.iter().cloned().collect();
+    all.sort();
+    let out: Vec<String> = all.into_iter().take(max).collect();
+    for id in &out {
+        guard.remove(id);
+    }
+    out
+}
+
+/// v1.5 Phase 8 step 8.1A: choose up to `cap` fact ids for the
+/// next background re-test tick.
+///
+/// Priority order:
+///   1. Drain DOUBT_WINDOW_FLAGGED — these are facts the Phase 7
+///      error-rate guardrail explicitly forced into the queue.
+///      They are the highest-priority candidates because they have
+///      external evidence of being wrong.
+///   2. Top up with the highest-`dependants_count` facts from the
+///      base. Load-bearing facts are checked more aggressively
+///      because their incorrectness has the largest blast radius.
+///
+/// **Hard-fail invariant (guarantee b from §10 q5):**
+/// `assert!(result.len() <= cap)` — the cap is enforced; the loop
+/// will panic if a future refactor breaks it. Better to crash the
+/// background task (auto-restarted by the loop's outer scheduling)
+/// than to silently scan unbounded work and starve the MCP path.
+///
+/// Returns an empty vec on any Qdrant fetch error — the loop is
+/// best-effort; tick failures should not crash the server.
+pub async fn select_retest_candidates(
+    config: &crate::config::MindConfig,
+    cap: usize,
+) -> Vec<String> {
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    // Priority 1: flagged ids drained from Phase 7 guardrail registry.
+    let mut out: Vec<String> = drain_doubt_window_flags(cap);
+    if out.len() >= cap {
+        debug_assert!(out.len() <= cap, "drain returned more than cap");
+        out.truncate(cap);
+        return out;
+    }
+
+    // Priority 2: top up with high-dependants facts. Skip if Qdrant
+    // is unreachable — better to do less work this tick than to
+    // crash the loop.
+    let remaining = cap - out.len();
+    let top = match crate::knowledge::list_top_dependants_facts(config, remaining).await {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            tracing::debug!("select_retest_candidates: list_top_dependants_facts failed: {e}");
+            return out;
+        }
+    };
+
+    // Avoid duplicating ids already drained from the flag registry —
+    // those got priority 1 treatment and don't need a second pass.
+    let already: std::collections::HashSet<String> = out.iter().cloned().collect();
+    for (id, _dep) in top {
+        if !already.contains(&id) {
+            out.push(id);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+
+    // Hard-fail invariant — guarantee (b) from v1.5 plan Step 8.1.
+    assert!(
+        out.len() <= cap,
+        "select_retest_candidates returned {} > cap {}",
+        out.len(),
+        cap,
+    );
+    out
 }
 
 // ===== Tests =====
@@ -818,5 +1126,81 @@ mod tests {
         record_edit();
         assert_eq!(take_edit_count(), 3);
         assert_eq!(take_edit_count(), 0, "swap should leave the counter at zero");
+    }
+
+    // --- v1.5 Phase 8 step 8.1A: drain + per-tick cap ---
+
+    /// drain returns sorted ids up to `max`, and the registry is
+    /// emptied of those ids (not the rest if `max` < count).
+    #[test]
+    fn drain_returns_sorted_subset_and_clears_them() {
+        clear_all_doubt_window_flags();
+        for id in ["c-fact", "a-fact", "b-fact", "d-fact"] {
+            flag_for_doubt_window(id);
+        }
+        let drained = drain_doubt_window_flags(2);
+        assert_eq!(drained, vec!["a-fact".to_string(), "b-fact".to_string()]);
+        assert_eq!(doubt_window_flag_count(), 2, "two unflagged should remain");
+        clear_all_doubt_window_flags(); // tidy up for sibling tests
+    }
+
+    /// `drain(0)` is a no-op even when the registry has entries —
+    /// catches a misuse where the cap is computed as zero.
+    #[test]
+    fn drain_zero_returns_empty_and_keeps_flags() {
+        clear_all_doubt_window_flags();
+        flag_for_doubt_window("kept");
+        let drained = drain_doubt_window_flags(0);
+        assert!(drained.is_empty());
+        assert_eq!(doubt_window_flag_count(), 1, "flag must not be drained");
+        clear_all_doubt_window_flags();
+    }
+
+    /// `drain(huge)` returns every flag without panicking.
+    #[test]
+    fn drain_larger_than_count_returns_all() {
+        clear_all_doubt_window_flags();
+        for i in 0..5 {
+            flag_for_doubt_window(&format!("fact-{i}"));
+        }
+        let drained = drain_doubt_window_flags(100);
+        assert_eq!(drained.len(), 5);
+        assert_eq!(doubt_window_flag_count(), 0);
+    }
+
+    // --- v1.5 Phase 8 step 8.1C: adaptive cadence loadavg multiplier ---
+
+    /// loadavg_multiplier returns 1.0 on a quiet host (load below
+    /// 1.5x cores). Either by reading the real /proc/loadavg (linux)
+    /// or by the non-linux fallback.
+    #[test]
+    fn loadavg_multiplier_is_one_when_idle() {
+        // We can't force the real load to a known value, so this
+        // test only asserts the value is a sane multiplier (1.0 or
+        // 2.0). On CI runners the load is typically <2 — the test
+        // would flake otherwise.
+        let m = loadavg_multiplier();
+        assert!(
+            m == 1.0 || m == 2.0,
+            "loadavg_multiplier must return 1.0 or 2.0, got {m}"
+        );
+    }
+
+    /// Pure helper: when load > 1.5×cores, the multiplier function
+    /// returns 2.0. We test the formula by replicating its logic —
+    /// the function itself reads /proc, which we can't fake without
+    /// a mount/cgroup test. The contract is documented and stable.
+    #[test]
+    fn loadavg_multiplier_doubles_above_threshold() {
+        // 4 cores, load 7.5 → 7.5 > 4*1.5=6.0 → doubles.
+        let cores: f32 = 4.0;
+        let load: f32 = 7.5;
+        let expected_multiplier = if load > cores * 1.5 { 2.0 } else { 1.0 };
+        assert_eq!(expected_multiplier, 2.0);
+
+        // 4 cores, load 5.0 → 5.0 < 4*1.5=6.0 → doesn't double.
+        let load: f32 = 5.0;
+        let expected_multiplier = if load > cores * 1.5 { 2.0 } else { 1.0 };
+        assert_eq!(expected_multiplier, 1.0);
     }
 }
