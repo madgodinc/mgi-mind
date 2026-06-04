@@ -63,6 +63,12 @@ blake3 = "1"
 # Thread-safe lazy initialization
 once_cell = "1"
 
+# v1.4 Phase 2 post-critic: parking_lot::Mutex for the lock-map
+# in knowledge::add_fact. The outer mutex protects only brief
+# HashMap lookup/insert; the per-key tokio::sync::Mutex holds
+# across await for the actual duel.
+parking_lot = "0.12"
+
 # Encoding for vault
 base64 = "0.22"
 

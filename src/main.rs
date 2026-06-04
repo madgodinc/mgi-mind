@@ -6,6 +6,7 @@ mod bench_procedural;
 mod cli;
 mod config;
 mod consolidate;
+mod duel;
 mod embedder;
 mod error;
 mod ingest;
