@@ -90,9 +90,6 @@ hex = "0.4"
 
 # Native HTTP + archive extraction (replaces curl/tar/unzip shellouts) — audit #19
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
-# v1.4 Phase 5: PR_SET_PDEATHSIG for llama-server orphan prevention (Linux).
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -109,6 +106,12 @@ regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# v1.4 Phase 5: PR_SET_PDEATHSIG via libc::prctl for llama-server
+# orphan prevention. Linux-only — covers SIGKILL/OOM paths where the
+# parent mgimind dies without running shutdown_server.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 # Optional CUDA build for the bench / power-user GPU path. Enabled by the
 # Dockerfile in docker/cuda/, never by the default release. Activates the
