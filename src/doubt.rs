@@ -535,6 +535,49 @@ pub fn inherited_count() -> usize {
     INHERITED_FACTS.lock().len()
 }
 
+/// v1.5 Phase 7 step 7.3: in-memory set of memory ids that the
+/// error-rate guardrail flagged for the doubt window. The Phase 3
+/// background re-test loop (currently scaffold) consumes this set
+/// and applies the actual doubt-window state transition; until that
+/// lands, the flag is observable via `is_flagged_for_doubt_window`
+/// and surfaces in `mgimind doctor`.
+///
+/// parking_lot::Mutex consistent with INHERITED_FACTS — same short
+/// critical-section / no-poisoning rationale.
+static DOUBT_WINDOW_FLAGGED: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Flag a memory id for promotion to the doubt window. Called by
+/// `outcome::record` when ≥3 failed test_passed signals land within
+/// the last 7 days.
+pub fn flag_for_doubt_window(memory_id: &str) {
+    DOUBT_WINDOW_FLAGGED.lock().insert(memory_id.to_string());
+}
+
+/// Check whether a memory was flagged for the doubt window by the
+/// error-rate guardrail. The background re-test loop reads this.
+pub fn is_flagged_for_doubt_window(memory_id: &str) -> bool {
+    DOUBT_WINDOW_FLAGGED.lock().contains(memory_id)
+}
+
+/// Clear a memory's flag — called when the background loop applies
+/// the actual doubt-window state transition (so we don't keep
+/// flagging it forever) or when a fresh successful test_passed
+/// signal lands (TBD in Phase 8).
+pub fn clear_doubt_window_flag(memory_id: &str) {
+    DOUBT_WINDOW_FLAGGED.lock().remove(memory_id);
+}
+
+/// Bulk clear — used by tests and v1.6 maintenance commands.
+pub fn clear_all_doubt_window_flags() {
+    DOUBT_WINDOW_FLAGGED.lock().clear();
+}
+
+/// Count of memories currently flagged. Surfaced by `mgimind doctor`
+/// so the user can see whether the guardrail has been firing.
+pub fn doubt_window_flag_count() -> usize {
+    DOUBT_WINDOW_FLAGGED.lock().len()
+}
+
 // ===== Tests =====
 
 #[cfg(test)]
