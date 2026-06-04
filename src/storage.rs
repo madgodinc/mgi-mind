@@ -1905,6 +1905,44 @@ pub async fn set_memory_payload_field(
     Ok(())
 }
 
+/// v1.5 Phase 7: read the `external_signals_v15` payload field on
+/// a memory and decode it as `Vec<ExternalSignal>`. Returns an empty
+/// vec on a fresh memory that has never received an outcome.
+///
+/// The slot is intentionally NEW (not the v1.4 `external_signals: Vec<String>`)
+/// because Phase 1 migration writes legacy counts into the old slot
+/// and we must not lose them when Phase 7 lands. v1.6 will migrate the
+/// legacy slot into the new one and drop the duplicate.
+pub async fn read_external_signals(
+    config: &MindConfig,
+    memory_id: &str,
+) -> Result<Vec<crate::outcome::ExternalSignal>> {
+    let client = get_client(config).await?;
+    let Some(raw) = existing_payload_string(&client, MEMORIES_COLLECTION, memory_id, "external_signals_v15").await
+    else {
+        return Ok(Vec::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let signals: Vec<crate::outcome::ExternalSignal> = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid external_signals_v15 JSON on memory {memory_id}"))?;
+    Ok(signals)
+}
+
+/// v1.5 Phase 7: write back the deduplicated signal log. Caller is
+/// responsible for running `outcome::dedup_keep_latest` first — this
+/// helper just persists.
+pub async fn write_external_signals(
+    config: &MindConfig,
+    memory_id: &str,
+    signals: &[crate::outcome::ExternalSignal],
+) -> Result<()> {
+    let serialised = serde_json::to_string(signals)
+        .context("failed to serialise external_signals_v15")?;
+    set_memory_payload_field(config, memory_id, "external_signals_v15", serialised).await
+}
+
 /// Record the outcome of reusing a procedure: bump success or fail count and
 /// stamp `last_used`. A failure (`worked = false`) raises fail_count so recall
 /// can demote a fix that stopped working - the store self-corrects instead of
