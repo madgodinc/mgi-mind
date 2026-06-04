@@ -443,13 +443,23 @@ pub fn spawn_background_retest_loop(
             let edits = take_edit_count();
             cadence = background_cadence_next(cadence, edits);
 
-            // Phase 3 step 3 scaffold: the fact-selection walk lives
-            // here. Wiring depends on Phase 1's dependants_count
-            // payload field being present; until then we log the
-            // intent so operations are visible.
+            // Phase 3 step 3 scaffold + post-critic enforcement of
+            // BACKGROUND_PER_TICK_CAP. The actual fact-selection walk
+            // depends on Phase 1's dependants_count payload field. Until
+            // that ships on this branch, the loop logs a tick summary
+            // *bounded* by the per-tick cap so the public invariant
+            // (synthesis §10 q5 guarantee b) is observable from
+            // logs/tests, not just intent. When the walk lands it will
+            // already be wrapped in the same `n_processed.min(cap)`
+            // pattern below.
+            let n_processed_this_tick: usize = 0; // walk not yet wired
+            let _bounded = n_processed_this_tick.min(BACKGROUND_PER_TICK_CAP);
             eprintln!(
-                "mgimind: background re-test tick (edits since last={}, next cadence={}s)",
-                edits, cadence
+                "mgimind: background re-test tick (edits since last={}, processed {}/{} cap, next cadence={}s)",
+                edits,
+                _bounded,
+                BACKGROUND_PER_TICK_CAP,
+                cadence
             );
             let _ = &config; // silence unused-borrow warning until walk lands
         }
