@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.1.0 — tool surface consolidation (alias phase)
+
+Same shape competitors converged on: one tool per object, an `action`
+field selects the verb. Doesn't break anything in v1.x — the 15
+single-verb tools they replace stay live as deprecated aliases until
+v2.0, with the death date written into every deprecated description.
+
+The user-facing surface (non-deprecated) drops from **30 tools to 20**,
+which is in the same range as Graphiti (~9), Cognee (11), mem0 (~9),
+supermemory (3). The full `tools/list` is 35 entries because the 15
+deprecated singletons still ship for backward compatibility.
+
+### New tools (5 consolidated verbs)
+
+- `mind_quarantine(action="list"|"show"|"promote")` — replaces
+  `mind_quarantine_list` / `_show` / `_promote`.
+- `mind_vault(action="store"|"get"|"list")` — replaces
+  `mind_vault_store` / `_get` / `_list` (still terminal-only by design).
+- `mind_session(action="start"|"last"|"end")` — replaces
+  `mind_session_start` / `_last` / `_end`.
+- `mind_fact(action="add"|"query"|"invalidate")` — replaces
+  `mind_fact_add` / `_query` / `_invalidate`.
+- `mind_library(action="create"|"list"|"delete")` — replaces
+  `mind_create` / `mind_list` / `mind_delete`.
+
+### Deprecated (still works through v1.x, removed in v2.0)
+
+The 15 singletons above. Every deprecated tool now carries
+`"deprecated": true` in its JSON schema and a description prefixed
+`DEPRECATED — use mind_X(action="Y"). Removed in v2.0.`. Well-behaved
+MCP clients hide deprecated tools; older clients keep working unchanged.
+
+### Kept separate on purpose
+
+- `mind_history` — "newest N by time" is a different verb from
+  "find relevant by query"; merging it into `mind_search` would hurt
+  clarity more than it would help surface size.
+- `mind_doctor` vs `mind_stats` — "what is broken" vs "how much of what"
+  are different questions.
+- `mind_consolidate`, `mind_export`, `mind_import`, `mind_ingest`,
+  `mind_web`, `mind_provenance_add`, `mind_search`, `mind_add`,
+  `mind_context`, `mind_learn`, `mind_recall`,
+  `mind_procedure_outcome` — already one verb per tool, nothing to
+  collapse.
+
+### Roadmap shifted
+
+The roadmap moves down one minor: what was v1.1 backup is now v1.2,
+v1.3 REST + portable format, v1.4 bi-temporal + supersession, v1.5
+decay, v2.0 unchanged.
+
+### Tests
+
+23 MCP unit tests (149 unit + 6 integration overall) green. New
+coverage: the consolidated `mind_vault` dispatches all three actions
+to the same terminal-only instructions, and an unknown action returns
+a structured error naming the allowed values.
+
 ## 1.0.3 — docs: ROADMAP.md (v1.1 → v2.0 committed, v3.0 candidate set)
 
 Docs-only patch. The internal roadmap that drove v0.9 → v1.0 was not in

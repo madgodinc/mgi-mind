@@ -25,7 +25,9 @@ install path (all-MiniLM-L6-v2 INT8 + reranker, CPU). What v1.0 froze:
 
 - Asymmetric `Qdrant now → md says` diff in `mgimind import md`.
 - `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch + the FP16 GPU recipe.
-- 31-tool MCP surface (`mind_*`).
+- MCP surface (`mind_*`) — 30 tools in v1.0, consolidated to 20
+  user-facing tools in v1.1 (singletons kept as deprecated aliases
+  until v2.0).
 - Procedural memory (`mind_learn` / `mind_recall` /
   `mind_procedure_outcome`) with the 227-pair Д6 dataset.
 - Quarantine + relevance gate + best-effort active-retrieval policy.
@@ -33,10 +35,43 @@ install path (all-MiniLM-L6-v2 INT8 + reranker, CPU). What v1.0 froze:
 
 Breaking any of the above requires v2.0.
 
-## v1.1 — opt-in encrypted backup
+## v1.1 — tool surface consolidation (alias phase) — shipped
+
+Replaces 13 single-verb tools with 5 action-dispatched verbs that match
+the shape competitors converged on (one tool per object, action selects
+the operation). The 13 singletons stay live as deprecated aliases for
+the entire v1.x line and are **removed in v2.0**. No breaking change.
+
+- `mind_quarantine(action="list"|"show"|"promote")` — replaces
+  `mind_quarantine_list` / `_show` / `_promote`.
+- `mind_vault(action="store"|"get"|"list")` — replaces `mind_vault_store`
+  / `_get` / `_list`.
+- `mind_session(action="start"|"last"|"end")` — replaces
+  `mind_session_start` / `_last` / `_end`.
+- `mind_fact(action="add"|"query"|"invalidate")` — replaces
+  `mind_fact_add` / `_query` / `_invalidate`.
+- `mind_library(action="create"|"list"|"delete")` — replaces
+  `mind_create` / `mind_list` / `mind_delete`.
+
+All 15 deprecated entries carry `"deprecated": true` in the JSON schema
+and a description that starts `DEPRECATED — use mind_X(action="Y"). Removed
+in v2.0.`. Well-behaved MCP clients hide deprecated tools; old clients
+keep working unchanged.
+
+Live surface for the v1.1 user-facing shape: **20 tools**. Counting
+deprecated aliases the `tools/list` returns 35.
+
+`mind_history` is kept as its own tool — "newest N by time" is a
+different verb from "find relevant by query" and merging them would
+hurt clarity more than it would help surface size. `mind_doctor` and
+`mind_stats` are kept separate for the same reason (broken-state vs
+counts).
+
+## v1.2 — opt-in encrypted backup
 
 The first of the three Obsidian-shaped user requests: **"sync between
-devices"**. Restore-on-another-device is sync.
+devices"**. Restore-on-another-device is sync. Moved here from v1.1 so
+v1.1 could focus on the surface consolidation.
 
 - `mgimind backup push` / `pull` to an S3-compatible bucket, opt-in
   per-install.
@@ -48,10 +83,10 @@ devices"**. Restore-on-another-device is sync.
 - `mgimind backup verify` checks monotonicity (catches replay), not just
   per-chunk integrity.
 
-**Out of scope for v1.1.** Live multi-device sync (last-writer-wins is the
+**Out of scope for v1.2.** Live multi-device sync (last-writer-wins is the
 wrong default for a memory store); REST server; cloud-hosted mode.
 
-## v1.2 — REST + portable format + reconcile polish
+## v1.3 — REST + portable format + reconcile polish
 
 Driven by the second Obsidian-shaped request ("see and edit from a
 non-MCP tool") and by external feedback that md reconcile is currently
@@ -76,7 +111,7 @@ one-way.
   promote the procedure without a separate `mind_procedure_outcome`
   call.
 
-## v1.3 — bi-temporal facts + supersession
+## v1.4 — bi-temporal facts + supersession
 
 The "remember where I lived in 2024 vs 2026" problem, named in both the
 Bedrock and the GBrain comparison docs.
@@ -92,7 +127,7 @@ Bedrock and the GBrain comparison docs.
   more than one active `object`. No automatic deletion — the user
   decides.
 
-## v1.4 — automatic decay + signal-driven consolidation
+## v1.5 — automatic decay + signal-driven consolidation
 
 Today `mgimind consolidate` is opt-in / cron-driven. The motivation came
 from both comparison docs (GBrain "dream cycles", Bedrock
@@ -113,13 +148,13 @@ That means the bar is **action**, not "time has passed without a CVE"
 
 Required to cut v2.0:
 
-- External security review of the backup module from v1.1, with the
+- External security review of the backup module from v1.2, with the
   threat-model from that release as the input document.
 - Static assertion in the bucket-write path that only ciphertext leaves
   the process.
 - **Self-editing memory (Д5)**, only if it can be shown to not regress
   R@k on LongMemEval-S and not increase the contradiction rate from
-  v1.3. Otherwise pushed to v2.1.
+  v1.4. Otherwise pushed to v2.1.
 - **Multi-tenant isolation (Д7)** — per-user library scoping, fuzz-
   tested on the storage and the viewer paths.
 - Optional **encrypted collection-at-rest** with a documented key-loss
@@ -151,7 +186,7 @@ systems report QA accuracy" objection without contaminating the core
 metric.
 
 Candidate C — **Cross-agent / cross-machine memory.** The REST server
-from v1.2 is the substrate; v3.0-shaped scope here would be the
+from v1.3 is the substrate; v3.0-shaped scope here would be the
 governance layer (per-agent scopes, per-library ACLs, a `mind_grant`
 primitive) that turns mgi-mind into a multi-user company brain.
 
@@ -177,9 +212,9 @@ Carried over from the internal roadmap unchanged:
 
 - Obsidian plugin / live Obsidian sync. The three Obsidian-shaped
   requests are covered separately ("see" → viewer, "edit in a crisis" →
-  md escape hatch in v1.0, "sync between devices" → v1.1 backup).
+  md escape hatch in v1.0, "sync between devices" → v1.2 backup).
 - Markdown as a live source of truth. Qdrant is canonical; md is
-  export + reconcile + (in v1.2) opt-in mirror.
+  export + reconcile + (in v1.3) opt-in mirror.
 - A 50+ MCP-tool sprawl. The 31-tool v1.0 surface is the target shape.
   New tools come from a real gap, not from "we could add this".
 - Cloud-hosted mode where mgi-mind sees user data. The local-first

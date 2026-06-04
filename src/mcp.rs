@@ -550,6 +550,156 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             crate::cli::run_fact_invalidate(id).await
         }
 
+        // ---- v1.1.0 consolidated tools (alias-phase, deprecated siblings
+        // removed in v2.0). Each tool dispatches by `action` to the existing
+        // handlers so behavior is bit-for-bit identical to the old surface. ----
+        "mind_quarantine" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (list|show|promote)"))?;
+            match action {
+                "list" => {
+                    let cfg = warm(true)?;
+                    let library = arg_str(args, "library");
+                    let limit = arg_u64(args, "limit", 20) as usize;
+                    let entries = crate::storage::quarantine_list(cfg, library, limit).await?;
+                    Ok(crate::cli::render_quarantine_list(&entries))
+                }
+                "show" => {
+                    let cfg = warm(true)?;
+                    let id = arg_str(args, "id").ok_or_else(|| {
+                        anyhow::anyhow!("action=show requires 'id'")
+                    })?;
+                    match crate::storage::quarantine_get(cfg, id).await? {
+                        Some(e) => Ok(crate::cli::render_quarantine_entry(&e)),
+                        None => Ok(format!(
+                            "No quarantined entry with id '{id}' (may be a regular memory or unknown id)."
+                        )),
+                    }
+                }
+                "promote" => {
+                    let cfg = warm(true)?;
+                    let id = arg_str(args, "id").ok_or_else(|| {
+                        anyhow::anyhow!("action=promote requires 'id'")
+                    })?;
+                    if crate::storage::promote_from_quarantine(cfg, id).await? {
+                        Ok(format!("Promoted '{id}' from quarantine to ordinary memory."))
+                    } else {
+                        Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
+                    }
+                }
+                other => anyhow::bail!("mind_quarantine: unknown action '{other}' (expected list|show|promote)"),
+            }
+        }
+        "mind_vault" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (get|store|list)"))?;
+            match action {
+                "store" => {
+                    let key = arg_str(args, "key").unwrap_or("<key>");
+                    Ok(format!(
+                        "For security, secret values are never accepted over this channel.\n\
+                         Store \"{key}\" yourself in a terminal:\n\n\
+                         \x20\x20\x20\x20mgimind vault store {key} <value> --category <password|ssh|api-key|token>\n\n\
+                         You'll be prompted for the master password (hidden)."
+                    ))
+                }
+                "get" => {
+                    let key = arg_str(args, "key").unwrap_or("<key>");
+                    Ok(format!(
+                        "For security, secrets are never returned over this channel.\n\
+                         Retrieve \"{key}\" yourself in a terminal:\n\n\
+                         \x20\x20\x20\x20mgimind vault get {key}\n\n\
+                         You'll be prompted for the master password (hidden) and a confirmation."
+                    ))
+                }
+                "list" => Ok("For security, the vault requires a terminal.\n\
+                    List your stored keys yourself:\n\n\
+                    \x20\x20\x20\x20mgimind vault list\n\n\
+                    You'll be prompted for the master password (hidden)."
+                    .to_string()),
+                other => anyhow::bail!("mind_vault: unknown action '{other}' (expected get|store|list)"),
+            }
+        }
+        "mind_session" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (start|end|last)"))?;
+            match action {
+                "start" => {
+                    let agent = arg_str(args, "agent").unwrap_or("unknown");
+                    crate::cli::run_session_start(agent).await
+                }
+                "last" => crate::cli::run_session_last(arg_str(args, "agent")).await,
+                "end" => {
+                    let agent = arg_str(args, "agent").unwrap_or("unknown");
+                    let summary = arg_str(args, "summary").ok_or_else(|| {
+                        anyhow::anyhow!("action=end requires 'summary'")
+                    })?;
+                    crate::cli::run_session_end(agent, summary).await
+                }
+                other => anyhow::bail!("mind_session: unknown action '{other}' (expected start|end|last)"),
+            }
+        }
+        "mind_fact" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (add|query|invalidate)"))?;
+            match action {
+                "add" => {
+                    let cfg = warm(true)?;
+                    let subject = arg_str(args, "subject").ok_or_else(|| {
+                        anyhow::anyhow!("action=add requires 'subject'")
+                    })?;
+                    let predicate = arg_str(args, "predicate").ok_or_else(|| {
+                        anyhow::anyhow!("action=add requires 'predicate'")
+                    })?;
+                    let object = arg_str(args, "object").ok_or_else(|| {
+                        anyhow::anyhow!("action=add requires 'object'")
+                    })?;
+                    let id = crate::knowledge::add_fact(cfg, subject, predicate, object).await?;
+                    Ok(format!(
+                        "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
+                    ))
+                }
+                "query" => {
+                    let cfg = warm(true)?;
+                    let subject = arg_str(args, "subject").ok_or_else(|| {
+                        anyhow::anyhow!("action=query requires 'subject'")
+                    })?;
+                    let facts = crate::knowledge::query_facts(cfg, subject).await?;
+                    Ok(crate::cli::render_facts(subject, &facts))
+                }
+                "invalidate" => {
+                    let id = arg_str(args, "id").ok_or_else(|| {
+                        anyhow::anyhow!("action=invalidate requires 'id'")
+                    })?;
+                    crate::cli::run_fact_invalidate(id).await
+                }
+                other => anyhow::bail!("mind_fact: unknown action '{other}' (expected add|query|invalidate)"),
+            }
+        }
+        "mind_library" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (create|delete|list)"))?;
+            match action {
+                "create" => {
+                    let name = arg_str(args, "name").ok_or_else(|| {
+                        anyhow::anyhow!("action=create requires 'name'")
+                    })?;
+                    crate::cli::run_create(name).await
+                }
+                "list" => crate::cli::run_list().await,
+                "delete" => {
+                    let library = arg_str(args, "library").ok_or_else(|| {
+                        anyhow::anyhow!("action=delete requires 'library'")
+                    })?;
+                    let id = arg_str(args, "id").ok_or_else(|| {
+                        anyhow::anyhow!("action=delete requires 'id'")
+                    })?;
+                    crate::cli::run_delete(library, id).await
+                }
+                other => anyhow::bail!("mind_library: unknown action '{other}' (expected create|delete|list)"),
+            }
+        }
+
         // Test-only handler that panics, so a test can prove the panic-isolation
         // wrapper in `tools/call` turns a handler panic into an `isError` result
         // instead of unwinding through the read loop and killing the session.
@@ -564,7 +714,18 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
 /// from the zod schemas in `mcp-server/index.js` (1:1, so signatures don't
 /// drift). `inputSchema` is a JSON Schema object per tool.
 fn tool_definitions() -> Vec<Value> {
-    vec![
+    // List order matters: well-behaved MCP clients render tools in the order
+    // returned by tools/list, and many model prompts surface the first dozen
+    // first. So:
+    //   (1) the consolidated v1.1 tools come right after the everyday verbs
+    //       (search/add/provenance/context),
+    //   (2) the deprecated singletons keep working but live at the end of the
+    //       list, with `"deprecated": true` so well-behaved clients can hide
+    //       them, and their description prefixed with the v2.0 death-date.
+    // The dispatch table above still handles every old name, so any client
+    // that already wires the old tools by name keeps working unchanged through
+    // the v1.x line.
+    let mut tools = vec![
         json!({
             "name": "mind_search",
             "description": "Semantic search across memories",
@@ -875,7 +1036,138 @@ fn tool_definitions() -> Vec<Value> {
             "description": "Show memory statistics",
             "inputSchema": { "type": "object", "properties": {} }
         }),
-    ]
+    ];
+
+    // ---- v1.1 consolidated tools (alias-phase). 5 new verbs cover what
+    // used to be 13 singletons. Old singletons continue to work for the whole
+    // v1.x line and are removed in v2.0.
+    let consolidated = vec![
+        json!({
+            "name": "mind_quarantine",
+            "description": "Inspect or promote entries that the v0.11 relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (move to ordinary memory by id). Replaces mind_quarantine_list / _show / _promote.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "show", "promote"], "description": "What to do" },
+                    "id": { "type": "string", "description": "Required for action=show or action=promote" },
+                    "library": { "type": "string", "description": "Scope for action=list (optional)" },
+                    "limit": { "type": "number", "default": 20, "description": "Max entries for action=list" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "mind_vault",
+            "description": "Vault is terminal-only by design. This tool explains how the user runs the equivalent `mgimind vault` command — secret values never cross the MCP channel. Single tool with `action`: store (instructions for storing a secret), get (instructions for retrieving), list (instructions for listing keys). Replaces mind_vault_store / _get / _list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["store", "get", "list"], "description": "What instructions to render" },
+                    "key": { "type": "string", "description": "Optional key name to interpolate into the instructions" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "mind_session",
+            "description": "Manage the agent's session record across runs. Single tool with `action`: start (open a new session for an agent), last (read the previous session's summary), end (close the active session with a hand-written summary). Replaces mind_session_start / _last / _end.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["start", "last", "end"], "description": "Lifecycle step" },
+                    "agent": { "type": "string", "default": "unknown", "description": "Agent name; same across start/end" },
+                    "summary": { "type": "string", "description": "Required for action=end. Free-form, <200 words, what happened this session" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "mind_fact",
+            "description": "Knowledge-graph facts (subject -> predicate -> object). Single tool with `action`: add (insert a new fact), query (list facts about a subject), invalidate (soft-delete a fact by id when a single-valued fact has been superseded). Replaces mind_fact_add / _query / _invalidate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["add", "query", "invalidate"], "description": "Operation" },
+                    "subject": { "type": "string", "description": "Required for add/query" },
+                    "predicate": { "type": "string", "description": "Required for add" },
+                    "object": { "type": "string", "description": "Required for add" },
+                    "id": { "type": "string", "description": "Required for invalidate (from action=query)" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "mind_library",
+            "description": "Library namespaces. Single tool with `action`: create (new library by name), list (all libraries with counts), delete (remove a specific memory by id within a library — destructive). Replaces mind_create / mind_list / mind_delete.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["create", "list", "delete"], "description": "Operation" },
+                    "name": { "type": "string", "description": "Required for action=create" },
+                    "library": { "type": "string", "description": "Required for action=delete" },
+                    "id": { "type": "string", "description": "Required for action=delete; memory uuid from search results" }
+                },
+                "required": ["action"]
+            }
+        }),
+    ];
+
+    // Mark the 13 singletons as deprecated and rewrite their description with
+    // the v2.0 death-date and the replacement signature. Well-behaved MCP
+    // clients hide tools where `deprecated: true`, but the surface still works
+    // for clients that don't honor the field.
+    const DEPRECATIONS: &[(&str, &str)] = &[
+        ("mind_quarantine_list",    "mind_quarantine(action=\"list\")"),
+        ("mind_quarantine_show",    "mind_quarantine(action=\"show\")"),
+        ("mind_quarantine_promote", "mind_quarantine(action=\"promote\")"),
+        ("mind_vault_store",        "mind_vault(action=\"store\")"),
+        ("mind_vault_get",          "mind_vault(action=\"get\")"),
+        ("mind_vault_list",         "mind_vault(action=\"list\")"),
+        ("mind_session_start",      "mind_session(action=\"start\")"),
+        ("mind_session_last",       "mind_session(action=\"last\")"),
+        ("mind_session_end",        "mind_session(action=\"end\")"),
+        ("mind_fact_add",           "mind_fact(action=\"add\")"),
+        ("mind_fact_query",         "mind_fact(action=\"query\")"),
+        ("mind_fact_invalidate",    "mind_fact(action=\"invalidate\")"),
+        ("mind_create",             "mind_library(action=\"create\")"),
+        ("mind_list",               "mind_library(action=\"list\")"),
+        ("mind_delete",             "mind_library(action=\"delete\")"),
+    ];
+
+    // Splits the list into "kept" (everyday + the new consolidated) and
+    // "deprecated" (singletons), preserving their original order so a
+    // backwards-compat smoke test still sees the same handler set.
+    let dep_names: std::collections::HashMap<&str, &str> =
+        DEPRECATIONS.iter().copied().collect();
+    let mut kept: Vec<Value> = Vec::new();
+    let mut deprecated: Vec<Value> = Vec::new();
+    for tool in tools.into_iter() {
+        let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if let Some(replacement) = dep_names.get(name) {
+            let mut tool = tool;
+            if let Some(obj) = tool.as_object_mut() {
+                obj.insert("deprecated".to_string(), Value::Bool(true));
+                let old_desc = obj
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let new_desc = format!(
+                    "DEPRECATED — use {replacement}. Removed in v2.0. ({old_desc})"
+                );
+                obj.insert("description".to_string(), Value::String(new_desc));
+            }
+            deprecated.push(tool);
+        } else {
+            kept.push(tool);
+        }
+    }
+
+    // Final order: everyday verbs + consolidated v1.1 tools first, deprecated
+    // singletons last so a client showing only the first N has a clean view.
+    kept.extend(consolidated);
+    kept.extend(deprecated);
+    kept
 }
 
 #[cfg(test)]
@@ -883,13 +1175,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_all_30_tools() {
+    fn exposes_consolidated_and_legacy_tools() {
+        // v1.1 alias phase: 30 v1.0 singletons stay live + 5 new consolidated
+        // verbs (mind_quarantine/_vault/_session/_fact/_library). The 15
+        // deprecated singletons are still in the list, but flagged
+        // `deprecated: true`. Total 35.
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            30,
-            "tools/list must advertise exactly 30 tools"
+            35,
+            "tools/list = 30 legacy + 5 consolidated v1.1 = 35 entries total"
         );
+        let deprecated = tools
+            .iter()
+            .filter(|t| t.get("deprecated").and_then(Value::as_bool) == Some(true))
+            .count();
+        assert_eq!(
+            deprecated, 15,
+            "15 singletons must be flagged deprecated for v2.0 removal"
+        );
+        let live_surface = tools.len() - deprecated;
+        assert_eq!(
+            live_surface, 20,
+            "non-deprecated surface is 20 tools (the user-facing v1.1 shape)"
+        );
+    }
+
+    #[test]
+    fn consolidated_tools_are_present() {
+        let tools = tool_definitions();
+        for needed in [
+            "mind_quarantine",
+            "mind_vault",
+            "mind_session",
+            "mind_fact",
+            "mind_library",
+        ] {
+            let found = tools
+                .iter()
+                .any(|t| t.get("name").and_then(Value::as_str) == Some(needed));
+            assert!(found, "v1.1 consolidated tool {needed} missing from tools/list");
+        }
+    }
+
+    #[test]
+    fn deprecated_tools_point_at_replacement() {
+        let tools = tool_definitions();
+        // Every deprecated singleton must (a) be flagged, (b) name its
+        // replacement in the description so the agent self-corrects.
+        for t in &tools {
+            if t.get("deprecated").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            let desc = t
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            assert!(
+                desc.starts_with("DEPRECATED"),
+                "deprecated tool {} should lead with the death notice, got: {desc}",
+                t.get("name").and_then(Value::as_str).unwrap_or("?")
+            );
+            assert!(
+                desc.contains("v2.0"),
+                "deprecated tool {} must name the v2.0 removal target",
+                t.get("name").and_then(Value::as_str).unwrap_or("?")
+            );
+        }
     }
 
     #[test]
@@ -955,10 +1307,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_30() {
+    async fn tools_list_returns_v1_1_surface() {
+        // 30 legacy v1.0 singletons (15 of which are deprecated but kept for
+        // the alias phase) + 5 consolidated v1.1 verbs = 35 total entries.
+        // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 35);
+    }
+
+    #[tokio::test]
+    async fn consolidated_vault_dispatches_to_terminal_instructions() {
+        // The vault consolidated verb must route action=store|get|list to the
+        // same terminal-only instructions the singletons returned. This is the
+        // "alias phase" promise — old and new tool names are bit-for-bit
+        // equivalent in behavior.
+        for action in ["store", "get", "list"] {
+            let params = json!({
+                "name": "mind_vault",
+                "arguments": { "action": action, "key": "test-k" }
+            });
+            let res = call_tool(None, params).await;
+            let text = res["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("terminal"),
+                "mind_vault action={action} must redirect to a terminal"
+            );
+            assert_eq!(res["isError"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn consolidated_tool_rejects_unknown_action() {
+        // Wrong action should fail fast with a clear message naming the
+        // allowed values, not silently no-op or panic.
+        let params = json!({
+            "name": "mind_vault",
+            "arguments": { "action": "destroy" }
+        });
+        let res = call_tool(None, params).await;
+        assert_eq!(res["isError"], true);
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown action"));
     }
 
     #[tokio::test]
