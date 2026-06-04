@@ -407,6 +407,178 @@ pub fn parse_response(raw: &str) -> Option<Vec<Triple>> {
     None
 }
 
+// ===== llama-server binary install =====
+//
+// `mgimind extractor install` downloads the Vulkan-enabled
+// llama-server tarball from the upstream llama.cpp release, verifies
+// the pinned sha256, extracts the server + its shared libraries into
+// $MGIMIND_HOME/bin/extractor/, and downloads the chosen GGUF model.
+
+const LLAMA_RELEASE_TAG: &str = "b9496";
+
+/// HTTP URL for the Vulkan-enabled Linux x64 tarball. NOTE: only
+/// Linux x64 is supported in this commit. macOS (Metal) and Windows
+/// (Vulkan or CUDA) variants land as follow-up commits with their own
+/// pinned hashes in integrity.rs.
+pub fn llama_server_tarball_url() -> &'static str {
+    "https://github.com/ggerganov/llama.cpp/releases/download/b9496/llama-b9496-bin-ubuntu-vulkan-x64.tar.gz"
+}
+
+pub fn llama_server_pinned_hash() -> Option<&'static str> {
+    crate::integrity::pin(crate::integrity::LLAMA_CPP_LINUX_VULKAN_B9496)
+}
+
+/// Install both the llama-server binary and the chosen GGUF model.
+/// Idempotent: skips downloads when already present.
+pub async fn install(variant: ExtractorVariant) -> anyhow::Result<()> {
+    install_llama_server().await?;
+    download(variant).await?;
+    eprintln!("\nExtractor install complete.");
+    eprintln!("  variant : {}", variant.as_str());
+    eprintln!("  server  : {}", llama_server_path().display());
+    eprintln!("  model   : {}", gguf_path(variant).display());
+    Ok(())
+}
+
+async fn install_llama_server() -> anyhow::Result<()> {
+    let dest = llama_server_path();
+    if dest.exists() {
+        eprintln!("  llama-server already installed, skipping download");
+        return Ok(());
+    }
+    let target_dir = dest.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&target_dir).context("create extractor bin dir")?;
+
+    // Download the tarball to a temp path.
+    let tarball = target_dir.join(format!("llama-{LLAMA_RELEASE_TAG}.tar.gz"));
+    eprintln!(
+        "  downloading llama-server (Vulkan) {LLAMA_RELEASE_TAG}..."
+    );
+    let pin = llama_server_pinned_hash();
+    if pin.is_none() {
+        eprintln!(
+            "  [warn] no pinned checksum for llama-server tarball — integrity not verified"
+        );
+    }
+    crate::util::download_file(llama_server_tarball_url(), &tarball, pin).await?;
+
+    eprintln!("  extracting llama-server + shared libs (preserving symlinks)...");
+    // Use the system `tar` binary so symlinks in the archive are
+    // restored correctly. The Rust `tar` crate's symlink handling
+    // requires extra care that produced 0-byte files on the first
+    // pass; shelling out to `tar` is the canonical fix and matches
+    // how we extract the Qdrant archive elsewhere.
+    let stage = target_dir.join("_stage");
+    std::fs::create_dir_all(&stage).context("create stage dir")?;
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&stage)
+        .status()
+        .context("invoke tar")?;
+    if !status.success() {
+        anyhow::bail!("tar extraction failed: {status}");
+    }
+
+    // The tarball contains a top-level `llama-b9496/` directory with
+    // everything inside it. Find that directory and move the needed
+    // files into `target_dir`.
+    let inner = std::fs::read_dir(&stage)?
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .ok_or_else(|| anyhow::anyhow!("tarball had no top-level directory"))?
+        .path();
+
+    for entry in std::fs::read_dir(&inner)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        // Keep llama-server + all libraries; skip other CLI binaries
+        // to bound install footprint at ~80MB instead of ~200MB.
+        let keep = name == "llama-server"
+            || name.starts_with("lib")
+            || name == "LICENSE";
+        if !keep {
+            continue;
+        }
+        let dest_file = target_dir.join(&name);
+        // Move (rename) preserves symlinks since both src and dst are
+        // on the same filesystem.
+        if dest_file.exists() {
+            let _ = std::fs::remove_file(&dest_file);
+        }
+        std::fs::rename(&path, &dest_file)
+            .with_context(|| format!("move {} → {}", path.display(), dest_file.display()))?;
+    }
+    let _ = std::fs::remove_dir_all(&stage);
+    let _ = std::fs::remove_file(&tarball);
+
+    if !dest.exists() {
+        anyhow::bail!(
+            "llama-server binary not found in tarball at expected path"
+        );
+    }
+    // Ensure server is executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+    eprintln!("  llama-server installed at {}", dest.display());
+    Ok(())
+}
+
+/// Full uninstall: remove the server binary, shared libs, and both
+/// GGUF variants if present. Idempotent.
+pub fn uninstall_all() -> anyhow::Result<()> {
+    let bin_dir = crate::config::mind_home().join("bin").join("extractor");
+    let model_dir = extractor_dir();
+    if bin_dir.exists() {
+        std::fs::remove_dir_all(&bin_dir)?;
+        eprintln!("  removed {}", bin_dir.display());
+    }
+    if model_dir.exists() {
+        std::fs::remove_dir_all(&model_dir)?;
+        eprintln!("  removed {}", model_dir.display());
+    }
+    Ok(())
+}
+
+/// Status block for `mgimind extractor info`.
+pub fn info() -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "Extractor status:");
+    let _ = writeln!(
+        out,
+        "  llama-server: {}",
+        if is_llama_server_installed() {
+            llama_server_path().display().to_string()
+        } else {
+            "not installed".to_string()
+        }
+    );
+    for v in [ExtractorVariant::Lite, ExtractorVariant::Default] {
+        let _ = writeln!(
+            out,
+            "  {} variant   : {}",
+            v.as_str(),
+            if is_installed(v) {
+                gguf_path(v).display().to_string()
+            } else {
+                "not installed".to_string()
+            }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  server live : {}",
+        if is_server_running() { "yes" } else { "no" }
+    );
+    out
+}
+
 // ===== llama-server lifecycle =====
 
 use once_cell::sync::OnceCell;
