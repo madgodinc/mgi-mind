@@ -187,6 +187,14 @@ pub enum Commands {
         what: MigrateV14Cmd,
     },
 
+    /// v1.5 Phase 6: inspect and edit runtime config (currently:
+    /// install-mode profile that selects per-mode confidence-score
+    /// anchors per §6 of the validity-model synthesis).
+    Config {
+        #[command(subcommand)]
+        what: ConfigCmd,
+    },
+
     /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
     /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
     Bench {
@@ -338,6 +346,20 @@ pub enum MigrateV14Cmd {
         /// Write the counts back. Read-only without this flag.
         #[arg(long)]
         apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Print the current install-mode and the auto-detect recommendation.
+    /// The recommendation is informational only — it is never auto-applied.
+    InstallMode,
+    /// Set the install-mode profile. Accepts `chat-only`, `dev-with-ci`,
+    /// or `multi-tenant`. Restart `mgimind serve` for the change to take
+    /// effect across long-lived MCP sessions.
+    SetInstallMode {
+        /// New install-mode value.
+        mode: String,
     },
 }
 
@@ -542,6 +564,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         #[cfg(feature = "extractor")]
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
+        Commands::Config { what } => cmd_config(what).await,
         Commands::MigrateV14 { what } => match what {
             MigrateV14Cmd::Dependants { threshold, apply } => {
                 cmd_migrate_v14_dependants(threshold, apply).await
@@ -1233,6 +1256,28 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
             let _ = writeln!(
                 out,
                 "[INFO] {inherited} fact(s) flagged inherited-unverified (will clear on session end)"
+            );
+        }
+
+        // v1.5 Phase 6 step 6.4: surface the install-mode profile and
+        // the auto-detect recommendation. The line is informational —
+        // doctor never auto-applies the recommendation (§10 q6
+        // mis-classification cost is silent quality drift).
+        let detect_inputs = crate::install_detect::collect(&cfg).await;
+        let recommendation = crate::install_mode::recommend(detect_inputs);
+        if recommendation == cfg.install_mode {
+            let _ = writeln!(
+                out,
+                "[OK]   install-mode: {} (matches auto-detect)",
+                cfg.install_mode.as_str()
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "[INFO] install-mode: {} (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
+                cfg.install_mode.as_str(),
+                recommendation.as_str(),
+                recommendation.as_str()
             );
         }
     }
@@ -2049,6 +2094,63 @@ async fn cmd_stop() -> Result<()> {
 
     std::fs::remove_file(&pid_path)?;
     println!("Qdrant stopped.");
+    Ok(())
+}
+
+// ===== v1.5 Phase 6: config command handler =====
+
+async fn cmd_config(what: ConfigCmd) -> Result<()> {
+    match what {
+        ConfigCmd::InstallMode => cmd_config_install_mode_show().await,
+        ConfigCmd::SetInstallMode { mode } => cmd_config_install_mode_set(&mode).await,
+    }
+}
+
+async fn cmd_config_install_mode_show() -> Result<()> {
+    let config = crate::config::MindConfig::load().with_context(|| {
+        "config not initialised — run `mgimind init` first".to_string()
+    })?;
+    println!("install-mode: {}", config.install_mode.as_str());
+
+    let inputs = crate::install_detect::collect(&config).await;
+    let recommendation = crate::install_mode::recommend(inputs);
+    println!(
+        "auto-detect recommendation: {} (external_signals_7d={}, distinct_agents_30d={})",
+        recommendation.as_str(),
+        inputs.external_signal_count_last_7d,
+        inputs.distinct_session_agents_last_30d,
+    );
+    if recommendation != config.install_mode {
+        println!(
+            "\nthe configured mode differs from the recommendation; \
+             run `mgimind config set-install-mode {}` to apply.",
+            recommendation.as_str()
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_config_install_mode_set(mode_str: &str) -> Result<()> {
+    let new_mode = crate::install_mode::InstallMode::parse(mode_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown install-mode '{mode_str}' — expected one of: chat-only, dev-with-ci, multi-tenant"
+        )
+    })?;
+    let mut config = crate::config::MindConfig::load().with_context(|| {
+        "config not initialised — run `mgimind init` first".to_string()
+    })?;
+    let old = config.install_mode;
+    if old == new_mode {
+        println!("install-mode already {} — no change", new_mode.as_str());
+        return Ok(());
+    }
+    config.install_mode = new_mode;
+    config.save()?;
+    println!(
+        "install-mode: {} → {} (saved to config.json). Restart `mgimind serve` for long-lived MCP sessions to pick up the change.",
+        old.as_str(),
+        new_mode.as_str()
+    );
     Ok(())
 }
 
