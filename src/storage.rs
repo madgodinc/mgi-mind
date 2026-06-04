@@ -1902,6 +1902,10 @@ pub async fn set_memory_payload_field(
         )
         .await
         .context("Failed to set memory payload field")?;
+    // v1.5 Phase 8 step 8.1D: signal graph change to the background
+    // re-test loop. See knowledge::set_fact_payload_field for the
+    // mirror call on the facts collection.
+    crate::doubt::record_edit();
     Ok(())
 }
 
