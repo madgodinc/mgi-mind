@@ -416,6 +416,48 @@ Also added in v3:
   claims the position deliberately (privacy-first, post-hallucination,
   agent-debugging audiences) instead of leaving it ambient.
 
+**Round 4 → corrected in this revision:**
+
+5. **Prior-art search uncovered three papers that pre-date the
+   synthesis on the same axes.** STALE (arxiv 2605.06527, May
+   2026) benchmarks belief revision in LLM agent memory with two
+   formalised conflict types; SAVeR (arxiv 2604.08401) describes
+   the echo mechanism on sampled trajectories; the March 2026
+   survey (arxiv 2603.07670) lists the four mechanisms as future
+   work. The "first to think of this" framing in §11 and §11.5
+   was wrong; both sections were rewritten. The contribution is
+   now claimed as "first locally hosted, open-source memory layer
+   that implements the four mechanisms together and reports
+   numbers on STALE," not as a private discovery. (A fourth paper
+   the critic mentioned, DReaMAD / arxiv 2503.16814, turned out
+   on full read to be about multi-agent debate, not memory; it is
+   excluded from prior art with the apology that the v1 framing
+   would have miscited it.)
+
+6. **STALE's Type II propagated conflict broke the `conflict_
+   pending: bool` flag in the schema.** Type II is when an update
+   to one attribute cascades through logical dependency to make a
+   structurally distinct attribute suspect. A boolean cannot
+   express this. v3 of the synthesis assumed Type I-only
+   conflicts; that assumption was tightened in this revision to
+   require a small enum (`EntryStatus`) capable of distinguishing
+   `Contested` (Type I, direct) from `PropagationShadowed`
+   (Type II, indirect). The schema change landed in commit
+   `20b80fc` on the same PR branch.
+
+7. **Phase 4 bench changed from a custom QA harness to STALE.**
+   STALE is the field-recognised benchmark for exactly this
+   problem. Using it instead of inventing our own metric
+   simplifies Phase 4 and produces a result the field knows how
+   to read. Budget for the run revised upward: order of magnitude
+   tens to low hundreds of USD on a flash-tier judge, not the
+   $30-50 the v3 plan claimed.
+
+8. **Language coverage gap acknowledged.** STALE is English-only.
+   The Russian-language path mgi-mind handles will not be measured
+   by this benchmark. Reported as a known limitation rather than
+   papered over.
+
 ---
 
 ## 8. Worked example — Rust → Go
@@ -676,79 +718,103 @@ makes the question moot anyway.
 
 ---
 
-## 11.5. Positioning — "calibrated, not confident"
+## 11.5. Positioning — "described, then shipped"
 
-This section was forced by the critic round 2 and by the §5
-follow-through. It is here because positioning is downstream of the
-core design, not separate from it, and the design honestly produces a
-certain shape of confidence that has to be claimed deliberately.
+This section was forced through three critic rounds (calibration
+round 2; prior-art round 4). It claims the positioning explicitly
+because positioning is downstream of the core design and the design
+produces a specific shape of contribution that has to be named
+deliberately.
 
-The honest situation. In the multi-tenant case, mem0 / Zep / Letta
-can measure real source-independence and produce confidence numbers
-that, given the same data, are *higher* than ours. They are not
-wrong to do so — multi-source agreement legitimately *is* stronger
-evidence than single-source repetition. In the single-user case,
-they often quietly bank repetition as independence and produce
-unjustified confidence. We do not.
+The honest situation, after the prior-art search.
 
-We are therefore **strictly less confident on the same data in
-single-user mode, and arguably more confident in justified ways**
-(through dependants, through external signals, through the duel
-rule structure). The combined picture: calibrated belief weight
-rather than maximised belief weight.
+The four mechanisms in §3 are not novel. STALE (arxiv 2605.06527,
+May 2026) benchmarks exactly the failure modes the synthesis names
+and distinguishes the two conflict types (direct, propagated).
+SAVeR (arxiv 2604.08401) describes the echo mechanism on sampled
+trajectories. The March 2026 survey (arxiv 2603.07670) lists
+external validation, uncertainty quantification with decay,
+adversarial probing, and expiration policies as the field's open
+agenda. The mechanisms in this synthesis are that agenda, not a
+private discovery.
 
-This is a real differentiator. It is also a hard sell, and pretending
-otherwise would be the v1 overclaim coming back in a different
-costume. Two markets, two reactions:
+The empirical state of the published memory layers on STALE:
+mem0 = 8.3%, Zep = 6.0%, A-mem = 5.1%, LightMem = 17.8%. The best
+frontier LLM with no memory layer at all (Gemini-3.1-pro reading
+the raw transcript) reaches 55.2%. CUPMem, the architecture STALE's
+authors propose alongside the benchmark, reaches 68.0%. The
+*published memory products fail this benchmark catastrophically* —
+worse than throwing the dialogue at the model. That gap is not
+rhetorical. It is a number anyone can verify.
 
-- **The audience that gets it.** Privacy-first engineers; people who
-  have been burned by a hallucinating memory layer asserting something
-  it could not actually justify; teams building agents where a
-  silently-overconfident memory is a debugging nightmare. For this
-  audience, "we don't fake independence we don't have" is a feature
-  they will read, recognise, and cite. The market is real but narrow.
+The contribution this synthesis makes is therefore narrower than v1
+claimed and sharper than v3 claimed. It is not "I invented this."
+It is: **first locally hosted, open-source memory layer that
+implements the four mechanisms together, in a single Rust binary,
+and reports numbers on STALE**. The field described the mechanisms;
+the published memory products did not ship them; we are between the
+two and the gap is testable.
 
-- **The audience that doesn't.** Mass-market developers shopping
-  memory-as-a-service. They read "less confident" as "worse." For
-  them, a SaaS that says "94.8% LongMemEval QA" with no asterisks is
-  the right product. They are not wrong; they are not our customer.
+This reframes the audience and the channels.
 
-The implication for narrative discipline:
+- **The audience that reads STALE.** Researchers and engineers who
+  already know about the belief-revision problem in agent memory.
+  For them, the prior-art citation is the credential — it shows we
+  read the field. The contribution is the working implementation
+  and the STALE numbers. arXiv preprint, r/LocalLLaMA, lobste.rs,
+  HN with the STALE result as the headline.
 
-1. **Do not pitch on "more confident than mem0."** That fight is
-   lost on their terms in the multi-tenant case and is dishonest in
-   ours.
-2. **Pitch on "honestly calibrated under the conditions you
-   actually run in."** This phrase is precise, defensible, and
-   targets the right audience.
-3. **Educate before differentiating.** The differentiator only
-   exists if the reader already understands why calibrated confidence
-   beats inflated confidence in a memory layer. Lead with the
-   failure case (mem0 quietly believes a wrong fact a single user
-   repeated three times), make the reader feel it, *then* claim the
-   alternative. Without the failure case, "calibrated, not
-   confident" reads as a hedge.
+- **The audience that has been burned by hallucinating memory.**
+  Privacy-first engineers and teams building agents where silently
+  over-confident memory is a debugging nightmare. For them the
+  pitch is "the published memory products score in single digits on
+  this benchmark; we score [X]; here is why; here is the binary,
+  one curl." This audience cares about behaviour, not about who
+  invented entrenchment ordering.
 
-This positioning shapes which channels are worth time:
+- **The audience that does not get it.** Mass-market developers
+  shopping memory-as-a-service. They read "first to implement what
+  STALE measures" as jargon. They are not our customer; spend
+  acquisition effort elsewhere.
 
-- arXiv preprint, r/LocalLLaMA, lobste.rs, privacy-tooling
-  newsletters: yes, these audiences read calibration as a feature.
-- Show HN: only on a release whose headline number is *retrieval*
-  (where we are honest by construction), not QA — because on QA we
-  will under-perform mem0 on their own benchmark, and the headline
-  fight is the wrong one.
-- Mass-market dev channels and listicles: no, this audience is not
-  our buyer; spending acquisition effort here is the structural
-  mismatch between product and market the critic round 2 forced into
-  the open.
+Narrative discipline that follows from this:
 
-The synthesis design and the go-to-market are therefore one decision,
-not two. If we ship the design as specified and pitch it as
-"calibrated, not confident, here is why that matters," the product
-and the narrative are honest with each other. If we ship the design
-and try to claim higher numbers anyway, we are selling someone else's
-product with our internals — and the audience that gets it will
-notice the mismatch instantly.
+1. **Do not pitch on "I invented this."** STALE, SAVeR, and the
+   survey are one search away. Anyone qualified will find them and
+   the pitch will read as carelessness about prior art. Lead with
+   the prior-art citation, then the implementation gap.
+2. **Pitch on "first to ship and measure."** The shape is "the
+   field described the mechanisms; the published products score
+   8.3 / 6.0 / 5.1 on the benchmark that measures them; this is
+   the first local open-source implementation that puts the
+   mechanisms together and reports [X] on the same benchmark."
+   Defensible, falsifiable, and respects the work the field has
+   already done.
+3. **Educate by leading with the failure case.** Show the
+   Seattle→Portland example. Show a mem0 install confidently
+   believing the wrong city. Then claim the alternative. The
+   prior-art papers do this groundwork for us; we cite, we don't
+   re-derive.
+
+Channels worth time:
+
+- arXiv preprint with STALE result, citing the four prior-art
+  papers, framing the contribution as the implementation gap.
+- r/LocalLLaMA, lobste.rs, privacy-tooling newsletters: yes,
+  these audiences read this framing as a feature.
+- Show HN: only when the STALE number is in hand. The headline
+  fight is on STALE, not on QA accuracy of LongMemEval-S (where
+  mem0's published numbers come from a benchmark that, per
+  STALE's own analysis, does not measure belief revision).
+- Mass-market dev channels and listicles: no.
+
+The speed of the field matters more than v3 assumed. STALE was
+published in May 2026; the survey listing the agenda is March 2026.
+Whoever ships first on STALE owns the lane. Whoever ships in
+quarter 4 instead of quarter 3 may find that someone else already
+has, because the agenda is public. The contribution depreciates
+with time in a way the v3 framing did not acknowledge. Move
+accordingly.
 
 ---
 

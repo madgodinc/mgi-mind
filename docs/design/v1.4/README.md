@@ -8,6 +8,9 @@ to a multi-axis calibrated belief weight.
 - `synthesis.md` — what we build and why. 4 mechanisms: duel rule,
   doubt window, inheritance discount, bi-temporal axes.
 - `implementation-plan.md` — how, in what order, with gates. 5 phases.
+- `prior-art.md` — the field work this builds on (STALE, the
+  March 2026 survey, SAVeR) plus one paper that turned out not
+  to be prior art on closer reading.
 - `synthesis-history/` — earlier drafts and engineering notes.
 
 ## Status
