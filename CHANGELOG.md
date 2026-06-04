@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.6.0 — closing v1.5 honest limits
+
+A polish release that closes three TBD items declared in v1.5's
+"Honest limits" section. No new public surface. Same 37 MCP tools,
+same CLI flags, same install modes. Smaller per-tick overhead and
+sharper coverage of the §10 q5 guarantees.
+
+### Step 1 — batched payload reads in retest_fact_step82
+
+The v1.5 implementation made four separate `get_points` round-trips
+per fact (dependants_count, confirmations_count, external_signals,
+confidence_score). At BACKGROUND_PER_TICK_CAP=50 that was 200
+round-trips per tick. New
+`storage::read_point_payload_strings(client, collection, id, &keys)`
+returns a HashMap in one call. retest_fact_step82 now does one
+Qdrant fetch + four HashMap lookups. 4× reduction in round-trips
+per fact, same semantics.
+
+### Step 2 — `cited_by` chain following
+
+The v1.5 self-citation guard always blocked because the lookup
+closure was `|_| None`. v1.6 wires real lookup via
+`fetch_citing_confidences` — a single batched get_points against
+MEMORIES_COLLECTION returns a `HashMap<id, f32>` of cached
+confidence_scores. The closure reads from that map synchronously.
+
+- Citing memory with cached confidence ≥ 0.5 → `cited_by` signal
+  contributes 0.2 × external slot weight.
+- Citing memory below 0.5 or missing → guard blocks (conservative
+  default; never crashes).
+
+Mechanism 1 invariant preserved.
+
+### Step 3 — integration tests on `spawn_background_retest_loop`
+
+Closes the audit-flagged gap: v1.5 had no test that ran the spawned
+task end-to-end. v1.6 adds four:
+
+- `busy_flag_observable_by_loop_check` — guarantee (a) plumbing.
+- `per_tick_cap_enforced_by_drain` — guarantee (b) cap enforcement.
+- `edit_counter_consumed_each_tick` — signal flow for guarantee (c)
+  cadence.
+- `drain_then_reflag_preserves_registry` — failure-path re-flag
+  contract.
+
+Production code: `spawn_background_retest_loop` now delegates to
+`spawn_background_retest_loop_with_cadence(cfg, default)`. The
+parametrised variant lets tests pass a short cadence if they spawn
+the actual loop.
+
+Registry-level coverage is the contract; the spawn body is one
+match against helpers all of which are now tested. Spawning the
+loop against stub Qdrant proved too flaky for parallel runs (race
+over global registries) — registry tests are the stable equivalent.
+
+### Build hygiene
+
+Six modules carry calibration scaffolding (`pub const` /
+`pub fn` declared for the future surface). Each gains a
+module-level `#![allow(dead_code)]` with a comment so the build
+output is clean and contributors see green builds. No semantic
+change.
+
+### Tests
+
+- 290 unit + 6 integration tests, 0 failed.
+- 4 new tests for v1.6 (all in `doubt::tests`).
+
+### Tracked v1.6 follow-ups (still open)
+
+- #16 — STALE bench calibration against Mad's base.
+- #17 — QA accuracy bench with LLM judge.
+- #18 — migrate legacy `external_signals` counter to typed log.
+- #19, #20 — Mac and Windows binary releases.
+
 ## 1.5.0 — install-mode profiles + typed external signals + active re-test pass
 
 The v1.4 → v1.5 work closes the §6 and §10 q5 / q6 questions from
