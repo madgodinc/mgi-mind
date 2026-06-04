@@ -106,6 +106,9 @@ regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# v1.5 Phase 6 step 6.2: install-mode detect tests set explicit mtimes
+# to verify the recency-window filter without racing wall-clock.
+filetime = "0.2"
 
 # v1.4 Phase 5: PR_SET_PDEATHSIG via libc::prctl for llama-server
 # orphan prevention. Linux-only — covers SIGKILL/OOM paths where the
