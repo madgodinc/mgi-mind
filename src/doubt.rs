@@ -341,39 +341,39 @@ pub async fn retest_fact_step82(
 
     let client = crate::storage::get_client(config).await?;
 
-    // Read every payload field we need. Four separate fetches —
-    // could be optimised into one batched Qdrant call later, but
-    // for the v1.5 release each retest is bounded to
-    // BACKGROUND_PER_TICK_CAP per tick (50) so the overhead is
-    // negligible.
-    async fn read_field(
-        client: &qdrant_client::Qdrant,
-        fact_id: &str,
-        key: &str,
-    ) -> Option<String> {
-        crate::storage::existing_payload_string(
-            client,
-            crate::storage::FACTS_COLLECTION,
-            fact_id,
-            key,
-        )
-        .await
-    }
+    // v1.6 step 1: one batched Qdrant call returns every payload
+    // field the formulas need. Replaces the v1.5 implementation's
+    // four separate round-trips per fact — at BACKGROUND_PER_TICK_CAP
+    // = 50 that's a 4x reduction in network round-trips per tick.
+    const PAYLOAD_KEYS: &[&str] = &[
+        "dependants_count",
+        "confirmations_count",
+        "external_signals",
+        "confidence_score",
+    ];
+    let payload_map = crate::storage::read_point_payload_strings(
+        &client,
+        crate::storage::FACTS_COLLECTION,
+        fact_id,
+        PAYLOAD_KEYS,
+    )
+    .await
+    .unwrap_or_default();
 
-    let dependants = read_field(&client, fact_id, "dependants_count")
-        .await
+    let dependants = payload_map
+        .get("dependants_count")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
-    let confirmations = read_field(&client, fact_id, "confirmations_count")
-        .await
+    let confirmations = payload_map
+        .get("confirmations_count")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
-    let legacy_external_count = read_field(&client, fact_id, "external_signals")
-        .await
+    let legacy_external_count = payload_map
+        .get("external_signals")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
-    let cached_score = read_field(&client, fact_id, "confidence_score")
-        .await
+    let cached_score = payload_map
+        .get("confidence_score")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.5);
 
