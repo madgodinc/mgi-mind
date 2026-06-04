@@ -1219,6 +1219,7 @@ mod tests {
     /// emptied of those ids (not the rest if `max` < count).
     #[test]
     fn drain_returns_sorted_subset_and_clears_them() {
+        let _serial = SERIAL_LOOP_TEST.lock().unwrap_or_else(|e| e.into_inner());
         clear_all_doubt_window_flags();
         for id in ["c-fact", "a-fact", "b-fact", "d-fact"] {
             flag_for_doubt_window(id);
@@ -1233,6 +1234,7 @@ mod tests {
     /// catches a misuse where the cap is computed as zero.
     #[test]
     fn drain_zero_returns_empty_and_keeps_flags() {
+        let _serial = SERIAL_LOOP_TEST.lock().unwrap_or_else(|e| e.into_inner());
         clear_all_doubt_window_flags();
         flag_for_doubt_window("kept");
         let drained = drain_doubt_window_flags(0);
@@ -1244,6 +1246,7 @@ mod tests {
     /// `drain(huge)` returns every flag without panicking.
     #[test]
     fn drain_larger_than_count_returns_all() {
+        let _serial = SERIAL_LOOP_TEST.lock().unwrap_or_else(|e| e.into_inner());
         clear_all_doubt_window_flags();
         for i in 0..5 {
             flag_for_doubt_window(&format!("fact-{i}"));
@@ -1354,6 +1357,7 @@ mod tests {
     /// directly below in a unit-style test (no spawn needed).
     #[test]
     fn per_tick_cap_enforced_by_drain() {
+        let _serial = SERIAL_LOOP_TEST.lock().unwrap_or_else(|e| e.into_inner());
         clear_all_doubt_window_flags();
         for i in 0..100 {
             flag_for_doubt_window(&format!("cap-test-fact-{i}"));
