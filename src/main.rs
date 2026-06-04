@@ -40,8 +40,22 @@ use clap::Parser;
 use cli::Cli;
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Tokio runtime built with an explicit 4 MB worker stack.
+///
+/// v1.6.4 Windows fix (#23): Windows default thread stack is 1 MB; the v1.5
+/// background re-test loop's futures (MindConfig clone + payload HashMaps +
+/// Vec<String> candidates) blow past it. Linux default is 8 MB so this is
+/// only observable on Windows. 4 MB is the smallest power-of-two that
+/// reliably fits the loop body's live state with a safety margin.
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(4 * 1024 * 1024)
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Logs go to stderr: in `mgimind mcp` mode stdout is the JSON-RPC channel
     // and must stay clean. stderr is also fine for every other subcommand.
     tracing_subscriber::fmt()
