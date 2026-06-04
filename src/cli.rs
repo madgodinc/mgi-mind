@@ -200,6 +200,13 @@ pub enum Commands {
         what: ConfigCmd,
     },
 
+    /// v1.6.2: inspect the knowledge-graph facts collection. Stats
+    /// tells you how many; this lets you see what.
+    Facts {
+        #[command(subcommand)]
+        what: FactsAction,
+    },
+
     /// v1.5 Phase 7: record a typed external-signal outcome on any
     /// memory. Closes the CLI gap — `mind_outcome` was MCP-only
     /// before. Useful for debugging guardrail / confidence_score
@@ -435,6 +442,31 @@ pub enum ExtractorCmd {
 }
 
 #[derive(Subcommand)]
+pub enum FactsAction {
+    /// List facts in the knowledge graph. Optional `--predicate`
+    /// filters to one axis; default sort is by dependants_count
+    /// descending so load-bearing facts surface first.
+    List {
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Only show facts whose predicate matches this value.
+        #[arg(long, value_name = "P")]
+        predicate: Option<String>,
+        /// Sort: `dependants` (default) or `created`.
+        #[arg(long, default_value = "dependants")]
+        sort: String,
+        /// Print fact ids alongside subject/predicate/object. Off
+        /// by default because UUIDs are wide; turn on when you
+        /// plan to feed an id into `mgimind facts show`.
+        #[arg(long, default_value_t = false)]
+        with_id: bool,
+    },
+    /// Show one fact by id, including payload (dependants_count,
+    /// confidence_score, doubt counter, …).
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
 pub enum AuditAction {
     /// Show the N most recent audit events (default 20). Optional
     /// filters trim the list before display.
@@ -624,6 +656,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             success,
             source,
         } => cmd_outcome(&memory_id, &signal_type, success, &source).await,
+        Commands::Facts { what } => match what {
+            FactsAction::List {
+                limit,
+                predicate,
+                sort,
+                with_id,
+            } => cmd_facts_list(limit, predicate.as_deref(), &sort, with_id).await,
+            FactsAction::Show { id } => cmd_facts_show(&id).await,
+        },
         Commands::MigrateV14 { what } => match what {
             MigrateV14Cmd::Dependants { threshold, apply } => {
                 cmd_migrate_v14_dependants(threshold, apply).await
@@ -2434,6 +2475,136 @@ async fn cmd_outcome(
     let summary = crate::outcome::record(&cfg, memory_id, signal).await?;
     println!("{summary}");
     Ok(())
+}
+
+// ===== v1.6.2: facts inspection command handlers =====
+
+async fn cmd_facts_list(
+    limit: usize,
+    predicate: Option<&str>,
+    sort: &str,
+    with_id: bool,
+) -> Result<()> {
+    let cfg = crate::config::load_cached()?;
+    // Pull every fact (capped). list_top_dependants_facts gives ids
+    // + counts; we need subject/predicate/object too, so we use the
+    // broader list_all_facts and join with dependants_count from a
+    // batched payload read.
+    let mut facts = crate::knowledge::list_all_facts(&cfg).await?;
+    if let Some(p) = predicate {
+        facts.retain(|f| f.predicate == p);
+    }
+    let total = facts.len();
+
+    // Decorate with dependants_count for the sort + display.
+    // O(facts) reads — fine at <100k; cap to prevent runaway over
+    // a huge base.
+    let read_cap = facts.len().min(10_000);
+    let mut decorated: Vec<(crate::knowledge::Fact, u32)> = Vec::with_capacity(read_cap);
+    let client = crate::storage::get_client(&cfg).await?;
+    for f in facts.into_iter().take(read_cap) {
+        let dep = crate::storage::existing_payload_string(
+            &client,
+            crate::storage::FACTS_COLLECTION,
+            &f.id,
+            "dependants_count",
+        )
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+        decorated.push((f, dep));
+    }
+
+    match sort {
+        "dependants" => {
+            decorated.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
+        }
+        "created" => {
+            decorated.sort_by(|a, b| {
+                b.0.created_at
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.0.created_at.as_deref().unwrap_or(""))
+            });
+        }
+        other => anyhow::bail!("unknown sort '{other}' — expected: dependants, created"),
+    }
+
+    decorated.truncate(limit);
+
+    if decorated.is_empty() {
+        println!("No facts matching filters.");
+        return Ok(());
+    }
+
+    if with_id {
+        println!(
+            "{:>3} {:>4} {:<36} {:<28} {:<22} {:<30}",
+            "#", "dep", "id", "subject", "predicate", "object"
+        );
+    } else {
+        println!(
+            "{:>3} {:>4} {:<35} {:<25} {:<35}",
+            "#", "dep", "subject", "predicate", "object"
+        );
+    }
+    for (i, (f, dep)) in decorated.iter().enumerate() {
+        let s = truncate_for_table(&f.subject, if with_id { 28 } else { 35 });
+        let p = truncate_for_table(&f.predicate, if with_id { 22 } else { 25 });
+        let o = truncate_for_table(&f.object, if with_id { 30 } else { 35 });
+        if with_id {
+            println!("{:>3} {:>4} {:<36} {:<28} {:<22} {:<30}", i + 1, dep, &f.id, s, p, o);
+        } else {
+            println!("{:>3} {:>4} {:<35} {:<25} {:<35}", i + 1, dep, s, p, o);
+        }
+    }
+    println!("\nShowing {} of {} facts.", decorated.len(), total);
+    Ok(())
+}
+
+async fn cmd_facts_show(id: &str) -> Result<()> {
+    let cfg = crate::config::load_cached()?;
+    let client = crate::storage::get_client(&cfg).await?;
+
+    // Pull the full payload via the existing batched helper.
+    const PAYLOAD_KEYS: &[&str] = &[
+        "subject",
+        "predicate",
+        "object",
+        "valid",
+        "created_at",
+        "dependants_count",
+        "confirmations_count",
+        "external_signals",
+        "confidence_score",
+        "doubt_drift_count",
+        "status",
+    ];
+    let payload = crate::storage::read_point_payload_strings(
+        &client,
+        crate::storage::FACTS_COLLECTION,
+        id,
+        PAYLOAD_KEYS,
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("fact id '{id}' not found"))?;
+
+    println!("Fact: {id}");
+    for &key in PAYLOAD_KEYS {
+        if let Some(value) = payload.get(key) {
+            println!("  {key:<22} = {value}");
+        }
+    }
+    Ok(())
+}
+
+fn truncate_for_table(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(max - 1).collect();
+    t.push('…');
+    t
 }
 
 // ===== v1.4 Phase 5: extractor command handler =====
