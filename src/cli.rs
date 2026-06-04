@@ -147,8 +147,13 @@ pub enum Commands {
         apply: bool,
     },
 
-    /// Show memory statistics
-    Stats,
+    /// Show memory statistics. Default output is human-readable;
+    /// pass --json for machine-parseable output (useful for
+    /// monitoring scripts that poll fact counts post-extraction).
+    Stats {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 
     /// Start bundled Qdrant server
     Serve,
@@ -602,7 +607,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             library,
             apply,
         } => cmd_import(&source, &path, &library, apply).await,
-        Commands::Stats => cmd_stats().await,
+        Commands::Stats { json } => cmd_stats(json).await,
         Commands::Backup { output } => cmd_backup(&output).await,
         Commands::Restore { input } => cmd_restore(&input).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
@@ -1959,10 +1964,76 @@ fn percentiles_u32(values: &[u32]) -> DistU32 {
     }
 }
 
-async fn cmd_stats() -> Result<()> {
+async fn cmd_stats(json: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
-    println!("{}", build_stats(&config).await?);
+    if json {
+        let stats = build_stats_json(&config).await?;
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        println!("{}", build_stats(&config).await?);
+    }
     Ok(())
+}
+
+async fn build_stats_json(
+    config: &crate::config::MindConfig,
+) -> Result<serde_json::Value> {
+    let (libraries, facts_count) = crate::storage::stats(config).await?;
+    let total_memories: u64 = libraries.iter().map(|(_, c)| c).sum();
+
+    // Library breakdown
+    let libs_json: serde_json::Map<String, serde_json::Value> = libraries
+        .iter()
+        .map(|(name, count)| (name.clone(), serde_json::Value::from(*count)))
+        .collect();
+
+    // Dependants distribution — same data the human view emits.
+    let dependants_json = if facts_count > 0 {
+        match crate::knowledge::list_top_dependants_facts(config, facts_count as usize).await
+        {
+            Ok(pairs) if !pairs.is_empty() => {
+                let dep_counts: Vec<u32> = pairs.iter().map(|(_, c)| *c).collect();
+                let s = percentiles_u32(&dep_counts);
+                let with_deps = dep_counts.iter().filter(|&&n| n > 0).count();
+                serde_json::json!({
+                    "min": s.min,
+                    "p50": s.p50,
+                    "p90": s.p90,
+                    "p99": s.p99,
+                    "max": s.max,
+                    "mean": s.mean,
+                    "with_deps_count": with_deps,
+                    "with_deps_pct": 100.0 * with_deps as f64 / pairs.len() as f64,
+                })
+            }
+            _ => serde_json::Value::Null,
+        }
+    } else {
+        serde_json::Value::Null
+    };
+
+    let session_count = std::fs::read_dir(crate::config::sessions_dir())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+                .count()
+        })
+        .unwrap_or(0);
+
+    let zombies =
+        crate::session::list_zombies(crate::session::DEFAULT_IDLE_THRESHOLD_MINUTES);
+
+    Ok(serde_json::json!({
+        "libraries": libs_json,
+        "total_memories": total_memories,
+        "kg_facts": facts_count,
+        "dependants_distribution": dependants_json,
+        "in_doubt_count": crate::doubt::doubt_window_flag_count(),
+        "inherited_count": crate::doubt::inherited_count(),
+        "sessions": session_count,
+        "zombies": zombies.len(),
+        "vault": crate::vault::summary(),
+    }))
 }
 
 // --- Vault commands ---
