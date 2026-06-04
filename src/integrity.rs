@@ -69,11 +69,15 @@ pub const RERANK_BGE_BASE_TOKENIZER: &str =
 
 /// Qwen 2.5 1.5B Instruct Q4_K_M GGUF — the Lite variant of the
 /// auto-extractor. ~990 MB on disk, ~1.5 GB RAM loaded.
-pub const EXTRACTOR_QWEN_1_5B_Q4_K_M: &str = "PIN_ME";
+/// Pinned 2026-06-04 from Qwen/Qwen2.5-1.5B-Instruct-GGUF official release.
+pub const EXTRACTOR_QWEN_1_5B_Q4_K_M: &str =
+    "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e";
 
 /// Qwen 2.5 3B Instruct Q4_K_M GGUF — the Default variant of the
 /// auto-extractor. ~1.93 GB on disk, ~2.5 GB RAM loaded.
-pub const EXTRACTOR_QWEN_3B_Q4_K_M: &str = "PIN_ME";
+/// Pinned 2026-06-04 from Qwen/Qwen2.5-3B-Instruct-GGUF official release.
+pub const EXTRACTOR_QWEN_3B_Q4_K_M: &str =
+    "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d";
 
 /// Treat the placeholder/empty as "no pin available".
 pub fn pin(hash: &str) -> Option<&str> {
