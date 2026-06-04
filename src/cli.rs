@@ -431,10 +431,20 @@ pub enum ExtractorCmd {
 
 #[derive(Subcommand)]
 pub enum AuditAction {
-    /// Show the N most recent audit events (default 20).
+    /// Show the N most recent audit events (default 20). Optional
+    /// filters trim the list before display.
     List {
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Only events whose `op` matches the given variant
+        /// (snake_case). Examples: `retest_promote`,
+        /// `retest_recover`, `fact_add`. See AuditOp in source.
+        #[arg(long, value_name = "OP")]
+        op: Option<String>,
+        /// Only events newer than this many hours ago. 24 = last
+        /// day, 168 = last week. Omit for "all time".
+        #[arg(long, value_name = "HOURS")]
+        since_hours: Option<i64>,
     },
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
@@ -649,7 +659,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Commands::Audit { action } => match action {
-            AuditAction::List { limit } => cmd_audit_list(limit).await,
+            AuditAction::List {
+                limit,
+                op,
+                since_hours,
+            } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
         },
         Commands::Viewer { no_open } => {
@@ -770,10 +784,43 @@ async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Re
     Ok(())
 }
 
-async fn cmd_audit_list(limit: usize) -> Result<()> {
-    let events = crate::audit::recent(limit)?;
+async fn cmd_audit_list(
+    limit: usize,
+    op_filter: Option<&str>,
+    since_hours: Option<i64>,
+) -> Result<()> {
+    // When filters are present we have to load all, filter, then
+    // truncate — `recent(limit)` would skip relevant events outside
+    // the first N. For "no filters" path we keep the fast `recent`
+    // call so a typical `mgimind audit list` stays cheap.
+    let events = if op_filter.is_some() || since_hours.is_some() {
+        let cutoff = since_hours.map(|h| chrono::Utc::now() - chrono::Duration::hours(h));
+        let all = crate::audit::load_all()?;
+        let filtered: Vec<crate::audit::AuditEvent> = all
+            .into_iter()
+            .filter(|ev| match op_filter {
+                None => true,
+                Some(want) => serde_json::to_string(&ev.op)
+                    .map(|s| s.trim_matches('"') == want)
+                    .unwrap_or(false),
+            })
+            .filter(|ev| match cutoff {
+                None => true,
+                Some(c) => chrono::DateTime::parse_from_rfc3339(&ev.ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                    .unwrap_or(false),
+            })
+            .collect();
+        // Take the most recent `limit` from the tail (load_all is
+        // append-order so the tail is newest).
+        let take_from = filtered.len().saturating_sub(limit);
+        filtered[take_from..].to_vec()
+    } else {
+        crate::audit::recent(limit)?
+    };
+
     if events.is_empty() {
-        println!("No audit events yet.");
+        println!("No audit events matching filters.");
         return Ok(());
     }
     for ev in &events {
