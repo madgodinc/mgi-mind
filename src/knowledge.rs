@@ -307,6 +307,11 @@ pub async fn add_fact(
             from_live_session: true,
             diverse_confirmations: 1,
             external_signals: 0,
+            // A brand-new fact has no typed signals yet — the v1.5
+            // Phase 7 score path activates only when mind_outcome
+            // calls land against an existing memory_id (in the duel
+            // path for an existing F_old, see Step 7.2 sketch).
+            external_signal_score: None,
         };
         let (outcome, loser) = crate::duel::resolve_against_existing(
             config,
