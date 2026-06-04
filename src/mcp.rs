@@ -501,7 +501,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'memory_id'"))?;
             let signal_type_str = arg_str(args, "signal_type")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'signal_type'"))?;
-            let signal_type = crate::outcome::OutcomeSignal::parse(&signal_type_str)
+            let signal_type = crate::outcome::OutcomeSignal::parse(signal_type_str)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "unknown signal_type '{signal_type_str}' — expected one of: \
@@ -519,7 +519,7 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 source,
                 ts: chrono::Utc::now().to_rfc3339(),
             };
-            crate::outcome::record(&cfg, &memory_id, signal).await
+            crate::outcome::record(cfg, memory_id, signal).await
         }
 
         // ---- Terminal-only 3 (vault; never touch secrets over MCP) ----

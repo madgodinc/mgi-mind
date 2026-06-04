@@ -220,7 +220,7 @@ pub fn publish_decision(report: &StaleReport) -> PublishDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishDecision {
     /// >= 50% Overall: in CUPMem (68%) range. Likely artifacted by
-    /// the harness; verify before publishing.
+    /// > the harness; verify before publishing.
     PublishLikelyCUPMemRange,
     /// 30-50% Overall: clean v1.4 release headline. Beats LightMem
     /// (17.8%), materially beats mem0 (8.3%) and Zep (6.0%).

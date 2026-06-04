@@ -517,11 +517,10 @@ async fn fetch_citing_confidences(
         let Some(pid) = point.id.as_ref().map(crate::storage::format_point_id) else {
             continue;
         };
-        if let Some(raw) = crate::storage::extract_string_pub(&point.payload, "confidence_score") {
-            if let Ok(score) = raw.parse::<f32>() {
+        if let Some(raw) = crate::storage::extract_string_pub(&point.payload, "confidence_score")
+            && let Ok(score) = raw.parse::<f32>() {
                 out.insert(pid, score);
             }
-        }
     }
     out
 }

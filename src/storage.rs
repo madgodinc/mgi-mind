@@ -1897,11 +1897,10 @@ pub async fn list_procedure_last_used(config: &MindConfig) -> Result<Vec<String>
         }
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            if let Some(ts) = extract_string(&point.payload, "last_used") {
-                if !ts.is_empty() {
+            if let Some(ts) = extract_string(&point.payload, "last_used")
+                && !ts.is_empty() {
                     out.push(ts);
                 }
-            }
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),

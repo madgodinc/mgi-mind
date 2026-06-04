@@ -51,6 +51,7 @@ pub const EXTERNAL_SCORE_NORM_SCALE: f32 = 5.0;
 /// plus the typed external-signal score from Phase 7 and the
 /// inherited flag from Phase 3.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub struct ConfidenceInputs {
     /// `dependants_count` payload field, written by Phase 1.1 walk.
     pub dependants: u32,
@@ -70,17 +71,6 @@ pub struct ConfidenceInputs {
     pub inherited_unverified: bool,
 }
 
-impl Default for ConfidenceInputs {
-    fn default() -> Self {
-        Self {
-            dependants: 0,
-            confirmations: 0,
-            external_signal_score: None,
-            legacy_external_count: 0,
-            inherited_unverified: false,
-        }
-    }
-}
 
 /// v1.5 Phase 8 step 8.2: pure confidence_score formula.
 ///

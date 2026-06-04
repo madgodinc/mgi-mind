@@ -751,10 +751,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             limit,
             output,
         } => {
-            let mut overrides = crate::bench_stale::CalibrationOverrides::default();
-            overrides.duel_flip_ratio = duel_flip_ratio;
-            overrides.duel_contested_ratio = duel_contested_ratio;
-            overrides.doubt_drift_threshold = doubt_drift_threshold;
+            let overrides = crate::bench_stale::CalibrationOverrides {
+                duel_flip_ratio,
+                duel_contested_ratio,
+                doubt_drift_threshold,
+                ..Default::default()
+            };
             let report = crate::bench_stale::run(
                 std::path::PathBuf::from(&dataset),
                 &judge,
