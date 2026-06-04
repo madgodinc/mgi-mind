@@ -89,7 +89,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Native HTTP + archive extraction (replaces curl/tar/unzip shellouts) — audit #19
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
