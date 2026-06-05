@@ -1412,16 +1412,26 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
             Cardinality::TemporalSingle => "supersede",
             Cardinality::Multi => unreachable!("Multi already filtered out above"),
         };
-        println!("    keep      {} (created {})", winner.object, winner.created_at.as_deref().unwrap_or("?"));
+        println!(
+            "    keep      {} (created {})",
+            winner.object,
+            winner.created_at.as_deref().unwrap_or("?")
+        );
         for l in losers {
-            println!("    {verb:9} {} (created {})", l.object, l.created_at.as_deref().unwrap_or("?"));
+            println!(
+                "    {verb:9} {} (created {})",
+                l.object,
+                l.created_at.as_deref().unwrap_or("?")
+            );
         }
 
         if apply {
             for l in losers {
                 match card {
                     Cardinality::Single => crate::duel::dampen_loser(&config, &l.id).await?,
-                    Cardinality::TemporalSingle => crate::duel::mark_superseded(&config, &l.id).await?,
+                    Cardinality::TemporalSingle => {
+                        crate::duel::mark_superseded(&config, &l.id).await?
+                    }
                     Cardinality::Multi => unreachable!(),
                 }
             }
@@ -1431,7 +1441,11 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
     println!(
         "\nSummary: {} cluster(s) processed, {total_kept} winner(s) kept, {total_dampened} loser(s) {}.",
         work.len(),
-        if apply { "dampened" } else { "would be dampened (dry-run)" }
+        if apply {
+            "dampened"
+        } else {
+            "would be dampened (dry-run)"
+        }
     );
     if !apply {
         println!("Re-run with --apply to write the dampenings.");

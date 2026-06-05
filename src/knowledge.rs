@@ -105,6 +105,7 @@ pub enum EntryStatus {
     /// 2. Should remain queryable by `mind_history` / "what was X on date Y".
     /// 3. Is NOT the result of a duel against contradiction — it's the
     ///    natural end-of-life for a temporal entry whose successor arrived.
+    ///
     /// Hidden from default search like `Stale`, but the difference matters
     /// for audit trails and future explanation tools.
     Superseded,
