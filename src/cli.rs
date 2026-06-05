@@ -1854,7 +1854,11 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
                 let pred = crate::storage::extract_string_pub(p, "predicate").unwrap_or_default();
                 let obj = crate::storage::extract_string_pub(p, "object").unwrap_or_default();
                 let valid = crate::storage::extract_string_pub(p, "valid").unwrap_or_default();
-                if valid == "true" {
+                let status = crate::storage::extract_string_pub(p, "status").unwrap_or_default();
+                // Bug fix (issue #25, PR #26): exclude dampened losers from
+                // the doctor summary so the user sees the post-duel canonical
+                // state, not entombed tombstones.
+                if valid == "true" && status != "stale" {
                     let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}");
                 }
             }

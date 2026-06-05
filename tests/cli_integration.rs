@@ -570,3 +570,128 @@ fn provenance_same_snippet_two_urls_inserts_twice() {
         "both citations must be in the search output: {chain}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Duel rule happy-path test (issue #25, PR #26).
+//
+// Walks the full read-after-write loop: register cardinality, add first fact,
+// add conflicting fact, query. Before PR #26 both facts stayed visible because
+// query_facts only filtered on `valid=true`, not on `status != stale`. This
+// test pins the post-fix behaviour so the bug cannot return silently.
+//
+// Does NOT need the embedding model — facts are vectorless, queried by exact
+// payload match. Gated only on the Qdrant port.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duel_rule_dampens_loser_on_single_cardinality() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+
+    // ORT is needed only for tools that actually embed; the duel path is
+    // vectorless. We still need *some* value because the MCP server reads
+    // the env var unconditionally on Linux.
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    // Unique names so concurrent runs don't collide on (subject, predicate).
+    let pid = std::process::id();
+    let predicate = format!("duel_test_pred_{pid}");
+    let subject = format!("duel_test_subj_{pid}");
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_predicate","arguments":{
+                "action":"register","predicate":predicate,"cardinality":"Single"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"old_winner"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"new_value_should_flip"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject}}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+
+    let results = parse_mcp_results(&stdout);
+    let query = results
+        .get(&5)
+        .cloned()
+        .unwrap_or_else(|| (true, String::new()));
+    let chain = format!("query: {query:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!query.0, "query must succeed: {chain}");
+    assert!(
+        query.1.contains("new_value_should_flip"),
+        "new winner must be visible in query: {chain}"
+    );
+    // The post-#26 behaviour: dampened loser is hidden from the read path.
+    assert!(
+        !query.1.contains("old_winner"),
+        "dampened loser must NOT appear in query (issue #25 regression): {chain}"
+    );
+}
+
+#[test]
+fn multi_cardinality_allows_coexistence() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    let pid = std::process::id();
+    let predicate = format!("multi_test_pred_{pid}");
+    let subject = format!("multi_test_subj_{pid}");
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_predicate","arguments":{
+                "action":"register","predicate":predicate,"cardinality":"Multi"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"first"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"second"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject}}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+
+    let results = parse_mcp_results(&stdout);
+    let query = results
+        .get(&5)
+        .cloned()
+        .unwrap_or_else(|| (true, String::new()));
+    let chain = format!("query: {query:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!query.0, "query must succeed: {chain}");
+    // Multi predicates: both facts must coexist (no duel).
+    assert!(
+        query.1.contains("first") && query.1.contains("second"),
+        "Multi cardinality must allow both facts to coexist: {chain}"
+    );
+}

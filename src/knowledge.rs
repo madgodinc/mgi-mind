@@ -591,8 +591,11 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
         return Ok(Vec::new());
     }
 
+    // Bug fix (issue #25, PR #26): exclude stale (dampened) losers so listings
+    // reflect the post-duel canonical state, not the pre-dampen full archive.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![Condition::matches("status", "stale".to_string())],
         ..Default::default()
     };
 
@@ -668,8 +671,11 @@ pub async fn list_top_dependants_facts(
         return Ok(Vec::new());
     }
 
+    // Bug fix (issue #25, PR #26): exclude stale (dampened) losers — dependants-
+    // ranking should reflect post-duel canonical facts, not entombed losers.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![Condition::matches("status", "stale".to_string())],
         ..Default::default()
     };
 
