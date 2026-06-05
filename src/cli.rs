@@ -1335,14 +1335,14 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
             .push(f);
     }
 
-    // Keep only conflict-bearing clusters: registered Single AND size > 1.
+    // Keep only conflict-bearing clusters: registered Single/TemporalSingle
+    // AND size > 1. Multi predicates never duel — coexistence is the contract.
     //
-    // Why we skip TemporalSingle here: the duel rule semantically treats a
-    // chain (lives_in: Prague→Dublin, has_version: v0.1→…→v1.6) as history
-    // that should remain auditable. Until a dedicated `superseded` status
-    // exists (separate from `stale`), `dampen_loser` would entomb the chain
-    // and break "what was the version on 2026-06-02?". The walk only touches
-    // Single clusters, where exactly one canonical fact is the contract.
+    // For Single: the loser is dampened (status=stale) — it lost a duel.
+    // For TemporalSingle: older entries are marked superseded (status=superseded)
+    // — they were canonical at their time but are no longer current. The two
+    // statuses differ in how mind_history / explanation tools surface them
+    // (see EntryStatus docs and the §6 model invariants).
     let mut work: Vec<((String, String), Vec<crate::knowledge::Fact>, Cardinality)> = clusters
         .into_iter()
         .filter_map(|((s, p), group)| {
@@ -1350,7 +1350,7 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
                 return None;
             }
             let card = *card_map.get(&p)?;
-            if !matches!(card, Cardinality::Single) {
+            if !card.admits_conflict() {
                 return None;
             }
             Some(((s, p), group, card))
@@ -1407,14 +1407,23 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
             "\n  [{card:?}] {subject:?} -> {predicate:?} ({} active)",
             group.len()
         );
-        println!("    keep   {} (created {})", winner.object, winner.created_at.as_deref().unwrap_or("?"));
+        let verb = match card {
+            Cardinality::Single => "dampen",
+            Cardinality::TemporalSingle => "supersede",
+            Cardinality::Multi => unreachable!("Multi already filtered out above"),
+        };
+        println!("    keep      {} (created {})", winner.object, winner.created_at.as_deref().unwrap_or("?"));
         for l in losers {
-            println!("    dampen {} (created {})", l.object, l.created_at.as_deref().unwrap_or("?"));
+            println!("    {verb:9} {} (created {})", l.object, l.created_at.as_deref().unwrap_or("?"));
         }
 
         if apply {
             for l in losers {
-                crate::duel::dampen_loser(&config, &l.id).await?;
+                match card {
+                    Cardinality::Single => crate::duel::dampen_loser(&config, &l.id).await?,
+                    Cardinality::TemporalSingle => crate::duel::mark_superseded(&config, &l.id).await?,
+                    Cardinality::Multi => unreachable!(),
+                }
             }
         }
     }
@@ -2002,10 +2011,10 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
                 let obj = crate::storage::extract_string_pub(p, "object").unwrap_or_default();
                 let valid = crate::storage::extract_string_pub(p, "valid").unwrap_or_default();
                 let status = crate::storage::extract_string_pub(p, "status").unwrap_or_default();
-                // Bug fix (issue #25, PR #26): exclude dampened losers from
-                // the doctor summary so the user sees the post-duel canonical
-                // state, not entombed tombstones.
-                if valid == "true" && status != "stale" {
+                // Bug fix (issue #25, PR #26): exclude dampened losers and
+                // superseded history from the doctor summary so the user
+                // sees the post-duel canonical state, not entombed tombstones.
+                if valid == "true" && status != "stale" && status != "superseded" {
                     let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}");
                 }
             }

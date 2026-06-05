@@ -410,6 +410,25 @@ pub async fn dampen_loser(config: &MindConfig, fact_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// v1.7 (#111 follow-up): mark a TemporalSingle chain entry as superseded.
+/// Like `dampen_loser` it sets `valid_until` and hides the fact from default
+/// queries, but uses a distinct status so audit / history tools can tell
+/// "natural end-of-life in a chain" from "lost a contradiction duel". The
+/// distinction matters for explanation tools (mind_history) and for
+/// users reasoning about why a fact disappeared from search.
+pub async fn mark_superseded(config: &MindConfig, fact_id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::knowledge::set_fact_payload_field(
+        config,
+        fact_id,
+        "status",
+        EntryStatus::Superseded.as_str().to_string(),
+    )
+    .await?;
+    crate::knowledge::set_fact_payload_field(config, fact_id, "valid_until", now).await?;
+    Ok(())
+}
+
 // ===== Tests for the pure helpers =====
 //
 // These tests fix the *shape* of the formulas and the *behavioural
