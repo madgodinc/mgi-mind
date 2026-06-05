@@ -99,6 +99,16 @@ pub enum EntryStatus {
     /// fact" from "live contested both visible" — collapsing them was
     /// the architectural hole the critic flagged.
     QuarantineCandidate,
+    /// v1.7 (#111 follow-up): a previous fact in a TemporalSingle chain.
+    /// Distinct from `Stale` in three ways:
+    /// 1. Was once correct (it was the canonical answer at its valid time).
+    /// 2. Should remain queryable by `mind_history` / "what was X on date Y".
+    /// 3. Is NOT the result of a duel against contradiction — it's the
+    ///    natural end-of-life for a temporal entry whose successor arrived.
+    ///
+    /// Hidden from default search like `Stale`, but the difference matters
+    /// for audit trails and future explanation tools.
+    Superseded,
 }
 
 impl EntryStatus {
@@ -112,6 +122,7 @@ impl EntryStatus {
             EntryStatus::PropagationShadowed => "propagation_shadowed",
             EntryStatus::Unknown => "unknown",
             EntryStatus::QuarantineCandidate => "quarantine_candidate",
+            EntryStatus::Superseded => "superseded",
         }
     }
 
@@ -128,6 +139,7 @@ impl EntryStatus {
             "quarantine_candidate" | "quarantine-candidate" | "candidate" => {
                 Some(EntryStatus::QuarantineCandidate)
             }
+            "superseded" => Some(EntryStatus::Superseded),
             _ => None,
         }
     }
@@ -166,7 +178,7 @@ pub fn detect_conflict(existing: &[Fact], new_object: &str, cardinality: Cardina
     existing.iter().any(|f| f.valid && f.object != new_object)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
     pub subject: String,
@@ -365,9 +377,19 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         return Ok(Vec::new());
     }
 
-    // valid = true AND (subject ~ q OR predicate ~ q OR object ~ q).
+    // valid = true AND status NOT IN {stale, superseded} AND (subject ~ q OR …).
+    //
+    // Bug fix (issue #25, 2026-06-05): without the status exclusion,
+    // dampened losers (status="stale", set by dampen_loser) and historical
+    // chain entries (status="superseded", set by the TemporalSingle walk)
+    // would leak into queries. Filtering on `valid` alone misses both
+    // because dampen_loser / mark_superseded only touch `status`.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![
+            Condition::matches("status", "stale".to_string()),
+            Condition::matches("status", "superseded".to_string()),
+        ],
         should: vec![
             Condition::matches_text("subject", query),
             Condition::matches_text("predicate", query),
@@ -584,8 +606,14 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
         return Ok(Vec::new());
     }
 
+    // Bug fix (issue #25, PR #26): exclude stale (dampened) and superseded
+    // (history) losers so listings reflect the post-duel canonical state.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![
+            Condition::matches("status", "stale".to_string()),
+            Condition::matches("status", "superseded".to_string()),
+        ],
         ..Default::default()
     };
 
@@ -661,8 +689,11 @@ pub async fn list_top_dependants_facts(
         return Ok(Vec::new());
     }
 
+    // Bug fix (issue #25, PR #26): exclude stale (dampened) losers — dependants-
+    // ranking should reflect post-duel canonical facts, not entombed losers.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
+        must_not: vec![Condition::matches("status", "stale".to_string())],
         ..Default::default()
     };
 
@@ -759,6 +790,15 @@ pub async fn find_facts_by_subject_predicate(
             Condition::matches("valid", "true".to_string()),
             Condition::matches("subject", subject.to_string()),
             Condition::matches("predicate", predicate.to_string()),
+        ],
+        // Bug fix (issue #25, 2026-06-05): exclude already-stale and
+        // superseded facts from the "existing" set fed to the duel rule.
+        // Otherwise an entombed loser or history entry would still be
+        // considered live by find_*, causing the new fact to duel against
+        // a tombstone.
+        must_not: vec![
+            Condition::matches("status", "stale".to_string()),
+            Condition::matches("status", "superseded".to_string()),
         ],
         ..Default::default()
     };

@@ -209,6 +209,31 @@ mgimind history --limit 3              # the three most recent memories
 mgimind stats                          # counts per library, facts, sessions
 ```
 
+**Duel rule on contradictions.** When two facts contradict and the
+predicate is `Single` or `TemporalSingle`, the second add resolves
+against the first instead of piling up:
+
+```bash
+# Tell the system this predicate has one current value at a time:
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+  "params":{"name":"mind_predicate","arguments":
+    {"action":"register","predicate":"lives_in",
+     "cardinality":"TemporalSingle"}}}' \
+  | mgimind mcp
+
+mgimind fact add "Alice" "lives_in" "Prague"
+mgimind fact add "Alice" "lives_in" "Dublin"
+mgimind fact query "Alice"
+#   Alice -> lives_in -> Dublin
+# (Prague is preserved as history, queryable via mind_history / audit log
+#  but hidden from default ranking.)
+```
+
+If you migrated from a pre-v1.7 install where the duel rule wasn't
+firing at the read path, run `mgimind migrate-v14 redo-duels --apply`
+once to collapse legacy contradictions to canonical answers. The
+walk is idempotent and dry-run by default.
+
 **Through your assistant (MCP).** Once connected, you just talk:
 
 ```
