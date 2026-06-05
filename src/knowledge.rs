@@ -166,7 +166,7 @@ pub fn detect_conflict(existing: &[Fact], new_object: &str, cardinality: Cardina
     existing.iter().any(|f| f.valid && f.object != new_object)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
     pub subject: String,

@@ -432,6 +432,22 @@ pub enum MigrateV14Cmd {
         #[arg(long)]
         apply: bool,
     },
+    /// v1.7 (#111): re-judge every (subject, predicate) pair against the
+    /// current cardinality registry. For Single/TemporalSingle predicates
+    /// with >1 active facts, runs the duel rule across the cluster and
+    /// dampens all losers. Fixes legacy data from before PR #26, where
+    /// duel-rule writes silently failed and multiple Active facts coexisted
+    /// for the same Single axis.
+    RedoDuels {
+        /// Write the dampenings back. Read-only without this flag (prints
+        /// the cluster plan only).
+        #[arg(long)]
+        apply: bool,
+        /// Optional limit on the number of clusters to inspect. Useful
+        /// for sampling on a huge base before the full apply.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -727,6 +743,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cmd_migrate_v14_cardinality(output.as_deref(), apply).await
             }
             MigrateV14Cmd::Confirmations { apply } => cmd_migrate_v14_confirmations(apply).await,
+            MigrateV14Cmd::RedoDuels { apply, limit } => {
+                cmd_migrate_v14_redo_duels(apply, limit).await
+            }
         },
         Commands::Bench {
             dataset,
@@ -1281,6 +1300,134 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
     println!(
         "Registered {registered} High-confidence proposals; skipped {skipped} Low-confidence; {errors} errors."
     );
+    Ok(())
+}
+
+async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result<()> {
+    use crate::knowledge::{Cardinality, list_all_facts, list_cardinalities};
+    use std::collections::HashMap;
+
+    let config = crate::config::load_cached()?;
+
+    println!(
+        "v1.7 #111 — re-judging legacy facts against current cardinality registry{}.",
+        if apply { ", writing back" } else { ", dry-run" }
+    );
+
+    // Build a (predicate → cardinality) map. Predicates not in the registry
+    // default to Multi (the safe choice — no conflict possible), so we don't
+    // touch them.
+    let cards = list_cardinalities(&config).await?;
+    let mut card_map: HashMap<String, Cardinality> = HashMap::new();
+    for (pred, c) in cards {
+        card_map.insert(pred, c);
+    }
+
+    // Walk every Active fact and bucket by (subject, predicate). list_all_facts
+    // already excludes status=stale post-#26, so a cluster of size > 1 here is
+    // exactly the "legacy bug residue" we're cleaning up.
+    let facts = list_all_facts(&config).await?;
+    let mut clusters: HashMap<(String, String), Vec<crate::knowledge::Fact>> = HashMap::new();
+    for f in facts {
+        clusters
+            .entry((f.subject.clone(), f.predicate.clone()))
+            .or_default()
+            .push(f);
+    }
+
+    // Keep only conflict-bearing clusters: registered Single AND size > 1.
+    //
+    // Why we skip TemporalSingle here: the duel rule semantically treats a
+    // chain (lives_in: Prague→Dublin, has_version: v0.1→…→v1.6) as history
+    // that should remain auditable. Until a dedicated `superseded` status
+    // exists (separate from `stale`), `dampen_loser` would entomb the chain
+    // and break "what was the version on 2026-06-02?". The walk only touches
+    // Single clusters, where exactly one canonical fact is the contract.
+    let mut work: Vec<((String, String), Vec<crate::knowledge::Fact>, Cardinality)> = clusters
+        .into_iter()
+        .filter_map(|((s, p), group)| {
+            if group.len() < 2 {
+                return None;
+            }
+            let card = *card_map.get(&p)?;
+            if !matches!(card, Cardinality::Single) {
+                return None;
+            }
+            Some(((s, p), group, card))
+        })
+        .collect();
+
+    // Stable order: largest clusters first, then alpha. Helps the user see the
+    // worst offenders at the top of the dry-run.
+    work.sort_by(|a, b| {
+        b.1.len()
+            .cmp(&a.1.len())
+            .then_with(|| a.0.0.cmp(&b.0.0))
+            .then_with(|| a.0.1.cmp(&b.0.1))
+    });
+
+    let total_clusters = work.len();
+    if let Some(n) = limit {
+        work.truncate(n);
+    }
+
+    if total_clusters == 0 {
+        println!("\nNo conflict-bearing clusters found. Knowledge graph is already canonical.");
+        return Ok(());
+    }
+
+    println!(
+        "\nFound {total_clusters} conflict-bearing cluster(s){}:",
+        match limit {
+            Some(n) if n < total_clusters => format!(" (showing first {n})"),
+            _ => String::new(),
+        }
+    );
+
+    let mut total_dampened = 0usize;
+    let mut total_kept = 0usize;
+    for ((subject, predicate), group, card) in &work {
+        // Winner policy: keep the most recently added (highest created_at);
+        // dampen the rest. This matches the temporal-most-recent heuristic
+        // a TemporalSingle predicate already implies, and is also reasonable
+        // for Single — a user who re-asserts is updating their belief, not
+        // forking it.
+        let mut sorted: Vec<crate::knowledge::Fact> = (*group).clone();
+        sorted.sort_by(|a, b| {
+            let av = a.created_at.as_deref().unwrap_or("");
+            let bv = b.created_at.as_deref().unwrap_or("");
+            bv.cmp(av) // newest first
+        });
+        let winner = &sorted[0];
+        let losers = &sorted[1..];
+        total_kept += 1;
+        total_dampened += losers.len();
+
+        println!(
+            "\n  [{card:?}] {subject:?} -> {predicate:?} ({} active)",
+            group.len()
+        );
+        println!("    keep   {} (created {})", winner.object, winner.created_at.as_deref().unwrap_or("?"));
+        for l in losers {
+            println!("    dampen {} (created {})", l.object, l.created_at.as_deref().unwrap_or("?"));
+        }
+
+        if apply {
+            for l in losers {
+                crate::duel::dampen_loser(&config, &l.id).await?;
+            }
+        }
+    }
+
+    println!(
+        "\nSummary: {} cluster(s) processed, {total_kept} winner(s) kept, {total_dampened} loser(s) {}.",
+        work.len(),
+        if apply { "dampened" } else { "would be dampened (dry-run)" }
+    );
+    if !apply {
+        println!("Re-run with --apply to write the dampenings.");
+    }
+
     Ok(())
 }
 
