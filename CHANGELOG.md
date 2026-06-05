@@ -1,5 +1,85 @@
 # Changelog
 
+## Unreleased — v1.7 candidate
+
+### Fixed: duel rule was silently bypassed at the read path
+
+**Issue [#25](https://github.com/madgodinc/mgi-mind/issues/25) /
+PR [#26](https://github.com/madgodinc/mgi-mind/pull/26).**
+
+`query_facts` and the other fact read paths filtered only on
+`valid="true"`, not on `status`. `dampen_loser` writes `status="stale"`
+without touching `valid`, so dampened losers from the duel rule
+remained visible in every query. The headline conflict-resolution
+feature appeared broken from a user perspective even when the
+internal logic was firing correctly.
+
+Fix: every fact read path now excludes `status="stale"` AND
+`status="superseded"`. Affected:
+
+- `knowledge::query_facts`
+- `knowledge::find_facts_by_subject_predicate`
+- `knowledge::list_all_facts` (used by stats / audit)
+- `knowledge::list_top_dependants_facts` (used by `mgimind facts list`)
+- `cli.rs` doctor's `facts_summary` loop
+
+Two new integration tests pin the regression:
+
+- `duel_rule_dampens_loser_on_single_cardinality` — register Single
+  cardinality + add winner + add conflicting + query, asserts only
+  the winner is returned.
+- `multi_cardinality_allows_coexistence` — same flow with Multi,
+  asserts both facts coexist.
+
+Both vectorless, ~0.2 s each, run on every CI push.
+
+### Added: `EntryStatus::Superseded` (separate from Stale)
+
+[ADR 0005](./docs/design/adr/0005-superseded-vs-stale-status.md).
+
+`Stale` = lost a contradiction duel (`dampen_loser`).
+`Superseded` = overtaken by a newer entry in a `TemporalSingle` chain
+(`mark_superseded`). Both are default-hidden from queries; both keep
+`valid="true"` and a `valid_until` timestamp. The difference matters
+for future `mind_history` and audit-replay tools that should render
+the duel outcome and the temporal progression differently.
+
+Wire format: lowercase string `"superseded"`.
+
+### Added: `mgimind migrate-v14 redo-duels`
+
+Retroactive walk for legacy KGs from before the read-path fix.
+Scans every `(subject, predicate)` cluster, identifies Single /
+TemporalSingle predicates with > 1 active fact, runs the duel rule:
+
+- Single clusters: losers dampened (`status=stale`).
+- TemporalSingle clusters: older entries marked superseded
+  (`status=superseded`).
+
+Idempotent. Dry-run is the default; `--apply` writes. `--limit N`
+samples the top-N biggest clusters first.
+
+On a real KG of 35 480 facts the walk found 31 conflict-bearing
+clusters: 19 Single (44 losers dampened) + 12 TemporalSingle (38
+losers superseded). Headline real-data conflicts (e.g. `Aurora
+has_status active → frozen`, `mgi-mind has_version v0.8.0 → … →
+v1.6.4`) now collapse to the canonical answer.
+
+### Added: 2026-06-05 blog post
+
+`docs/blog/2026-06-05-i-found-my-headline-feature-was-broken.md` —
+post-mortem narrative covering the bug discovery, localization,
+fix, retroactive walk, and what 290 passing unit tests can't tell
+you about a user-facing read path that drifted out of sync with
+the write model.
+
+### Stats and tests
+
+- 290 unit tests pass (no change from 1.6.4).
+- 8 CLI integration tests pass (2 new for duel happy / Multi
+  regression).
+- Build remains warning-free.
+
 ## 1.6.4 — Windows fix + doctor --fix cardinality + ADRs + SECURITY policy
 
 This release closes the v1.5 honest limit on cross-platform CI plus
