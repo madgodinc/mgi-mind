@@ -25,6 +25,7 @@ mod migrate_v14;
 mod outcome;
 mod procedure;
 mod provenance;
+mod qa_judge;
 mod relevance;
 mod reranker;
 mod secrets;

@@ -1,15 +1,15 @@
 # Contributing to mgi-mind
 
-Short version: tests pass, `cargo fmt` ran, CHANGELOG updated, no AI
-co-authors in the commit. Long version below.
+Tests pass, `cargo fmt` ran, CHANGELOG updated, no AI co-authors in the
+commit. Details below.
 
 ## Project layout
 
 Single crate, one binary (`mgimind`). Sources:
 
-- `src/engine` — none. mgi-mind does not have a separate engine /
-  binary split because the surface is small enough that one crate
-  works. If we grow that, the split will mirror mgi-pulse.
+- `src/engine` — none. mgi-mind has no separate engine / binary
+  split; the surface is small enough that one crate works. If we
+  grow that, the split will mirror mgi-pulse.
 - `src/cli.rs` — clap-derived CLI surface. Every public-facing flag
   lives here.
 - `src/mcp.rs` — Model Context Protocol surface. JSON-RPC over
@@ -37,13 +37,12 @@ MSRV is the workspace's `rust-version` (currently 1.84). Stable only.
 
 ## Architecture rules
 
-Three rules the model leans on heavily. Please don't quietly invert
-them:
+Three rules the model relies on. Please don't invert them:
 
 1. **Mechanism 1 invariant: never hard-delete.** A fact that loses
    a duel becomes `Stale` with `valid_until`; never `Delete`. The
    re-test pass returns `RetestTransition::{NoChange, PromoteToDoubt,
-   RecoverFromDoubt}` — there is intentionally no `Remove` variant.
+   RecoverFromDoubt}`. There is intentionally no `Remove` variant.
    Soft-decay only goes through `consolidate --soft-decay` and
    moves facts into the existing v0.11 quarantine.
 
@@ -59,7 +58,7 @@ them:
 3. **All numeric constants are illustrative until calibrated.**
    Anything with a `TODO(phase-4-calibration)` comment is a tunable
    for the STALE bench sweep. Don't ship a PR that hardcodes a new
-   one without flagging it; please make it `pub const NAME: f32 =
+   one without flagging it. Please make it `pub const NAME: f32 =
    …;` so the calibration tooling can find it via grep.
 
 ## Adding a new MCP tool
@@ -73,8 +72,8 @@ Three places to touch:
    `tools_list_returns_v1_5_surface`) — they pin the surface size.
 
 2. **CLI mirror in `src/cli.rs`** — add a `Commands::` variant and
-   a handler. The CLI surface should reach every MCP tool so
-   debugging from a terminal stays possible.
+   a handler. The CLI surface should reach every MCP tool so you can
+   debug from a terminal.
 
 3. **Tests** — at minimum, unit tests on the pure helpers (schema
    parse, formula). Integration tests in `tests/cli_integration.rs`
@@ -150,17 +149,16 @@ useful, be honest about limits, no harassment, no asshole behaviour.
 ## Past contributors
 
 mgi-mind is mostly a solo project, but a few outside contributions
-already shaped the design. Listed here because the issue / PR
-history alone does not show why they mattered:
+shaped the design. Listed here because the issue / PR history alone
+does not show why they mattered:
 
-- **[@spikefcz](https://github.com/spikefcz)** — PR #2 (closed
-  superseded by v1.4 Cardinality enum + duel rule). The PR
-  signalled that audit #13 (single-valued fact accumulation)
-  mattered to someone besides me, which is part of why v1.4
-  prioritised the broader Mechanism 1 fix. Closed because the
-  generalised solution shipped, not because the PR was bad. The
-  conversation lives at https://github.com/madgodinc/mgi-mind/pull/2.
+- **[@spikefcz](https://github.com/spikefcz)** — PR #2 (closed,
+  superseded by v1.4 Cardinality enum + duel rule). The PR showed
+  that audit #13 (single-valued fact accumulation) mattered to
+  someone besides me, which is part of why v1.4 prioritised the
+  broader Mechanism 1 fix. I closed it once the generalised
+  solution shipped. The conversation is
+  at https://github.com/madgodinc/mgi-mind/pull/2.
 
 If you contributed something and you are not listed here, open an
-Issue (or just nudge me in Discussions). I am bad at
-self-noticing.
+Issue or nudge me in Discussions. I am bad at self-noticing.

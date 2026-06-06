@@ -17,8 +17,8 @@ Assistant (calls mind_search "deploy server"):
 You:  right, thanks
 ```
 
-Nothing leaves the box — embeddings, search, reranking, vault are all
-local. No cloud account, no API key, no telemetry.
+Nothing leaves the box. Embeddings, search, reranking, and the vault are
+all local. No cloud account, no API key, no telemetry.
 
 ---
 
@@ -43,7 +43,7 @@ local. No cloud account, no API key, no telemetry.
 
 MGI-Mind sits between you and your assistant. The assistant writes short
 notes ("memories") and facts as a conversation goes, and pulls the
-relevant ones back when they matter.
+relevant ones back when you need them.
 
 Retrieval, not just storage:
 
@@ -55,7 +55,7 @@ Retrieval, not just storage:
   contains that exact token through the sparse arm.
 - **Cross-encoder reranking.** Fused top candidates are re-scored by
   bge-reranker-base, which reads the query and each passage together and
-  is more accurate than comparing vectors. On by default, English-tuned —
+  is more accurate than comparing vectors. On by default, English-tuned;
   see [Languages and the reranker](#languages-and-the-reranker) for the
   trade-off on other languages.
 - **One warm process.** `mgimind mcp` is the MCP server itself: it runs
@@ -69,17 +69,16 @@ vault for secrets.
 ## Why bother
 
 An assistant without memory asks for the same context every session and
-can't build on yesterday's work. The usual workaround is you keeping
-notes, tags, and folders — which the assistant still can't read by
+can't build on yesterday's work. The usual workaround has you keeping
+notes, tags, and folders, which the assistant still can't read by
 meaning.
 
-The thing MGI-Mind does that Obsidian and Notion don't: **the system
-decides what to write down, you don't.** The MCP server reads what the
+MGI-Mind does one thing Obsidian and Notion don't: the system
+decides what to write down, you don't. The MCP server reads what the
 assistant is doing in real time and routes facts, decisions, and fixes
-into the store through a relevance gate. You don't file, you don't tag,
-you don't decide what's worth saving. Low-signal candidates land in a
-quarantine layer (recoverable on re-assertion) instead of polluting
-retrieval.
+into the store through a relevance gate. You don't file, tag, or decide
+what's worth saving. Low-signal candidates land in a quarantine layer
+(recoverable on re-assertion) instead of polluting retrieval.
 
 How it compares to the obvious alternatives:
 
@@ -95,7 +94,7 @@ How it compares to the obvious alternatives:
 
 MGI-Mind is the assembled local version: hybrid + reranked retrieval, the
 relevance gate, dedup, facts, sessions, procedural memory ("error → fix"
-playbooks), and a terminal-only vault — behind one binary you run
+playbooks), and a terminal-only vault, behind one binary you run
 yourself.
 
 ## Quick start
@@ -136,7 +135,7 @@ embedder loads), the Qdrant binary, the embedding model
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — install somewhere other than `~/.local/bin`.
 - `MGIMIND_TAG=v1.0.1 curl ... | sh` — pin a specific release instead of `latest`.
-- `SKIP_DOCTOR=1 curl ... | sh` — just drop the binary; run `init` + `doctor --fix` yourself later.
+- `SKIP_DOCTOR=1 curl ... | sh` — drop the binary only; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
 
@@ -163,8 +162,8 @@ mgimind search "how do I reach the deploy box"
 - **Linux x86_64, macOS arm64 (Apple Silicon), Windows x86_64** — prebuilt
   binaries in every release. The installer picks the right one.
 - **macOS Intel (x86_64)** — no prebuilt binary. GitHub's hosted
-  `macos-13` runner sits in queue for 20-30+ minutes and is being phased
-  out, so it's omitted from the release matrix. Build from source (next
+  `macos-13` runner sits in queue for 20-30+ minutes and GitHub is phasing
+  it out, so it's omitted from the release matrix. Build from source (next
   section); takes a few minutes.
 - **macOS first-run quarantine** — a downloaded binary may need
   `xattr -d com.apple.quarantine /path/to/mgimind`, or right-click → Open
@@ -234,7 +233,7 @@ firing at the read path, run `mgimind migrate-v14 redo-duels --apply`
 once to collapse legacy contradictions to canonical answers. The
 walk is idempotent and dry-run by default.
 
-**Through your assistant (MCP).** Once connected, you just talk:
+**Through your assistant (MCP).** Once connected, you talk:
 
 ```
 You:  remember that the staging DB password is in the vault under "staging-db"
@@ -267,7 +266,7 @@ Search returns results in tiers so the assistant spends tokens carefully:
 on each point separates namespaces (work, personal, a project), and a
 query can filter to one library or search across all. A point's ID is a
 UUIDv5 of `library + content`, so adding the same text twice overwrites
-the same point — no duplicates, no race. A `created_at` datetime index
+the same point, with no duplicates and no race. A `created_at` datetime index
 lets `history` return the newest N directly without scanning.
 
 **Embeddings.** Text is embedded locally through ONNX Runtime. Default is
@@ -286,7 +285,7 @@ given, applies to both arms.
 
 **Safety.** Downloads check against pinned SHA-256 hashes (fail-closed).
 Qdrant binds to loopback only and can require an API key. The vault is
-terminal-only — the master password and decrypted secrets never travel
+terminal-only: the master password and decrypted secrets never travel
 over the MCP channel. File writes are atomic (temp file, fsync, rename,
 fsync the directory), so a crash leaves the old file or the new one,
 never a corrupt one.
@@ -369,12 +368,12 @@ Config lives at `~/mgimind/config.json`. Fields that affect retrieval:
 ## Languages and the reranker
 
 The default stack is tuned for English, because that's where the assistant
-itself reasons best and where the models are strongest. It's the
-recommended setup for an English-first project.
+itself reasons best and where the models are strongest. Use it as-is for
+an English-first project.
 
 A few honest details:
 
-- The embedder (multilingual-e5-base) is genuinely multilingual. An
+- The embedder (multilingual-e5-base) is multilingual. An
   English query finds a Russian note and vice versa, and search alone
   works well across languages.
 - The default reranker (bge-reranker-base) is English-tuned. It improves
@@ -385,9 +384,9 @@ A few honest details:
   set `rerank_enabled = false`. Hybrid dense+sparse search on its own
   ranks those languages well; the English-tuned reranker is what hurts
   them. Or swap in a stronger multilingual reranker.
-- Reranking costs cross-encoder inference per query — roughly one to two
+- Reranking costs cross-encoder inference per query, roughly one to two
   seconds for 20 candidates on a CPU-only box. Lower `rerank_top_k` or
-  turn reranking off for snappier search.
+  turn reranking off for faster search.
 
 ## Changing the embedding model
 
@@ -432,11 +431,11 @@ memories must be re-embedded:
   Other platforms and custom models warn instead of trusting blindly.
 - Qdrant binds to `127.0.0.1` only and supports an API key.
 - The vault is AES-256-GCM with an Argon2id-derived key (parameters
-  pinned so a library upgrade can't lock you out). Terminal-only — the
+  pinned so a library upgrade can't lock you out). Terminal-only: the
   master password and decrypted secrets never travel over the MCP
   channel. The `mind_vault_*` MCP tools return terminal instructions,
   never the secret value.
-- File writes are atomic and directory-fsynced — a crash leaves the old
+- File writes are atomic and directory-fsynced, so a crash leaves the old
   file or the new one, never a corrupt one.
 
 ## Status and audit
@@ -448,10 +447,10 @@ layer + best-effort retrieval policy, the 0.12.x viewer wave, the
 (LongMemEval baseline + Д6 dataset of 227 pairs from 20 public repos).
 The 1.0 contract is the asymmetric "Qdrant now → md says" md reconcile
 diff, the `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch, and the
-31-tool MCP surface — these are frozen until a 2.0 bump.
+31-tool MCP surface; these are frozen until a 2.0 bump.
 
 The project went through a code audit covering 27 issues. **21 are fully
-fixed, 6 are partial** — the mechanism shipped, hardening continues.
+fixed, 6 are partial**: the mechanism shipped, hardening continues.
 [`AUDIT_STATUS.md`](AUDIT_STATUS.md) accounts for every issue one by one,
 including the gaps (fact supersession isn't implemented yet, for
 example). [`CHANGELOG.md`](CHANGELOG.md) has the per-release history,

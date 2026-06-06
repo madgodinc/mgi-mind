@@ -272,12 +272,52 @@ pub enum Commands {
     /// implemented yet — this is the CLI surface so calibration sweep
     /// tooling can be developed against the type contracts.
     BenchStale {
-        /// Path to the STALE dataset JSON (Appendix G of arxiv 2605.06527).
+        /// Path to the STALE dataset JSON (T1_T2_400_FULL.json).
         dataset: String,
-        /// LLM judge model identifier (e.g. `gpt-4o-mini`, `claude-haiku-4.5`).
-        /// Requires MGIMIND_STALE_JUDGE_KEY env var.
+        /// Answerer (backbone) model. A1: must be gpt-4o-mini for comparability
+        /// to the paper's memory-framework column. Reads OPENAI_API_KEY.
         #[arg(long, default_value = "gpt-4o-mini")]
+        backbone: String,
+        /// Judge model (STALE paper uses a Gemini flash-lite). Reads
+        /// GEMINI_API_KEY.
+        #[arg(long, default_value = "gemini-flash-latest")]
         judge: String,
+        /// Extractor variant for ingest (default / lite). Production path.
+        #[arg(long, default_value = "default")]
+        extractor: String,
+        /// Use the focused user-state extraction prompt (recommended for STALE:
+        /// the general prompt loses durable user facts in noisy dialogue).
+        #[arg(long)]
+        focused: bool,
+        /// Dry-run the pipeline with deterministic mock LLMs (no API, no keys).
+        /// Used for the D2/D4 gates — verifies ingest→duel→retrieve before
+        /// spending a cent.
+        #[arg(long)]
+        mock: bool,
+        /// Route answerer + judge through a file exchange in this dir (a human
+        /// or another model writes resp_NNNN.txt for each req_NNNN.txt). Free
+        /// dress rehearsal of the full pipeline before paying real judges.
+        #[arg(long, value_name = "DIR")]
+        file_judge: Option<String>,
+        /// Route EXTRACTION through a file exchange in this dir (a human/stronger
+        /// model returns triples for each chunk). Isolates duel/retrieve/judge
+        /// from the local 2B model's recall ceiling — the upper-bound number.
+        #[arg(long, value_name = "DIR")]
+        file_extract: Option<String>,
+        /// Extract via the OpenAI backbone (gpt-4o-mini) instead of local
+        /// Granite — the "with LLM extraction (mechanism)" upper-bound number,
+        /// comparable to how mem0/Zep extract. NOT end-to-end product (A2).
+        #[arg(long)]
+        llm_extract: bool,
+        /// Haystack ingest mode: `full` (all 50 sessions, ~190K tok, honest
+        /// retrieval-in-noise) or `reduced` (relevant sessions ± window, fast
+        /// first-pass — MUST be disclosed as reduced-haystack in the writeup).
+        #[arg(long, default_value = "full")]
+        haystack: String,
+        /// Neighbour window for `--haystack reduced` (sessions each side of the
+        /// M_old/M_new sessions).
+        #[arg(long, default_value = "2")]
+        window: usize,
         /// Override DUEL_FLIP_RATIO for this run (sweep tooling sets
         /// this; default = production constant).
         #[arg(long, value_name = "F")]
@@ -295,6 +335,12 @@ pub enum Commands {
         #[arg(long, default_value = "stale-result.json")]
         output: String,
     },
+
+    /// Deterministic duel-rule validity check (LLM-free). Ingests clean
+    /// conflicting triples directly and asserts the duel hides the stale value.
+    /// This is the defensible belief-revision number, isolated from extractor
+    /// recall.
+    DuelValidity,
 
     /// STALE bench sweep: walk a small grid of constant overrides and
     /// emit per-run results into a directory. Scaffold — wraps the
@@ -761,25 +807,107 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::BenchPolicy { input } => cmd_bench_policy(&input).await,
         Commands::BenchStale {
             dataset,
+            backbone,
             judge,
+            extractor,
+            focused,
+            mock,
+            file_judge,
+            file_extract,
+            llm_extract,
+            haystack,
+            window,
             duel_flip_ratio,
             duel_contested_ratio,
             doubt_drift_threshold,
             limit,
             output,
         } => {
+            #[cfg(not(feature = "extractor"))]
+            {
+                let _ = (
+                    &dataset, &backbone, &judge, &extractor, focused, mock, &file_judge,
+                    &file_extract, llm_extract, &haystack, window, duel_flip_ratio,
+                    duel_contested_ratio, doubt_drift_threshold, limit, &output,
+                );
+                anyhow::bail!(
+                    "bench-stale needs the production extractor; rebuild with \
+                     `--features extractor`"
+                );
+            }
+            #[cfg(feature = "extractor")]
+            {
+            use crate::qa_judge::{FileClient, GeminiClient, LlmClient, MockClient, OpenAiClient};
+
             let overrides = crate::bench_stale::CalibrationOverrides {
                 duel_flip_ratio,
                 duel_contested_ratio,
                 doubt_drift_threshold,
                 ..Default::default()
             };
+
+            let extract_cfg = crate::extractor::ExtractConfig {
+                variant: crate::extractor::ExtractorVariant::parse(&extractor)
+                    .unwrap_or_default(),
+                focused,
+                ..Default::default()
+            };
+
+            let mode = match haystack.trim().to_ascii_lowercase().as_str() {
+                "reduced" => crate::bench_stale::HaystackMode::Reduced { window },
+                "full" | "" => crate::bench_stale::HaystackMode::Full,
+                other => anyhow::bail!("unknown --haystack mode '{other}' (full|reduced)"),
+            };
+
+            // Three modes: file_judge (human/model plays LLM via files — free
+            // rehearsal), mock (deterministic, gate only), or real API.
+            let (answerer, judge_client): (Box<dyn LlmClient>, Box<dyn LlmClient>) =
+                if let Some(dir) = &file_judge {
+                    // Shared dir + shared counter so answerer and judge requests
+                    // interleave into one ordered req_/resp_ stream.
+                    let answerer = FileClient::new("file-answerer", dir)?;
+                    let counter = answerer.counter.clone();
+                    let mut judge = FileClient::new("file-judge", dir)?;
+                    judge.counter = counter;
+                    (Box::new(answerer), Box::new(judge))
+                } else if mock {
+                    let mk = || {
+                        Box::new(MockClient {
+                            id: "mock".into(),
+                            rules: vec![],
+                            default: "{\"dim1_eval\":{\"reasoning\":\"mock\",\"pass\":false},\
+                                       \"dim2_eval\":{\"reasoning\":\"mock\",\"pass\":false},\
+                                       \"dim3_eval\":{\"reasoning\":\"mock\",\"pass\":false}}"
+                                .into(),
+                        })
+                    };
+                    (mk(), mk())
+                } else {
+                    (
+                        Box::new(OpenAiClient::from_env(&backbone)?),
+                        Box::new(GeminiClient::from_env(&judge)?.json_mode(true)),
+                    )
+                };
+
+            // LLM-extractor: a separate OpenAI client (gpt-4o-mini) used for
+            // extraction — the oracle/mechanism upper-bound path.
+            let llm_extractor: Option<Box<dyn LlmClient>> = if llm_extract {
+                Some(Box::new(OpenAiClient::from_env("gpt-4o-mini")?))
+            } else {
+                None
+            };
+
             let report = crate::bench_stale::run(
                 std::path::PathBuf::from(&dataset),
-                &judge,
+                answerer.as_ref(),
+                judge_client.as_ref(),
+                &extract_cfg,
+                mode,
                 limit,
                 overrides,
                 std::path::PathBuf::from(&output),
+                file_extract.map(std::path::PathBuf::from),
+                llm_extractor.as_deref(),
             )
             .await?;
             println!("STALE run done. Total scenarios: {}", report.scenarios_run);
@@ -793,6 +921,23 @@ pub async fn run(cli: Cli) -> Result<()> {
                 report.by_metric.premise_resistance_pct
             );
             Ok(())
+            }
+        }
+        Commands::DuelValidity => {
+            #[cfg(not(feature = "extractor"))]
+            {
+                anyhow::bail!("duel-validity is built behind the bench module; rebuild with `--features extractor`");
+            }
+            #[cfg(feature = "extractor")]
+            {
+                let config = crate::config::MindConfig::load()?;
+                let (passed, total) = crate::bench_stale::run_duel_validity(&config).await?;
+                println!("Duel-rule validity: {passed}/{total}");
+                if passed != total {
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
         }
         Commands::BenchStaleSweep {
             dataset,
@@ -1072,12 +1217,29 @@ async fn cmd_bench_stale_sweep(
     output_dir: &str,
     limit: Option<usize>,
 ) -> Result<()> {
+    #[cfg(not(feature = "extractor"))]
+    {
+        let _ = (dataset, judge, output_dir, limit);
+        anyhow::bail!(
+            "bench-stale-sweep needs the production extractor; rebuild with \
+             `--features extractor`"
+        );
+    }
+    #[cfg(feature = "extractor")]
+    {
     use crate::bench_stale::CalibrationOverrides;
+    use crate::qa_judge::{GeminiClient, LlmClient, OpenAiClient};
 
     std::fs::create_dir_all(output_dir)?;
     eprintln!("STALE sweep: writing per-run reports into {output_dir}");
     eprintln!("             judge model: {judge}");
     eprintln!("             dataset:     {dataset}");
+
+    // The sweep tunes duel constants — it needs real LLMs (mock would make
+    // every cell identical). Build answerer (gpt-4o-mini, A1) + judge once.
+    let answerer: Box<dyn LlmClient> = Box::new(OpenAiClient::from_env("gpt-4o-mini")?);
+    let judge_client: Box<dyn LlmClient> = Box::new(GeminiClient::from_env(judge)?.json_mode(true));
+    let extract_cfg = crate::extractor::ExtractConfig::default();
 
     // v1.6.3 sweep grid: ±25% / ±50% around the production defaults
     // for the three thresholds Phase 4 calibration cares about most.
@@ -1118,10 +1280,15 @@ async fn cmd_bench_stale_sweep(
 
         let report = crate::bench_stale::run(
             std::path::PathBuf::from(dataset),
-            judge,
+            answerer.as_ref(),
+            judge_client.as_ref(),
+            &extract_cfg,
+            crate::bench_stale::HaystackMode::Full,
             limit,
             overrides,
             out_path.clone(),
+            None,
+            None,
         )
         .await?;
 
@@ -1146,6 +1313,7 @@ async fn cmd_bench_stale_sweep(
         summary_path.display()
     );
     Ok(())
+    }
 }
 
 async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {

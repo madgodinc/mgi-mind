@@ -6,15 +6,15 @@
 
 ## TL;DR
 
-I shipped six versions of an AI-agent memory layer over two weeks. v1.4 added a "validity model" — predicates have a cardinality (Single / TemporalSingle / Multi), and conflicting facts get resolved by a duel rule. The duel rule decides who wins, dampens the loser, keeps both for audit. 290 unit tests, ADRs, four critic rounds, two README translations, contributor docs.
+I shipped six versions of an AI-agent memory layer over two weeks. v1.4 added a "validity model": predicates have a cardinality (Single / TemporalSingle / Multi), and a duel rule resolves conflicting facts. The duel rule decides who wins, dampens the loser, keeps both for audit. 290 unit tests, ADRs, four critic rounds, two README translations, contributor docs.
 
-Yesterday I sat down to test it on real data — the 35k-fact knowledge graph extracted from my own two years of personal notes. Added a conflicting fact. Queried the subject. **Both facts came back as Active.**
+Yesterday I tested it on real data: the 35k-fact knowledge graph extracted from two years of my personal notes. Added a conflicting fact. Queried the subject. **Both facts came back as Active.**
 
-The headline feature was silently broken. Has been since v1.4.
+The headline feature was broken, and had been since v1.4 with no error or warning.
 
-This post is about why my test suite missed it, why my hand-curated facts caught it in five minutes, and what changes when you stop optimizing for "everything green" and start optimizing for "what would a user see on day one."
+This post covers why my test suite missed it, why my hand-curated facts caught it in five minutes, and what changes when you stop optimizing for "everything green" and start optimizing for "what a user sees on day one."
 
-If you came for benchmarks: R@5 = 99.2% on LongMemEval-S (e5-base FP16 + reranker, RTX 3090). That number hasn't moved since v0.14.3. The v1.4–v1.6 work is about *what memory means*, not how it's retrieved. The number stands but it's not the point of this post.
+If you came for benchmarks: R@5 = 99.2% on LongMemEval-S (e5-base FP16 + reranker, RTX 3090). That number hasn't moved since v0.14.3. The v1.4–v1.6 work changes what memory means, not how it's retrieved. The number stands, and it isn't the point of this post.
 
 ---
 
@@ -28,7 +28,7 @@ The v1.4 fix:
 - When a new fact arrives, the duel rule looks at existing facts for the same `(subject, predicate)`. If cardinality forbids coexistence and a conflict exists, it computes confidence scores from cached signals (`dependants_count`, `confirmations_count`, `external_signals`), ranks the new fact against the incumbent, and returns one of: `Flip` (newcomer wins, incumbent dampened), `Contested` (both stay live), `Quarantine` (newcomer too weak, parked for promote-on-repeat).
 - Loser gets `status = stale`, `valid_until = now`. Never deleted. Mechanism 1 invariant: future evidence can reverse a duel.
 
-Five months of architecture work boil down to one user-facing promise:
+Five months of architecture work come down to one user-facing promise:
 
 > Single-cardinality conflicts auto-resolve. The current value is what comes back.
 
@@ -60,7 +60,7 @@ Both Active. No audit event. The duel rule was silent.
 
 ## Locating the bug
 
-The 290 unit tests pass. The CLI integration suite (6 tests) passes. The build is warning-free. So either the bug is in something none of them touch — or it's in a place where unit tests and the production read path disagree about reality.
+The 290 unit tests pass. The CLI integration suite (6 tests) passes. The build is warning-free. So either the bug is in something none of them touch, or it's in a place where unit tests and the production read path disagree about reality.
 
 I added two `eprintln!` lines to `knowledge::add_fact`:
 
@@ -108,7 +108,7 @@ let filter = Filter {
 };
 ```
 
-There it is. `valid="true"` is the only state filter. `dampen_loser` only writes `status`, not `valid`. The loser remains `valid="true"` (it's not invalid, it lost a duel — those are different things in the post-v1.4 model), so it passes the filter and shows up in every query.
+There it is. `valid="true"` is the only state filter. `dampen_loser` writes `status`, not `valid`. The loser remains `valid="true"` (it isn't invalid, it lost a duel, and those are different things in the post-v1.4 model), so it passes the filter and shows up in every query.
 
 The fix is six lines:
 
@@ -137,9 +137,9 @@ The unit tests cover `detect_conflict`, `resolve_against_existing`, `dampen_lose
 
 - `add_fact` lives behind an MCP boundary; unit tests don't go through it.
 - The CLI integration tests use the binary, but the fact-flow tests use `mgimind add` (memories, not facts) and `mgimind search`. No test walked register → add → conflicting add → query through facts.
-- The `query_facts` filter was written before `status` existed (v1.0 had only the `valid` bool). When `status` was introduced in v1.4, every *write* path was updated. The reader was left alone because "valid is still the source of truth, isn't it?" The two-state model became a four-state model, but the read path stayed two-state.
+- I wrote the `query_facts` filter before `status` existed (v1.0 had only the `valid` bool). When I added `status` in v1.4, I updated every write path. I left the reader alone, on the assumption that valid was still the source of truth. The two-state model became a four-state model, but the read path stayed two-state.
 
-The shape of the bug: **a feature added in 2026-05-29 (v1.4 duel rule writes) had no end-to-end test against the read path added in 2026-04-15 (v1.0 query filter)**. Each side stayed correct against its own contract. They never met.
+The shape of the bug: a feature I added on 2026-05-29 (v1.4 duel rule writes) had no end-to-end test against the read path I added on 2026-04-15 (v1.0 query filter). Each side stayed correct against its own contract. They never met.
 
 ## What I did about it
 
@@ -161,7 +161,7 @@ fn multi_cardinality_allows_coexistence() {
 
 Both run in 0.2 s against a real Qdrant. The vectorless path needs no embedding model, so CI runs them on every push.
 
-Audited the rest of the read paths for the same omission. Found three more — `list_all_facts`, `list_top_dependants_facts`, `mgimind doctor`'s summary loop. All filtered on `valid="true"` only. Fixed all three.
+Audited the rest of the read paths for the same omission. Found three more: `list_all_facts`, `list_top_dependants_facts`, `mgimind doctor`'s summary loop. All filtered on `valid="true"` only. Fixed all three.
 
 Wrote a `mgimind migrate-v14 redo-duels` walk. It scans every `(subject, predicate)` cluster, identifies Single/TemporalSingle predicates with > 1 active fact, runs the duel rule across the cluster, dampens losers. This cleans up legacy data from before the read-path fix.
 
@@ -190,9 +190,9 @@ Found 31 conflict-bearing cluster(s):
 Summary: 31 cluster(s) processed, 82 losers cleared.
 ```
 
-The real opinion changes I had in my notes — Aurora becoming frozen after my brain server died, my HN account turning out to be hellbanned, two years of mgi-mind release history — all collapsed to the right answer. Mechanism 1 invariant preserved: the losers are still readable via `mind_history` for the temporal cases, via the audit log for the dampened ones.
+The real opinion changes in my notes (Aurora freezing after my brain server died, my HN account turning out to be hellbanned, two years of mgi-mind release history) all collapsed to the right answer. Mechanism 1 invariant preserved: the losers stay readable via `mind_history` for the temporal cases, and via the audit log for the dampened ones.
 
-For TemporalSingle I added an `EntryStatus::Superseded` variant separate from `Stale`. Same default-hidden behavior, different semantics: `Stale` means "lost a contradiction duel"; `Superseded` means "was correct at its time, a successor took over." A user who asks "when did Aurora freeze?" gets a meaningful history; they don't see ghost data in normal queries.
+For TemporalSingle I added an `EntryStatus::Superseded` variant separate from `Stale`. Same default-hidden behavior, different semantics: `Stale` means "lost a contradiction duel"; `Superseded` means "was correct at its time, a successor took over." A user who asks "when did Aurora freeze?" gets a real history, and doesn't see ghost data in normal queries.
 
 ## What 290 unit tests can't tell you
 
@@ -204,22 +204,20 @@ You can have:
 - README translated to three languages.
 - ADRs for every major decision.
 
-…and the user-facing version of your headline feature can be broken for a month and a half without anyone noticing, including you.
+…and the user-facing version of your headline feature can stay broken for a month and a half without anyone noticing, including you.
 
-What I had built was internal consistency: every piece behaves correctly against its own local contract. What I had not built was external validity: the production read-after-write loop actually does what the docs say.
+What I had built was internal consistency: every piece behaves correctly against its own local contract. What I had not built was external validity: the production read-after-write loop does what the docs say. The two look the same when the build is green.
 
-The two things look the same when the build is green. They aren't.
+To detect the difference, act like a first-day user. Open the MCP server you'd ship. Send the calls a real client would send. Read the responses a real client would read. Don't go through the unit-test boundary, don't use a hand-rolled fixture, don't `cargo test`. Type in the thing the readme says will work, and see if it works.
 
-The way to detect the difference is to act like a first-day user. Open the MCP server you'd ship. Send the calls a real client would send. Read the responses a real client would read. Don't go through the unit-test boundary, don't use a hand-rolled fixture, don't `cargo test`. Just type in the thing the readme says will work, and see if it works.
-
-For me yesterday, "I'm going to verify the validity model on my real data" — which sounded like an optional checkpoint — turned out to be the most valuable test I have ever written. Every other test in the codebase ran in 0.07 s and confirmed nothing about whether my software does what it claims.
+Yesterday, "I'm going to verify the validity model on my real data" sounded like an optional checkpoint. It turned out to be the most valuable test I have written. Every other test in the codebase ran in 0.07 s and confirmed nothing about whether my software does what it claims.
 
 ## What I'm not claiming
 
-- The R@5 number didn't change. The duel rule fires at write time; retrieval ranks the resulting facts. If only the winners survive, the search ranks them in the same order as before, against the same evaluation set. The 99.2% headline is unaffected by this bug fix. Honest: it's also not improved.
+- The R@5 number didn't change. The duel rule fires at write time; retrieval ranks the resulting facts. If only the winners survive, the search ranks them in the same order as before, against the same evaluation set. This bug fix leaves the 99.2% headline unaffected, and doesn't improve it either.
 - I haven't run the STALE benchmark calibration. Issue #16 is open. The architecture changes need their own `R@5 regression < 1.0 pp` gate. The judge-model adapter is unfinished; the dataset wiring needs an API key I don't have yet.
 - The four `pub const` weights in the install-mode profiles (`chat-only`, `dev-with-ci`, `multi-tenant`) are starting points, not calibrated. Source comments label them `TODO(phase-4-calibration)`. A real sweep will move them.
-- Mac and Windows binaries are still not in v1.5/v1.6 — issues #19 and #20 are open. If you'd run mgi-mind on either, please comment in the issue with your use case.
+- Mac and Windows binaries are still not in v1.5/v1.6; issues #19 and #20 are open. If you'd run mgi-mind on either, please comment in the issue with your use case.
 
 ## What you can run today
 

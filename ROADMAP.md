@@ -1,10 +1,9 @@
 # Roadmap
 
-This file is the **public, committed scope** for upcoming releases. It is
-honest about what is decided vs. what is still candidate, and about what
-each version is being measured against. Numbered versions name a release;
-"horizon" names a set of directions that are not yet committed to a
-specific tag.
+This file is the **public, committed scope** for upcoming releases. It
+marks what is decided vs. what is still candidate, and what each version
+is measured against. Numbered versions name a release; "horizon" names a
+set of directions not yet committed to a specific tag.
 
 Discipline carried over from the prior internal roadmap:
 
@@ -96,9 +95,8 @@ one-way.
   Dynamic Client Registration for the multi-user case (matches the
   GBrain-style remote-MCP setup). Default install stays stdio-only.
 - **`memory.json` portable format** — a one-page spec in the repo, plus
-  `export memory.json` / `import memory.json`. Positions mgi-mind as a
-  protocol author, not just an implementer. Tracks the proposal phase
-  before claiming any cross-tool adoption.
+  `export memory.json` / `import memory.json`. Tracks the proposal
+  phase before claiming any cross-tool adoption.
 - **Markdown live mirror (opt-in)** — keep an `~/mgimind/mirror/` tree
   in sync with Qdrant for users who want a git-able view. Mirror is a
   derived view, not a second source of truth (Qdrant remains canonical
@@ -137,14 +135,14 @@ infrastructure (Д4) so this is wiring, not a new mechanism.
 - Time-weighted decay score combining `access_count` and `last_accessed_at`.
 - `mgimind consolidate --auto` is the default path; `cron` becomes the
   setup hint, not a required step.
-- Decay is a ranking signal, not a delete signal. Hard delete still
+- Decay ranks results; it never deletes. Hard delete still
   requires explicit user action through the audit-log path.
 
 ## v2.0 — public-launch gate
 
-Not a feature dump. A gate: v2.0 = "ready for arbitrary external users".
-That means the bar is **action**, not "time has passed without a CVE"
-(absence of CVEs ≠ security, it means absence of attention).
+v2.0 is a gate: "ready for arbitrary external
+users". The bar is **action**. Time passing without a CVE does not
+clear it, since absence of CVEs means absence of attention.
 
 Required to cut v2.0:
 
@@ -160,17 +158,17 @@ Required to cut v2.0:
 - Optional **encrypted collection-at-rest** with a documented key-loss
   threat model.
 
-Anything in this block can ship earlier in a minor as a feature, but
-v2.0 itself is the gated event, not just the next number.
+Anything in this block can ship earlier in a minor as a feature.
+v2.0 itself is the gated event.
 
 ## v3.0 horizon — candidate set, not a promise
 
-v3.0 is far enough that committing to a single shape would be dishonest.
-There are several **non-exclusive directions** the project could grow
-into, each gated on signal from real users of v1.0–v2.0. The release
-that gets the v3.0 tag will be whichever of these crosses both a
-critic-checked spec and a measurable user pull. The others stay on this
-list, or fall off it.
+v3.0 is far enough out that committing to a single shape would
+overstate what I know. Several **non-exclusive directions** could grow
+the project, each gated on signal from real users of v1.0–v2.0. The
+v3.0 tag goes to whichever direction first clears both a critic-checked
+spec and a measurable user pull. The others stay on this list, or fall
+off it.
 
 Candidate A — **Local LLM extractor for write-gate.** Today the
 relevance gate is a heuristic stack (length, novelty, blacklist). A
@@ -202,9 +200,8 @@ knowledge graph holds typed facts (S, P, O); GBrain auto-links related
 markdown pages without an LLM call. A non-LLM auto-link mechanism over
 memories (not just facts) is interesting but unproven on R@k.
 
-These are deliberately listed without ordering or estimated dates. v3.0
-ships when one of these is decided, scoped, critic-checked, and built —
-not on a calendar.
+These are listed without ordering or estimated dates. v3.0 ships when
+one of them is decided, scoped, critic-checked, and built.
 
 ## Anti-roadmap (things we are explicitly not doing)
 
@@ -225,8 +222,8 @@ Carried over from the internal roadmap unchanged:
 
 ## How this file gets updated
 
-A release that ships a v1.x feature edits its own block to say "shipped
-in vX.Y", with a link to the tag. v3.0-horizon candidates either earn a
-promotion to a numbered version (with a critic-checked spec) or
-silently fall off the list once the project decides against them. The
-file should never grow stale promises.
+When a release ships a v1.x feature, I edit its block to say "shipped
+in vX.Y" with a link to the tag. A v3.0-horizon candidate either earns
+a promotion to a numbered version (with a critic-checked spec) or falls
+off the list once I decide against it. Keep stale promises out of this
+file.
