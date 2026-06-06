@@ -873,10 +873,27 @@ fn random_api_key() -> String {
 /// layers that fit (the rest run on CPU/RAM — slower but it runs). Default 99 =
 /// offload everything, correct when the model fits the GPU. 0 = pure CPU.
 fn ngl_layers() -> u32 {
-    std::env::var("MGIMIND_NGL")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(99)
+    // Explicit env wins; otherwise the hardware profile decides.
+    if let Ok(n) = std::env::var("MGIMIND_NGL").map(|s| s.trim().to_string()) {
+        if let Ok(v) = n.parse::<u32>() {
+            return v;
+        }
+    }
+    let profile = crate::config::MindConfig::load()
+        .map(|c| crate::hardware::active(c.hardware_profile))
+        .unwrap_or_default();
+    profile.resolve().ngl
+}
+
+/// Whether to keep the KV cache in RAM: explicit env wins, else the profile.
+fn kv_on_ram() -> bool {
+    if let Ok(s) = std::env::var("MGIMIND_KV_ON_RAM") {
+        return matches!(s.as_str(), "1" | "true");
+    }
+    let profile = crate::config::MindConfig::load()
+        .map(|c| crate::hardware::active(c.hardware_profile))
+        .unwrap_or_default();
+    profile.resolve().kv_on_ram
 }
 
 fn pick_port() -> u16 {
@@ -977,9 +994,9 @@ async fn ensure_server(variant: ExtractorVariant) -> anyhow::Result<(u16, String
     //   - the rest stay in RAM;
     //   - and the KV cache (which grows with --ctx-size) goes to RAM too,
     //     freeing that VRAM for weights instead.
-    // Set MGIMIND_KV_ON_RAM=1 to keep the KV cache off the GPU (-nkvo). On a
-    // card with room to spare, leave it unset — KV on VRAM is faster.
-    if matches!(std::env::var("MGIMIND_KV_ON_RAM").as_deref(), Ok("1") | Ok("true")) {
+    // Driven by the hardware profile (Light/Balanced keep KV in RAM; Max keeps
+    // it on the GPU). MGIMIND_KV_ON_RAM overrides.
+    if kv_on_ram() {
         cmd.arg("--no-kv-offload");
     }
 

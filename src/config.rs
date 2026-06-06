@@ -68,6 +68,10 @@ pub struct MindConfig {
     /// broke as PropagationShadowed. Off by default — adds an LLM call per add.
     #[serde(default)]
     pub propagation_enabled: bool,
+    /// Hardware profile: light | balanced | max. Distributes the brain across
+    /// GPU/VRAM/RAM/CPU for the machine. Env MGIMIND_PROFILE overrides.
+    #[serde(default)]
+    pub hardware_profile: crate::hardware::HardwareProfile,
     /// v1.5 Phase 6: install profile selecting per-mode confidence-score
     /// anchors. Default `chat-only` matches the legacy single-user behaviour
     /// — existing configs that pre-date v1.5 deserialise unchanged.
@@ -105,6 +109,7 @@ impl Default for MindConfig {
             rerank_top_k: default_rerank_top_k(),
             staleness_aware_search: false,
             propagation_enabled: false,
+            hardware_profile: crate::hardware::HardwareProfile::default(),
             install_mode: crate::install_mode::InstallMode::default(),
         }
     }

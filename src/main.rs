@@ -12,6 +12,7 @@ mod doubt;
 mod duel;
 mod embedder;
 mod error;
+mod hardware;
 #[cfg(feature = "extractor")]
 mod extractor;
 mod ingest;
