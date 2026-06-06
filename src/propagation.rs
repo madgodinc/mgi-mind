@@ -107,15 +107,15 @@ pub fn parse_stale_indices(raw: &str, n: usize) -> Vec<usize> {
 pub const ADJUDICATE_SYSTEM: &str = "You audit a person's memory for facts that \
     have become stale. You are given one NEW fact just learned about the person, \
     and a numbered list of EARLIER facts currently believed true about them. \
-    Find every earlier fact that the new fact contradicts or makes no longer \
-    true — using common-sense world knowledge ACROSS DIFFERENT attributes, not \
-    just same-attribute changes. For example: a dry/desert climate contradicts \
-    living in a famously rainy city; high-altitude/thin-air contradicts a \
-    sea-level home; a remote-work fact contradicts an earlier in-office one; a \
-    new city contradicts an old city. Be willing to infer, but only mark a fact \
-    stale when the new fact genuinely rules it out — not merely because the \
-    topics differ. Output ONLY a JSON array of the integer indices of the \
-    now-stale earlier facts. If none, output [].";
+    Mark an earlier fact stale ONLY when the new fact makes it LOGICALLY \
+    IMPOSSIBLE to still be true — using common-sense world knowledge across \
+    different attributes. For example: a dry/desert climate makes living in a \
+    famously rainy city impossible; high-altitude/thin-air makes a sea-level \
+    home impossible; a new city makes the old city impossible. BE CONSERVATIVE: \
+    if both facts can be true at once, or you are unsure they contradict, do \
+    NOT mark stale. Most pairs do NOT conflict. When in doubt, leave it. Output \
+    ONLY a JSON array of the integer indices of the now-impossible earlier \
+    facts. If none, output [].";
 
 /// Build the user prompt for a judge call.
 pub fn adjudicate_user_prompt(new_fact: &NewFact, candidates: &[Candidate]) -> String {

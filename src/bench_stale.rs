@@ -1304,18 +1304,16 @@ async fn implicit_adjudicate(config: &MindConfig, client: &dyn LlmClient) -> Res
     }
     let system = "You audit a user's memory for facts that have become stale. \
         Given a chronological list of believed-current facts about one user, \
-        find every EARLIER fact that a LATER fact contradicts or makes no longer \
-        true — using common-sense reasoning ACROSS DIFFERENT attributes, not \
-        just same-attribute changes. Examples of the reasoning to apply: a dry/ \
-        desert climate contradicts living in a famously rainy city (so the old \
-        city is stale); high-altitude/thin-air contradicts a sea-level home; a \
-        remote-work fact contradicts an earlier in-office one; a new city \
-        contradicts an old city. Be willing to infer: if a later fact about \
-        climate, environment, transport, or routine logically rules out an \
-        earlier location/arrangement, mark that earlier one stale. Only skip a \
-        pair when there is genuinely no contradiction. Output ONLY a JSON array \
-        of the integer indices of the EARLIER facts that are now stale. If none, \
-        output [].";
+        find EARLIER facts that a LATER fact makes LOGICALLY IMPOSSIBLE — using \
+        common-sense reasoning across different attributes. Mark an earlier fact \
+        stale ONLY when a later fact makes it genuinely impossible to still be \
+        true, e.g.: a dry/desert climate makes living in a famously rainy city \
+        impossible; high-altitude/thin-air makes a sea-level home impossible; a \
+        new city makes the old city impossible. BE CONSERVATIVE: if the two \
+        facts can both be true at once, or you are not sure they contradict, do \
+        NOT mark stale. Most pairs do NOT conflict. When in doubt, leave it. \
+        Output ONLY a JSON array of the integer indices of the earlier facts \
+        that are now impossible. If none, output [].";
     let user = format!("Facts (chronological):\n{listing}\nIndices of now-stale earlier facts:");
     let params = GenParams { temperature: Some(0.0), max_tokens: 64 };
     let raw = match client.generate(system, &[ChatTurn { role: "user".into(), content: user }], &params).await {
