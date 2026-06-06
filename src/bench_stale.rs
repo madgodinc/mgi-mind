@@ -1302,18 +1302,22 @@ async fn implicit_adjudicate(config: &MindConfig, client: &dyn LlmClient) -> Res
     for (i, (_, p, o, _)) in facts.iter().enumerate() {
         listing.push_str(&format!("{i}. user {p} = {o}\n"));
     }
-    let system = "You audit a user's memory for facts that have become stale. \
-        Given a chronological list of believed-current facts about one user, \
-        find EARLIER facts that a LATER fact makes LOGICALLY IMPOSSIBLE — using \
-        common-sense reasoning across different attributes. Mark an earlier fact \
-        stale ONLY when a later fact makes it genuinely impossible to still be \
-        true, e.g.: a dry/desert climate makes living in a famously rainy city \
-        impossible; high-altitude/thin-air makes a sea-level home impossible; a \
-        new city makes the old city impossible. BE CONSERVATIVE: if the two \
-        facts can both be true at once, or you are not sure they contradict, do \
-        NOT mark stale. Most pairs do NOT conflict. When in doubt, leave it. \
-        Output ONLY a JSON array of the integer indices of the earlier facts \
-        that are now impossible. If none, output [].";
+    let system = "You audit a user's memory for facts whose CURRENT-DEFAULT \
+        SAFETY a later fact has broken. Given a chronological list of \
+        believed-current facts about one user, mark an EARLIER fact stale only \
+        when a LATER fact breaks or replaces the PRACTICAL BASIS that earlier \
+        fact depends on — so it is no longer available, feasible, reachable, or \
+        compatible as the user's current default. Practical basis = access, \
+        availability, location, feasibility, continuity, arrangement, or status \
+        the old fact silently relied on. Examples: a new city breaks the old \
+        city's basis; a desert/dry climate breaks the basis of living in a rainy \
+        city; high-altitude breaks a sea-level home. \
+        Do NOT mark stale for mere topic overlap, two facts that can both be \
+        true at once, or general life change that doesn't break a specific \
+        basis. Ask: does the later fact make the earlier one no longer safe to \
+        assume as current? If you cannot name the broken basis, leave it. \
+        Output ONLY a JSON array of the integer indices of the now-unsafe \
+        earlier facts. If none, output [].";
     let user = format!("Facts (chronological):\n{listing}\nIndices of now-stale earlier facts:");
     let params = GenParams { temperature: Some(0.0), max_tokens: 64 };
     let raw = match client.generate(system, &[ChatTurn { role: "user".into(), content: user }], &params).await {

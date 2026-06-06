@@ -1081,6 +1081,9 @@ static AUTO_EXTRACT_TX: OnceCell<tokio::sync::mpsc::Sender<AutoExtractJob>> = On
 pub struct AutoExtractJob {
     pub config: crate::config::MindConfig,
     pub content: String,
+    /// Library + content identify the source memory deterministically, so each
+    /// extracted fact records which memory it came from (cross-silo link).
+    pub library: String,
 }
 
 /// Initialise the auto-extract worker if not yet running. Safe to call
@@ -1096,12 +1099,16 @@ fn ensure_auto_extract_worker() -> &'static tokio::sync::mpsc::Sender<AutoExtrac
                 let ec = ExtractConfig::default();
                 match extract_facts(&ec, &job.content).await {
                     Ok(triples) => {
+                        // Deterministic id of the source memory this chunk came
+                        // from — recorded on each fact for the link layer.
+                        let src = crate::storage::deterministic_id(&job.library, &job.content);
                         for t in triples {
-                            let _ = crate::knowledge::add_fact(
+                            let _ = crate::knowledge::add_fact_sourced(
                                 &job.config,
                                 &t.subject,
                                 &t.predicate,
                                 &t.object,
+                                Some(&src),
                             )
                             .await;
                         }
@@ -1120,11 +1127,12 @@ fn ensure_auto_extract_worker() -> &'static tokio::sync::mpsc::Sender<AutoExtrac
 /// fire-and-forget: returns immediately, drops the candidate if the
 /// queue is full (logs to stderr). Caller MUST hold no locks across
 /// this call.
-pub fn enqueue_auto_extract(config: &crate::config::MindConfig, content: &str) {
+pub fn enqueue_auto_extract(config: &crate::config::MindConfig, content: &str, library: &str) {
     let tx = ensure_auto_extract_worker();
     let job = AutoExtractJob {
         config: config.clone(),
         content: content.to_string(),
+        library: library.to_string(),
     };
     match tx.try_send(job) {
         Ok(()) => {}

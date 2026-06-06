@@ -173,7 +173,7 @@ pub async fn get_client(config: &MindConfig) -> Result<Arc<Qdrant>> {
         .cloned()
 }
 
-fn deterministic_id(library: &str, content: &str) -> String {
+pub(crate) fn deterministic_id(library: &str, content: &str) -> String {
     let key = format!("{library}\u{0}{content}");
     Uuid::new_v5(&MGI_NAMESPACE, key.as_bytes()).to_string()
 }

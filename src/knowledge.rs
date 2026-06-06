@@ -238,11 +238,26 @@ fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync
         .clone()
 }
 
+/// Backward-compatible entry: add a fact with no recorded source memory.
 pub async fn add_fact(
     config: &MindConfig,
     subject: &str,
     predicate: &str,
     object: &str,
+) -> Result<String> {
+    add_fact_sourced(config, subject, predicate, object, None).await
+}
+
+/// Add a fact AND remember which memory it was derived from (`source_memory_id`).
+/// This single edge is the foundation of the cross-silo link layer: it lets a
+/// fact going stale dim the memories it came from, and lets retrieval propagate
+/// validity from the KG into vector search. Legacy facts have `None`.
+pub async fn add_fact_sourced(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    source_memory_id: Option<&str>,
 ) -> Result<String> {
     // Post-critic (PR #5): acquire per-(subject, predicate) lock so
     // concurrent add_fact on the same axis cannot race the duel.
@@ -336,6 +351,11 @@ pub async fn add_fact(
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
     payload.insert("status".into(), status.as_str().into());
+    // Cross-silo link: which memory this fact was derived from (foundation of
+    // the link layer). Absent for legacy / direct-API facts.
+    if let Some(src) = source_memory_id {
+        payload.insert("source_memory_id".into(), src.into());
+    }
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);

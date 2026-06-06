@@ -305,7 +305,7 @@ pub async fn run_ingest(
                     // overflow rather than spawn unbounded futures.
                     #[cfg(feature = "extractor")]
                     if crate::extractor::is_llama_server_installed() {
-                        crate::extractor::enqueue_auto_extract(config, &content);
+                        crate::extractor::enqueue_auto_extract(config, &content, library);
                     }
                 }
             }

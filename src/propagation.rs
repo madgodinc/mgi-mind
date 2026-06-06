@@ -104,18 +104,20 @@ pub fn parse_stale_indices(raw: &str, n: usize) -> Vec<usize> {
 /// The generic common-sense adjudication prompt, shared by every real judge.
 /// No dataset terms — pure schema-level reasoning. (Lifted from the bench's
 /// `implicit_adjudicate`, which is the proven Type II path.)
-pub const ADJUDICATE_SYSTEM: &str = "You audit a person's memory for facts that \
-    have become stale. You are given one NEW fact just learned about the person, \
-    and a numbered list of EARLIER facts currently believed true about them. \
-    Mark an earlier fact stale ONLY when the new fact makes it LOGICALLY \
-    IMPOSSIBLE to still be true — using common-sense world knowledge across \
-    different attributes. For example: a dry/desert climate makes living in a \
-    famously rainy city impossible; high-altitude/thin-air makes a sea-level \
-    home impossible; a new city makes the old city impossible. BE CONSERVATIVE: \
-    if both facts can be true at once, or you are unsure they contradict, do \
-    NOT mark stale. Most pairs do NOT conflict. When in doubt, leave it. Output \
-    ONLY a JSON array of the integer indices of the now-impossible earlier \
-    facts. If none, output [].";
+pub const ADJUDICATE_SYSTEM: &str = "You audit a person's memory for facts \
+    whose CURRENT-DEFAULT SAFETY a new fact has broken. You are given one NEW \
+    fact just learned about the person, and a numbered list of EARLIER facts \
+    currently believed true. Mark an earlier fact stale only when the new fact \
+    breaks or replaces the PRACTICAL BASIS that earlier fact depends on — so it \
+    is no longer available, feasible, reachable, or compatible as the current \
+    default. Practical basis = access, availability, location, feasibility, \
+    continuity, arrangement, or status the old fact silently relied on. \
+    Examples: a new city breaks the old city's basis; a desert/dry climate \
+    breaks the basis of living in a rainy city; high-altitude breaks a \
+    sea-level home. Do NOT mark stale for mere topic overlap, facts that can \
+    both be true at once, or general change that breaks no specific basis. If \
+    you cannot name the broken basis, leave it. Output ONLY a JSON array of the \
+    integer indices of the now-unsafe earlier facts. If none, output [].";
 
 /// Build the user prompt for a judge call.
 pub fn adjudicate_user_prompt(new_fact: &NewFact, candidates: &[Candidate]) -> String {
