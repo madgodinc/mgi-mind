@@ -63,6 +63,11 @@ pub struct MindConfig {
     /// Off by default — opt-in until validated against retrieval recall.
     #[serde(default)]
     pub staleness_aware_search: bool,
+    /// Type II (cross-predicate) belief revision on the write path: after a new
+    /// fact lands, an adjudicator marks earlier facts whose practical basis it
+    /// broke as PropagationShadowed. Off by default — adds an LLM call per add.
+    #[serde(default)]
+    pub propagation_enabled: bool,
     /// v1.5 Phase 6: install profile selecting per-mode confidence-score
     /// anchors. Default `chat-only` matches the legacy single-user behaviour
     /// — existing configs that pre-date v1.5 deserialise unchanged.
@@ -99,6 +104,7 @@ impl Default for MindConfig {
             rerank_model: default_rerank_model(),
             rerank_top_k: default_rerank_top_k(),
             staleness_aware_search: false,
+            propagation_enabled: false,
             install_mode: crate::install_mode::InstallMode::default(),
         }
     }

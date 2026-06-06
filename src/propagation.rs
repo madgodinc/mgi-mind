@@ -44,7 +44,7 @@ pub struct NewFact {
 /// indices (into `candidates`) of facts that are now contradicted. Pluggable so
 /// the core is LLM-free testable and prod/bench can swap the model.
 #[async_trait::async_trait]
-pub trait PropagationJudge {
+pub trait PropagationJudge: Send + Sync {
     async fn judge(&self, subject: &str, new_fact: &NewFact, candidates: &[Candidate]) -> Vec<usize>;
 }
 

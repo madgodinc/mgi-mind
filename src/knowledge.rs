@@ -379,6 +379,26 @@ pub async fn add_fact_sourced(
         crate::duel::dampen_loser(config, &loser_id).await?;
     }
 
+    // Type II (cross-predicate) belief revision. The same-axis duel above only
+    // resolves conflicts on THIS (subject, predicate). A new fact can also make
+    // facts on OTHER axes stale via common sense (climate=arid shadows
+    // located_in=portland). Release this axis's lock first — the adjudicator
+    // writes other axes (other locks) and may call the local LLM; holding this
+    // lock across that would serialize all writes on the subject.
+    #[cfg(feature = "extractor")]
+    if config.propagation_enabled {
+        drop(_guard);
+        let judge = crate::propagation::LocalExtractorJudge {
+            config: crate::extractor::ExtractConfig::default(),
+        };
+        let nf = crate::propagation::NewFact {
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+        };
+        // Best-effort: never fail the add on an adjudication hiccup.
+        let _ = crate::propagation::adjudicate_propagation(config, subject, &nf, &judge).await;
+    }
+
     Ok(id)
 }
 
