@@ -1228,6 +1228,25 @@ pub async fn extract_facts(config: &ExtractConfig, text: &str) -> anyhow::Result
     .await
 }
 
+/// Cross-predicate staleness adjudication via the local model (Type II / J_theta).
+/// Sends a system+user prompt to the same llama-server used for extraction and
+/// returns the raw completion text (caller parses the JSON index array). Reuses
+/// the extraction semaphore + warm server so no extra process is spawned.
+pub async fn adjudicate_stale(
+    config: &ExtractConfig,
+    system: &str,
+    user: &str,
+) -> anyhow::Result<String> {
+    let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
+    let _permit = sem.acquire().await?;
+    let (port, api_key) = ensure_server(config.variant).await?;
+    // Granite chat template; instruction-style single turn.
+    let prompt = format!(
+        "<|system|>\n{system}\n<|user|>\n{user}\n<|assistant|>\n"
+    );
+    call_completion(port, &api_key, &prompt, config).await
+}
+
 /// Pure retry-with-repair loop, parameterised on the completion call.
 /// Lifted out of `extract_facts` so unit tests can inject a stub
 /// completion and verify the (good, bad+good, bad+bad) branches

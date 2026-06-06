@@ -1327,7 +1327,9 @@ async fn implicit_adjudicate(config: &MindConfig, client: &dyn LlmClient) -> Res
     for i in idxs {
         if let Some((id, p, o, _)) = facts.get(i) {
             if !id.is_empty() {
-                let _ = crate::duel::mark_superseded(config, id).await;
+                // Type II loss → PropagationShadowed (cross-predicate), the core
+                // mechanism — NOT Superseded (which is a same-axis temporal end).
+                let _ = crate::duel::shadow_fact(config, id).await;
                 if std::env::var("STALE_DEBUG").is_ok() {
                     eprintln!("    [adjudicate-stale] {p} = {o}");
                 }

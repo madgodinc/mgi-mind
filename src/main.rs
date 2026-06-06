@@ -24,6 +24,7 @@ mod md_reconcile;
 mod migrate_v14;
 mod outcome;
 mod procedure;
+mod propagation;
 mod provenance;
 mod qa_judge;
 mod relevance;

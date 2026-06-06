@@ -389,6 +389,7 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         should: vec![
             Condition::matches_text("subject", query),
@@ -613,6 +614,7 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         ..Default::default()
     };
@@ -693,7 +695,10 @@ pub async fn list_top_dependants_facts(
     // ranking should reflect post-duel canonical facts, not entombed losers.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
-        must_not: vec![Condition::matches("status", "stale".to_string())],
+        must_not: vec![
+            Condition::matches("status", "stale".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
+        ],
         ..Default::default()
     };
 
@@ -799,6 +804,7 @@ pub async fn find_facts_by_subject_predicate(
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         ..Default::default()
     };
