@@ -1,6 +1,20 @@
 use anyhow::{Context, Result};
 use once_cell::sync::OnceCell;
 use ort::session::Session;
+#[allow(unused_imports)]
+use crate::hardware;
+
+/// Whether the embedder should use the GPU: MGIMIND_USE_CUDA=1 forces it;
+/// otherwise the hardware profile decides (Balanced/Max = GPU, Light = CPU).
+#[cfg(feature = "cuda")]
+fn embedder_wants_gpu() -> bool {
+    if let Ok(v) = std::env::var("MGIMIND_USE_CUDA") {
+        return v == "1";
+    }
+    crate::config::MindConfig::load()
+        .map(|c| hardware::active(c.hardware_profile).resolve().embedder_on_gpu)
+        .unwrap_or(false)
+}
 use ort::value::Value;
 use std::path::Path;
 use std::sync::Mutex;
@@ -43,7 +57,7 @@ fn session(config: &MindConfig) -> Result<&'static Mutex<Session>> {
         // execution-provider call is only compiled in when the `cuda` cargo
         // feature is enabled (see Cargo.toml + Dockerfile).
         #[cfg(feature = "cuda")]
-        if std::env::var("MGIMIND_USE_CUDA").ok().as_deref() == Some("1") {
+        if embedder_wants_gpu() {
             use ort::execution_providers::CUDAExecutionProvider;
             builder = builder
                 .with_execution_providers([CUDAExecutionProvider::default().build()])

@@ -2,8 +2,7 @@
 
 This document accounts for **every** item in the security/quality audit (27 issues
 across Parts I-III, plus the Part II competitive roadmap). Each row is either
-**fixed in v0.2** (with where) or **deferred to v0.3** (with why). Nothing is
-silently dropped.
+**fixed in v0.2** (with where) or **deferred to v0.3** (with why).
 
 Legend: ✅ done in v0.2 · 🟡 partial (mechanism in place, hardening continues) · 🔜 deferred to v0.3 (with rationale)
 

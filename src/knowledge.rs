@@ -238,11 +238,26 @@ fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync
         .clone()
 }
 
+/// Backward-compatible entry: add a fact with no recorded source memory.
 pub async fn add_fact(
     config: &MindConfig,
     subject: &str,
     predicate: &str,
     object: &str,
+) -> Result<String> {
+    add_fact_sourced(config, subject, predicate, object, None).await
+}
+
+/// Add a fact AND remember which memory it was derived from (`source_memory_id`).
+/// This single edge is the foundation of the cross-silo link layer: it lets a
+/// fact going stale dim the memories it came from, and lets retrieval propagate
+/// validity from the KG into vector search. Legacy facts have `None`.
+pub async fn add_fact_sourced(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    source_memory_id: Option<&str>,
 ) -> Result<String> {
     // Post-critic (PR #5): acquire per-(subject, predicate) lock so
     // concurrent add_fact on the same axis cannot race the duel.
@@ -336,6 +351,11 @@ pub async fn add_fact(
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
     payload.insert("status".into(), status.as_str().into());
+    // Cross-silo link: which memory this fact was derived from (foundation of
+    // the link layer). Absent for legacy / direct-API facts.
+    if let Some(src) = source_memory_id {
+        payload.insert("source_memory_id".into(), src.into());
+    }
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
@@ -357,6 +377,26 @@ pub async fn add_fact(
     // dampened but the winner isn't yet recorded.
     if let Some(loser_id) = loser_to_dampen {
         crate::duel::dampen_loser(config, &loser_id).await?;
+    }
+
+    // Type II (cross-predicate) belief revision. The same-axis duel above only
+    // resolves conflicts on THIS (subject, predicate). A new fact can also make
+    // facts on OTHER axes stale via common sense (climate=arid shadows
+    // located_in=portland). Release this axis's lock first — the adjudicator
+    // writes other axes (other locks) and may call the local LLM; holding this
+    // lock across that would serialize all writes on the subject.
+    #[cfg(feature = "extractor")]
+    if config.propagation_enabled {
+        drop(_guard);
+        let judge = crate::propagation::LocalExtractorJudge {
+            config: crate::extractor::ExtractConfig::default(),
+        };
+        let nf = crate::propagation::NewFact {
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+        };
+        // Best-effort: never fail the add on an adjudication hiccup.
+        let _ = crate::propagation::adjudicate_propagation(config, subject, &nf, &judge).await;
     }
 
     Ok(id)
@@ -389,6 +429,7 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         should: vec![
             Condition::matches_text("subject", query),
@@ -442,6 +483,125 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
     }
 
     Ok(facts)
+}
+
+/// Link layer: the set of `source_memory_id`s whose derived facts have gone
+/// stale/superseded/propagation-shadowed. Vector search uses this to depress
+/// memories whose extracted knowledge is no longer current — the cross-silo
+/// staleness signal. Empty set if the facts collection is absent.
+pub async fn stale_source_memory_ids(
+    config: &MindConfig,
+) -> Result<std::collections::HashSet<String>> {
+    use qdrant_client::qdrant::value::Kind;
+    let mut out = std::collections::HashSet::new();
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(out);
+    }
+    let filter = Filter {
+        must_not: vec![Condition::matches("status", "active".to_string())],
+        ..Default::default()
+    };
+    let mut offset = None;
+    loop {
+        let mut b = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            b = b.offset(o);
+        }
+        let resp = client.scroll(b).await?;
+        for point in &resp.result {
+            let status = point
+                .payload
+                .get("status")
+                .and_then(|v| match &v.kind {
+                    Some(Kind::StringValue(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            if status.is_empty() || status == "active" {
+                continue;
+            }
+            if let Some(Kind::StringValue(src)) = point
+                .payload
+                .get("source_memory_id")
+                .and_then(|v| v.kind.as_ref())
+            {
+                if !src.is_empty() {
+                    out.insert(src.clone());
+                }
+            }
+        }
+        match resp.next_page_offset {
+            Some(o) => offset = Some(o),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Ids of all non-active (retired) facts: stale / superseded / shadowed.
+/// Feeds the link-index spreading walk in retrieval.
+pub async fn retired_fact_ids(config: &MindConfig) -> Result<Vec<String>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let filter = Filter {
+        must_not: vec![Condition::matches("status", "active".to_string())],
+        ..Default::default()
+    };
+    let mut ids = Vec::new();
+    let mut offset = None;
+    loop {
+        let mut b = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            b = b.offset(o);
+        }
+        let resp = client.scroll(b).await?;
+        for p in &resp.result {
+            let status = p
+                .payload
+                .get("status")
+                .and_then(|v| match &v.kind {
+                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            if status.is_empty() || status == "active" {
+                continue;
+            }
+            if let Some(pid) = &p.id {
+                match &pid.point_id_options {
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => {
+                        ids.push(u.clone())
+                    }
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => {
+                        ids.push(n.to_string())
+                    }
+                    None => {}
+                }
+            }
+        }
+        match resp.next_page_offset {
+            Some(o) => offset = Some(o),
+            None => break,
+        }
+    }
+    Ok(ids)
 }
 
 /// Soft-delete: mark a fact `valid = false` instead of physically removing it,
@@ -613,6 +773,7 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         ..Default::default()
     };
@@ -693,7 +854,10 @@ pub async fn list_top_dependants_facts(
     // ranking should reflect post-duel canonical facts, not entombed losers.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
-        must_not: vec![Condition::matches("status", "stale".to_string())],
+        must_not: vec![
+            Condition::matches("status", "stale".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
+        ],
         ..Default::default()
     };
 
@@ -799,6 +963,7 @@ pub async fn find_facts_by_subject_predicate(
         must_not: vec![
             Condition::matches("status", "stale".to_string()),
             Condition::matches("status", "superseded".to_string()),
+            Condition::matches("status", "propagation_shadowed".to_string()),
         ],
         ..Default::default()
     };

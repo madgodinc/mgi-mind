@@ -1,10 +1,10 @@
 # Security policy
 
 mgi-mind is a local-first memory layer. By design nothing leaves the
-box — no cloud account, no API key, no telemetry. That's also the
-threat model: a local attacker reading memory contents from disk,
-intercepting MCP traffic on localhost, or feeding malicious input
-through the extractor.
+box: no cloud account, no API key, no telemetry. That shapes the
+threat model. The attacker is local, reading memory contents from
+disk, intercepting MCP traffic on localhost, or feeding malicious
+input through the extractor.
 
 ## Supported versions
 
@@ -19,20 +19,20 @@ versions are not patched.
 
 The version drops out of support when 1.7.0 ships and 1.5.x has had
 at least one minor of grace. If you have a 1.4.x-or-earlier vault
-that needs migrating, open an Issue — there's a path even though
-the build itself is unsupported.
+that needs migrating, open an Issue. There's a migration path even
+though the build itself is unsupported.
 
 ## Reporting
 
 Send vulnerability reports to **the email in the
 [@madgodinc GitHub profile](https://github.com/madgodinc)**.
-That's the only private channel — DMs on social networks are not
+That's the only private channel. DMs on social networks are not
 monitored for security.
 
 Please include:
 
 - mgi-mind version (`mgimind --version`).
-- A reproduction. The smallest sequence of CLI commands or MCP calls
+- A reproduction: the smallest sequence of CLI commands or MCP calls
   that surfaces the issue.
 - What you observed and what you expected.
 - Whether you've reported it elsewhere or intend to.
@@ -68,11 +68,11 @@ Out of scope:
 - **Reading memory contents with shell access.** mgi-mind data lives
   in `~/mgimind/` with default user file modes. A local attacker
   with your shell is past the security boundary.
-- **Browser-based attacks against the viewer.** The viewer is
-  `mgimind viewer` — a localhost-only HTTP server with no auth by
+- **Browser-based attacks against the viewer.** The viewer
+  (`mgimind viewer`) is a localhost-only HTTP server with no auth by
   design (local-first). Cross-site scripting via memory content
-  injected into the viewer is interesting only if it escalates;
-  please report if so.
+  injected into the viewer matters only if it escalates; report it
+  if it does.
 - **MCP client misbehaviour.** If Claude Code (or any MCP client)
   passes malicious arguments to a tool, that's a client-side issue.
   mgi-mind validates schema at the boundary; report failures of

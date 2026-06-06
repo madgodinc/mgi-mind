@@ -28,6 +28,10 @@ pub const FACTS_COLLECTION: &str = "_kg_facts";
 /// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
 /// Lazily created on first cardinality registration; absent predicate = Multi.
 pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
+/// Cross-silo link index (vectorless): edges between memories, facts, and
+/// procedures (DerivedFrom, Supersedes, SharedEntity). The connective tissue
+/// that lets one silo's change propagate to another.
+pub const LINKS_COLLECTION: &str = "_links";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -173,7 +177,7 @@ pub async fn get_client(config: &MindConfig) -> Result<Arc<Qdrant>> {
         .cloned()
 }
 
-fn deterministic_id(library: &str, content: &str) -> String {
+pub(crate) fn deterministic_id(library: &str, content: &str) -> String {
     let key = format!("{library}\u{0}{content}");
     Uuid::new_v5(&MGI_NAMESPACE, key.as_bytes()).to_string()
 }
@@ -1436,6 +1440,37 @@ pub async fn search(
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+        }
+    }
+
+    // Link layer (opt-in): depress memories whose derived facts went stale, so
+    // the KG's belief revision is felt by vector search. A memory that produced
+    // a now-superseded fact sinks below fresh ones. Best-effort: a lookup error
+    // leaves ranking untouched (never a hard dependency on the read path).
+    if config.staleness_aware_search {
+        if let Ok(mut stale_srcs) = crate::knowledge::stale_source_memory_ids(config).await {
+            // Also walk the link index (DerivedFrom edges) if it's been built —
+            // catches edges the direct scan can't see (e.g. once procedures link
+            // in). Union of both sources of "memory behind a retired fact".
+            if let Ok(retired_fact_ids) = crate::knowledge::retired_fact_ids(config).await {
+                if let Ok(linked) =
+                    crate::links::memories_of_facts(config, &retired_fact_ids).await
+                {
+                    stale_srcs.extend(linked);
+                }
+            }
+            if !stale_srcs.is_empty() {
+                for c in &mut cands {
+                    if stale_srcs.contains(&c.id) {
+                        c.score *= 0.3; // strong depression; keeps it findable, not top
+                    }
+                }
+                cands.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
         }
     }
 

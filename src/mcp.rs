@@ -296,6 +296,55 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let results = crate::storage::search(cfg, query, library, limit, tier).await?;
             Ok(crate::cli::render_search(&results))
         }
+        "mind_recall_all" => {
+            // Unified cross-silo recall (the two-coordinator payoff): the
+            // retrieval coordinator fuses the memory coordinator's whole-silo
+            // view and biases by validity (stale sinks), then we append
+            // procedures. One call instead of four separate tools.
+            let cfg = warm(true)?;
+            let query = arg_str(args, "query")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
+            let limit = arg_u64(args, "limit", 5) as usize;
+            let mut out = String::new();
+
+            let memory = crate::universal::DefaultMemoryCoordinator;
+            let retrieval = crate::universal::DefaultRetrievalCoordinator;
+            use crate::universal::{MemoryKind, RetrievalCoordinator, Validity};
+            if let Ok(items) = retrieval.search(cfg, query, limit * 2, &memory).await {
+                let facts: Vec<_> = items.iter().filter(|i| i.kind == MemoryKind::Fact).take(limit).collect();
+                let mems: Vec<_> = items.iter().filter(|i| i.kind == MemoryKind::Memory).take(limit).collect();
+                if !facts.is_empty() {
+                    out.push_str("## Facts (current)\n");
+                    for f in facts {
+                        out.push_str(&format!("- {}\n", f.text));
+                    }
+                    out.push('\n');
+                }
+                if !mems.is_empty() {
+                    out.push_str("## Memories\n");
+                    for m in mems {
+                        let tag = if m.validity == Validity::Active { "" } else { " [stale]" };
+                        out.push_str(&format!("- {}{}\n", m.text, tag));
+                    }
+                    out.push('\n');
+                }
+            }
+
+            // Procedures (error->fix lessons), if any match by context.
+            if let Ok(procs) = crate::procedure::recall(cfg, None, Some(query), limit).await {
+                let trimmed = procs.trim();
+                if !trimmed.is_empty() && !trimmed.to_lowercase().contains("no ") {
+                    out.push_str("## Procedures\n");
+                    out.push_str(trimmed);
+                    out.push('\n');
+                }
+            }
+
+            if out.is_empty() {
+                out.push_str("(nothing found across memories, facts, or procedures)");
+            }
+            Ok(out)
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -850,6 +899,18 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_recall_all",
+            "description": "Unified recall across ALL memory types at once (memories + facts + procedures), staleness-aware. One call instead of separate searches; current facts shown first, stale memories sink.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to recall everything about" },
+                    "limit": { "type": "number", "default": 5, "description": "Max per type" }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "mind_add",
             "description": "Add a memory entry",
             "inputSchema": {
@@ -1325,8 +1386,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            37,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) = 37"
+            38,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 link-layer (mind_recall_all) = 38"
         );
         let deprecated = tools
             .iter()
@@ -1338,8 +1399,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 22,
-            "non-deprecated surface is 22 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome)"
+            live_surface, 23,
+            "non-deprecated surface is 23 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all)"
         );
     }
 
@@ -1454,7 +1515,7 @@ mod tests {
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 37);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 38);
     }
 
     #[tokio::test]

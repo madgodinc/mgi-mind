@@ -410,6 +410,25 @@ pub async fn dampen_loser(config: &MindConfig, fact_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Type II shadow: mark a fact PropagationShadowed because a NEW fact on a
+/// DIFFERENT (subject,predicate) axis made it no longer true (cross-predicate
+/// belief revision, e.g. local_climate=arid shadows located_in=portland). Same
+/// shape as dampen_loser but a distinct status so audit/history can tell a
+/// Type I duel loss from a Type II propagation. The fact is NOT deleted
+/// (valid kept) — only hidden from default queries and from re-dueling.
+pub async fn shadow_fact(config: &MindConfig, fact_id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::knowledge::set_fact_payload_field(
+        config,
+        fact_id,
+        "status",
+        EntryStatus::PropagationShadowed.as_str().to_string(),
+    )
+    .await?;
+    crate::knowledge::set_fact_payload_field(config, fact_id, "valid_until", now).await?;
+    Ok(())
+}
+
 /// v1.7 (#111 follow-up): mark a TemporalSingle chain entry as superseded.
 /// Like `dampen_loser` it sets `valid_until` and hides the fact from default
 /// queries, but uses a distinct status so audit / history tools can tell
