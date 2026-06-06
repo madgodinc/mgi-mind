@@ -506,26 +506,41 @@ async fn wipe_and_seed(config: &MindConfig) -> Result<()> {
     // value that can change). Things you can have many of at once = Multi.
     // owns is Multi: you can own a typewriter AND vinyl AND coins — they must
     // NOT supersede each other. Predicate names match normalize_predicate.
+    // Cardinality per cartographer-schema slot (workflow wga5j1mgy). Names MUST
+    // match default_slots() predicates or the duel can't fire on that axis.
     for (pred, card) in [
-        ("located_in", Cardinality::TemporalSingle),
-        ("work_arrangement", Cardinality::TemporalSingle),
-        ("works_at", Cardinality::TemporalSingle),
-        ("works_as", Cardinality::TemporalSingle),
-        ("local_climate", Cardinality::TemporalSingle),
+        // single current value that can change over time -> TemporalSingle
+        ("age_or_life_stage", Cardinality::TemporalSingle),
+        ("religious_or_spiritual_affiliation", Cardinality::TemporalSingle),
+        ("current_residence_location", Cardinality::TemporalSingle),
+        ("region_or_climate", Cardinality::TemporalSingle),
         ("housing_type", Cardinality::TemporalSingle),
+        ("household_composition", Cardinality::TemporalSingle),
+        ("employment_status", Cardinality::TemporalSingle),
+        ("occupation_or_role", Cardinality::TemporalSingle),
+        ("employer_or_organization", Cardinality::TemporalSingle),
+        ("work_arrangement", Cardinality::TemporalSingle),
+        ("work_schedule", Cardinality::TemporalSingle),
+        ("education_level", Cardinality::TemporalSingle),
+        ("current_enrollment", Cardinality::TemporalSingle),
+        ("income_stability", Cardinality::TemporalSingle),
+        ("mobility_status", Cardinality::TemporalSingle),
+        ("fitness_routine", Cardinality::TemporalSingle),
         ("relationship_status", Cardinality::TemporalSingle),
         ("has_children", Cardinality::TemporalSingle),
-        ("diet", Cardinality::TemporalSingle),
-        ("primary_transport", Cardinality::TemporalSingle),
+        ("social_engagement_level", Cardinality::TemporalSingle),
+        ("primary_transport_mode", Cardinality::TemporalSingle),
         ("primary_device", Cardinality::TemporalSingle),
-        ("religion", Cardinality::TemporalSingle),
-        ("schedule", Cardinality::TemporalSingle),
-        ("commute_distance", Cardinality::TemporalSingle),
-        ("activity_level", Cardinality::TemporalSingle),
-        ("altitude", Cardinality::TemporalSingle),
-        // Multi — many can be true at once; never duel/supersede:
-        ("owns", Cardinality::Multi),
-        ("health_condition", Cardinality::Multi),
+        ("preparedness", Cardinality::TemporalSingle),
+        // many can hold at once -> Multi (never supersede each other)
+        ("languages_spoken", Cardinality::Multi),
+        ("assets_owned", Cardinality::Multi),
+        ("chronic_condition", Cardinality::Multi),
+        ("dietary_pattern", Cardinality::Multi),
+        ("caregiving_role", Cardinality::Multi),
+        ("hobbies_and_leisure", Cardinality::Multi),
+        ("goals_and_aspirations", Cardinality::Multi),
+        ("pet_owned", Cardinality::Multi),
         ("observation", Cardinality::Multi),
     ] {
         knowledge::register_cardinality(config, pred, card).await?;
@@ -1026,6 +1041,17 @@ async fn ingest_haystack(
                 }
                 continue;
             }
+            // Taxi / slot-filling extractor (STALE_SLOT_EXTRACT=1): the schema
+            // asks narrow per-slot questions; the model only answers. Lets a
+            // small/fast local model extract cleanly without "understanding" the
+            // whole chunk.
+            if matches!(std::env::var("STALE_SLOT_EXTRACT").as_deref(), Ok("1") | Ok("true")) {
+                match crate::extractor::extract_facts_slots(extract_cfg, &chunk).await {
+                    Ok(mut t) => triples.append(&mut t),
+                    Err(e) => eprintln!("  [ingest] slot-extract failed: {e:#}"),
+                }
+                continue;
+            }
             match crate::extractor::extract_facts(extract_cfg, &chunk).await {
                 Ok(mut t) => triples.append(&mut t),
                 Err(e) => {
@@ -1147,7 +1173,6 @@ async fn duel_fired(config: &MindConfig) -> Result<bool> {
     // junk axis (e.g. user/wants_to_pay_off) from masking the real location
     // conflict silently failing. The axis key is "subject\0predicate".
     // (Critic catch, 2026-06-05.)
-    const SEEDED: &[&str] = &["located_in", "works_at", "works_as", "owns"];
     let dyn_on = dynaxis_on();
     Ok(axes.iter().any(|(axis, &(active, stale))| {
         active
@@ -1156,7 +1181,7 @@ async fn duel_fired(config: &MindConfig) -> Result<bool> {
                 || axis
                     .split('\u{0}')
                     .nth(1)
-                    .map(|pred| SEEDED.contains(&pred))
+                    .map(is_seeded_axis)
                     .unwrap_or(false))
     }))
 }
@@ -1173,7 +1198,14 @@ async fn duel_fired(config: &MindConfig) -> Result<bool> {
 /// "memory broken." (File-judge rehearsal caught this on the first prompt,
 /// 2026-06-05.) STALE scenarios are all about the user, so the user's live
 /// facts ARE the relevant memory.
-const SEEDED_AXES: &[&str] = &["located_in", "works_at", "works_as", "owns"];
+/// The seeded user-state axes = the cartographer schema's slot predicates
+/// (default_slots). Derived from the schema so retrieval/duel-diagnostic always
+/// match the extractor's predicates — not a stale hardcoded list.
+fn is_seeded_axis(predicate: &str) -> bool {
+    crate::extractor::default_slots()
+        .iter()
+        .any(|s| s.predicate == predicate)
+}
 
 /// Whether to surface superseded facts as labeled history (env STALE_HISTORY=1,
 /// default ON). This is the CUPMem-style "current + labeled-stale" memory shape:
@@ -1222,7 +1254,7 @@ async fn axis_facts(config: &MindConfig) -> Result<(Vec<(String, String)>, Vec<(
             // answers — never show them to the answerer.
             if !subject.eq_ignore_ascii_case("user")
                 || predicate == "observation"
-                || (!dynaxis_on() && !SEEDED_AXES.contains(&predicate.as_str()))
+                || (!dynaxis_on() && !is_seeded_axis(&predicate))
             {
                 continue;
             }
@@ -1353,7 +1385,7 @@ async fn retrieve_context(config: &MindConfig, _query: &str) -> Result<String> {
         let facts = knowledge::query_facts(config, "user").await.unwrap_or_default();
         let user_facts: Vec<&knowledge::Fact> = facts
             .iter()
-            .filter(|f| f.subject.eq_ignore_ascii_case("user") && SEEDED_AXES.contains(&f.predicate.as_str()))
+            .filter(|f| f.subject.eq_ignore_ascii_case("user") && is_seeded_axis(&f.predicate))
             .collect();
         if user_facts.is_empty() {
             return Ok("(no relevant memory found)".to_string());
@@ -1447,6 +1479,48 @@ fn baseline_mode() -> bool {
 }
 
 /// Ask the answerer LLM a single probe and return its text answer.
+/// Whether the active premise-verifier runs (env STALE_PREMISE_VERIFY=1). This
+/// is CUPMem's PR mechanism: before answering, an explicit check decides whether
+/// the query PRESUPPOSES a value the memory has marked superseded; if so the
+/// answerer gets a hard directive to reject that premise. Passive "treat
+/// superseded as no-longer-true" hints leave PR low; an explicit verdict lifts
+/// it (their PR ~78 vs our ~34). Only meaningful for the Path-B (memory) run,
+/// not the raw-haystack baseline.
+fn premise_verify_on() -> bool {
+    matches!(std::env::var("STALE_PREMISE_VERIFY").as_deref(), Ok("1") | Ok("true"))
+}
+
+/// Ask the LLM whether `query` is built on a presupposition that the retrieved
+/// memory contradicts (a superseded value). Returns Some(corrective directive)
+/// when the premise is outdated, else None. Schema-level, no dataset answers.
+async fn verify_premise(
+    client: &dyn LlmClient,
+    retrieved: &str,
+    query: &str,
+) -> Option<String> {
+    // No superseded section -> nothing to resist.
+    if !retrieved.contains("Superseded") {
+        return None;
+    }
+    let system = "You check whether a question is built on a FALSE PREMISE — a \
+        presupposition that contradicts the user's current state. You are given \
+        the user's memory (split into Current state and Superseded/no-longer-true \
+        facts) and a question. Answer ONLY \"OUTDATED\" if the question assumes a \
+        value that appears under Superseded (or contradicts Current), otherwise \
+        \"OK\".";
+    let user = format!("[Memory]\n{retrieved}\n\n[Question]\n{query}\n\nVerdict (OUTDATED or OK):");
+    let params = GenParams { temperature: Some(0.0), max_tokens: 4 };
+    match client.generate(system, &[ChatTurn { role: "user".into(), content: user }], &params).await {
+        Ok(r) if r.trim().to_ascii_uppercase().starts_with("OUTDATED") => Some(
+            "IMPORTANT: the question relies on a premise that is NO LONGER TRUE \
+             (it matches a Superseded fact). Do not accept that premise — \
+             explicitly note it has changed and answer using the Current state."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 async fn answer_probe(
     answerer: &dyn LlmClient,
     config: &MindConfig,
@@ -1460,7 +1534,14 @@ async fn answer_probe(
     } else {
         retrieve_context(config, query).await?
     };
-    let (system, turns) = answerer_prompt(&retrieved, query, is_dim3);
+    let (mut system, turns) = answerer_prompt(&retrieved, query, is_dim3);
+    // Active premise-verifier (Path-B only): if the query rests on a superseded
+    // premise, inject a hard corrective directive into the system prompt.
+    if premise_verify_on() && !baseline_mode() {
+        if let Some(directive) = verify_premise(answerer, &retrieved, query).await {
+            system = format!("{system} {directive}");
+        }
+    }
     let params = GenParams { temperature: Some(0.0), max_tokens: 1024 };
     answerer.generate(&system, &turns, &params).await
 }

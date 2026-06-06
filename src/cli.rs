@@ -887,8 +887,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                     };
                     (mk(), mk())
                 } else {
+                    // Answerer may be a Gemini model (backbone starts with
+                    // "gemini") so a fully-local extract + Gemini answerer/judge
+                    // run avoids OpenAI entirely (useful when OpenAI RPD is spent
+                    // or for the all-local product story).
+                    let answerer: Box<dyn LlmClient> = if backbone.starts_with("gemini") {
+                        Box::new(GeminiClient::from_env(&backbone)?)
+                    } else {
+                        Box::new(OpenAiClient::from_env(&backbone)?)
+                    };
                     (
-                        Box::new(OpenAiClient::from_env(&backbone)?),
+                        answerer,
                         Box::new(GeminiClient::from_env(&judge)?.json_mode(true)),
                     )
                 };

@@ -1253,6 +1253,197 @@ pub async fn extract_facts(config: &ExtractConfig, text: &str) -> anyhow::Result
     .await
 }
 
+/// A durable-state slot the "taxi" extractor fills: a predicate + a narrow
+/// question + a one-word/short answer rule. The model never decides WHAT to
+/// extract — the schema asks, the model only answers and forgets. Intelligence
+/// lives in the schema (the map), not the model (the driver).
+pub struct Slot {
+    pub domain: &'static str,
+    pub predicate: &'static str,
+    pub question: &'static str,
+}
+
+/// The fixed life-domains (the "districts" of the map). The navigator picks
+/// which districts a chunk touches; only those districts' slots are then filled.
+pub fn all_domains() -> &'static [&'static str] {
+    &[
+        "core_identity_and_demographics",
+        "physical_living_situation",
+        "work_and_livelihood",
+        "education_and_qualifications",
+        "finances",
+        "body_and_health",
+        "relationships_and_social_life",
+        "interests_and_preferences",
+        "daily_logistics_and_possessions",
+    ]
+}
+
+/// The fixed slot map. Narrow questions a small model can answer reliably even
+/// when it cannot "understand" a whole conversation. Includes implicit-cue slots
+/// (climate, altitude) so a weak model can still surface propagated state.
+/// The fixed slot map — built by the multi-agent "cartographers" workflow from a
+/// general model of a person, INDEPENDENT of any benchmark (STALE validity:
+/// fixed before evaluation). 9 domains. Questions describe the axis only, with
+/// no dataset-specific answer hints; the model may infer from indirect cues.
+pub fn default_slots() -> &'static [Slot] {
+    &[
+        // core_identity_and_demographics
+        Slot { domain: "core_identity_and_demographics", predicate: "age_or_life_stage", question: "What is the person's age or general life stage? Answer short, or NONE." },
+        Slot { domain: "core_identity_and_demographics", predicate: "languages_spoken", question: "Which languages does the person speak? Answer language(s), or NONE." },
+        Slot { domain: "core_identity_and_demographics", predicate: "religious_or_spiritual_affiliation", question: "What is the person's religious or spiritual affiliation, if any (as shown by their practices or statements)? Answer one word, or NONE." },
+        // physical_living_situation
+        Slot { domain: "physical_living_situation", predicate: "current_residence_location", question: "In what city, town, or place does the person currently live? Answer the place, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "region_or_climate", question: "What is the region or climate where the person lives (e.g. arid, humid, coastal, high-altitude)? You may infer from indirect environmental signs. Answer short, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "housing_type", question: "What kind of dwelling does the person occupy (apartment, house, etc.)? Answer one word, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "household_composition", question: "Who does the person live with? Answer short, or NONE." },
+        // work_and_livelihood
+        Slot { domain: "work_and_livelihood", predicate: "employment_status", question: "What is the person's overall relationship to paid work (employed, self-employed, contractor, unemployed, retired, student)? Answer short, or NONE." },
+        Slot { domain: "work_and_livelihood", predicate: "occupation_or_role", question: "What is the person's current job title or primary role? Answer a short title, or NONE." },
+        Slot { domain: "work_and_livelihood", predicate: "employer_or_organization", question: "What employer or organization does the person work for? Answer the name, or NONE." },
+        Slot { domain: "work_and_livelihood", predicate: "work_arrangement", question: "Where and how is the person's work performed (remote, on-site, hybrid)? Answer short, or NONE." },
+        Slot { domain: "work_and_livelihood", predicate: "work_schedule", question: "What is the person's recurring working hours or schedule pattern? Answer short, or NONE." },
+        // education_and_qualifications
+        Slot { domain: "education_and_qualifications", predicate: "education_level", question: "What is the person's highest completed education level? Answer short, or NONE." },
+        Slot { domain: "education_and_qualifications", predicate: "current_enrollment", question: "Is the person currently enrolled in any education or training? Answer short, or NONE." },
+        // finances
+        Slot { domain: "finances", predicate: "income_stability", question: "What is the durable character of the person's earnings/income stability? Answer short, or NONE." },
+        Slot { domain: "finances", predicate: "assets_owned", question: "What significant financial assets or property does the person hold? Answer short, or NONE." },
+        // body_and_health
+        Slot { domain: "body_and_health", predicate: "chronic_condition", question: "What ongoing health condition or disability does the person live with? Answer short, or NONE." },
+        Slot { domain: "body_and_health", predicate: "mobility_status", question: "What is the person's baseline physical mobility/functional capacity? Answer short, or NONE." },
+        Slot { domain: "body_and_health", predicate: "dietary_pattern", question: "What is the person's habitual diet or dietary restriction? Answer short, or NONE." },
+        Slot { domain: "body_and_health", predicate: "fitness_routine", question: "What are the person's regular exercise habits or activity level? Answer short, or NONE." },
+        // relationships_and_social_life
+        Slot { domain: "relationships_and_social_life", predicate: "relationship_status", question: "What is the person's current romantic/partnership status? Answer one word, or NONE." },
+        Slot { domain: "relationships_and_social_life", predicate: "has_children", question: "Is the person a parent? Answer yes/no (with count if known), or NONE." },
+        Slot { domain: "relationships_and_social_life", predicate: "caregiving_role", question: "Does the person have ongoing responsibility for caring for someone? Answer short, or NONE." },
+        Slot { domain: "relationships_and_social_life", predicate: "social_engagement_level", question: "What is the person's habitual frequency of social contact? Answer short, or NONE." },
+        // interests_and_preferences
+        Slot { domain: "interests_and_preferences", predicate: "hobbies_and_leisure", question: "What hobbies or leisure activities does the person regularly do? Answer short, or NONE." },
+        Slot { domain: "interests_and_preferences", predicate: "goals_and_aspirations", question: "What ongoing goal or aspiration is the person pursuing? Answer short, or NONE." },
+        // daily_logistics_and_possessions
+        Slot { domain: "daily_logistics_and_possessions", predicate: "primary_transport_mode", question: "What is the main way the person gets around day to day? Answer one word, or NONE." },
+        Slot { domain: "daily_logistics_and_possessions", predicate: "primary_device", question: "What is the capability of the computer/device the person mainly relies on? You may infer from what it can or cannot handle. Answer short, or NONE." },
+        Slot { domain: "daily_logistics_and_possessions", predicate: "pet_owned", question: "Does the person keep a pet, and what kind? Answer the animal, or NONE." },
+        Slot { domain: "daily_logistics_and_possessions", predicate: "preparedness", question: "Does the person keep an emergency/household kit stocked, or are belongings minimal? Answer short, or NONE." },
+    ]
+}
+
+/// JSON-schema "form" over a given slot subset (the navigated districts).
+fn slots_form_schema(slots: &[&Slot]) -> serde_json::Value {
+    let mut props = serde_json::Map::new();
+    for slot in slots {
+        props.insert(slot.predicate.to_string(), serde_json::json!({"type": "string"}));
+    }
+    serde_json::json!({ "type": "object", "properties": props })
+}
+
+/// NAVIGATOR (the routing department): given a chunk, decide which life DOMAINS
+/// it plausibly touches, so the taxi fills only those districts' slots instead
+/// of all 30. One cheap call. Returns the relevant domain names; on any failure
+/// it returns ALL domains (safe fallback — fill everything rather than miss).
+async fn navigate_domains(
+    port: u16,
+    api_key: &str,
+    config: &ExtractConfig,
+    text: &str,
+) -> Vec<String> {
+    let domains = all_domains();
+    let list = domains.join(", ");
+    let prompt = format!(
+        "<|system|>\nYou route a conversation to the life-domains it touches. \
+         Given the domains and a conversation, output ONLY a JSON array of the \
+         domain names that the conversation says or implies something durable \
+         about the user for. Include a domain if there is ANY relevant signal.\n\
+         <|user|>\nDomains: {list}\n\nConversation:\n{text}\n\nRelevant domains (JSON array):\n<|assistant|>\n"
+    );
+    let schema = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+    match call_completion_schema(port, api_key, &prompt, config, Some(schema)).await {
+        Ok(raw) => {
+            let picked: Vec<String> = serde_json::from_str(raw.trim()).unwrap_or_default();
+            let valid: Vec<String> = picked
+                .into_iter()
+                .filter(|d| domains.contains(&d.as_str()))
+                .collect();
+            if valid.is_empty() {
+                domains.iter().map(|s| s.to_string()).collect()
+            } else {
+                valid
+            }
+        }
+        Err(_) => domains.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// "Taxi" / slot-filling extraction, SINGLE CALL + grammar. The schema is the
+/// map: one form with all slots. The model makes ONE trip, fills the form it's
+/// handed, and forgets — it never decides WHAT to extract (the form already
+/// asks). A grammar guarantees valid output, so even a small fast model returns
+/// clean typed values instead of mangled free text or 38 noisy guesses.
+/// Intelligence in the map, not the driver.
+pub async fn extract_facts_slots(config: &ExtractConfig, text: &str) -> anyhow::Result<Vec<Triple>> {
+    let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
+    let _permit = sem.acquire().await?;
+    let (port, api_key) = ensure_server(config.variant).await?;
+    let cfg = config.clone();
+
+    // NAVIGATION: pick relevant districts first, fill only their slots. Disable
+    // with MGIMIND_NAV=0 to fill the whole map (slower). Navigator off => all.
+    let nav_on = !matches!(std::env::var("MGIMIND_NAV").as_deref(), Ok("0") | Ok("false"));
+    let active_domains: Vec<String> = if nav_on {
+        navigate_domains(port, &api_key, &cfg, text).await
+    } else {
+        all_domains().iter().map(|s| s.to_string()).collect()
+    };
+    let slots: Vec<&Slot> = default_slots()
+        .iter()
+        .filter(|s| active_domains.iter().any(|d| d == s.domain))
+        .collect();
+    if slots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One form over the navigated slots; grammar constrains the shape.
+    let mut form = String::new();
+    for slot in &slots {
+        form.push_str(&format!("- {}: {}\n", slot.predicate, slot.question));
+    }
+    let prompt = format!(
+        "<|system|>\nYou fill in a form about the user from the conversation. \
+         For each field below, give the value if the conversation states or \
+         clearly implies it, otherwise an empty string. Output ONE JSON object \
+         with exactly these fields. Short values only.\n<|user|>\nConversation:\n{text}\n\nFields:\n{form}\n<|assistant|>\n"
+    );
+    let raw = call_completion_schema(port, &api_key, &prompt, &cfg, Some(slots_form_schema(&slots))).await?;
+
+    // Parse the form object; each non-empty, non-junk field becomes a triple.
+    let obj: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or(serde_json::Value::Null);
+    let mut triples = Vec::new();
+    if let Some(map) = obj.as_object() {
+        for slot in &slots {
+            let val = map.get(slot.predicate).and_then(|v| v.as_str()).unwrap_or("").trim();
+            let low = val.to_ascii_lowercase();
+            if val.is_empty()
+                || low == "none"
+                || low == "n/a"
+                || low.contains("not stated")
+                || low.contains("not mentioned")
+                || low.contains("unknown")
+                || val.len() > 60
+            {
+                continue;
+            }
+            triples.push(Triple {
+                subject: "user".to_string(),
+                predicate: slot.predicate.to_string(),
+                object: val.to_string(),
+            });
+        }
+    }
+    Ok(triples)
+}
+
 /// Cross-predicate staleness adjudication via the local model (Type II / J_theta).
 /// Sends a system+user prompt to the same llama-server used for extraction and
 /// returns the raw completion text (caller parses the JSON index array). Reuses
@@ -1338,13 +1529,26 @@ async fn call_completion(
     prompt: &str,
     config: &ExtractConfig,
 ) -> anyhow::Result<String> {
+    call_completion_schema(port, api_key, prompt, config, None).await
+}
+
+/// Like call_completion but with an optional server-side JSON-schema grammar,
+/// so a small model is FORCED to emit valid structured output (the "form" the
+/// taxi fills) instead of free text it might mangle.
+async fn call_completion_schema(
+    port: u16,
+    api_key: &str,
+    prompt: &str,
+    config: &ExtractConfig,
+    json_schema: Option<serde_json::Value>,
+) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{port}/completion");
     let body = CompletionRequest {
         prompt,
         temperature: config.temperature,
         n_predict: config.max_tokens,
         stream: false,
-        json_schema: None,
+        json_schema,
     };
     // Post-critic: cache the reqwest::Client across calls. Building a
     // new client per /completion was leaking the underlying connection
