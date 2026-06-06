@@ -297,36 +297,40 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             Ok(crate::cli::render_search(&results))
         }
         "mind_recall_all" => {
-            // Unified cross-silo recall (link layer step 3 / the two-coordinator
-            // payoff): one call returns everything known about a query across
-            // memories, facts, and procedures, instead of four separate tools.
+            // Unified cross-silo recall (the two-coordinator payoff): the
+            // retrieval coordinator fuses the memory coordinator's whole-silo
+            // view and biases by validity (stale sinks), then we append
+            // procedures. One call instead of four separate tools.
             let cfg = warm(true)?;
             let query = arg_str(args, "query")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
             let limit = arg_u64(args, "limit", 5) as usize;
             let mut out = String::new();
 
-            // 1) Facts (the resolved current state; query_facts already hides
-            //    stale/superseded/shadowed, so this is the live KG view).
-            let facts = crate::knowledge::query_facts(cfg, query).await.unwrap_or_default();
-            if !facts.is_empty() {
-                out.push_str("## Facts (current)\n");
-                for f in facts.iter().take(limit) {
-                    out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+            let memory = crate::universal::DefaultMemoryCoordinator;
+            let retrieval = crate::universal::DefaultRetrievalCoordinator;
+            use crate::universal::{MemoryKind, RetrievalCoordinator, Validity};
+            if let Ok(items) = retrieval.search(cfg, query, limit * 2, &memory).await {
+                let facts: Vec<_> = items.iter().filter(|i| i.kind == MemoryKind::Fact).take(limit).collect();
+                let mems: Vec<_> = items.iter().filter(|i| i.kind == MemoryKind::Memory).take(limit).collect();
+                if !facts.is_empty() {
+                    out.push_str("## Facts (current)\n");
+                    for f in facts {
+                        out.push_str(&format!("- {}\n", f.text));
+                    }
+                    out.push('\n');
                 }
-                out.push('\n');
+                if !mems.is_empty() {
+                    out.push_str("## Memories\n");
+                    for m in mems {
+                        let tag = if m.validity == Validity::Active { "" } else { " [stale]" };
+                        out.push_str(&format!("- {}{}\n", m.text, tag));
+                    }
+                    out.push('\n');
+                }
             }
 
-            // 2) Memories — staleness-aware ranking already sinks memories whose
-            //    facts went stale (link layer). Tier 2 = summaries.
-            let mems = crate::storage::search(cfg, query, None, limit, 2).await.unwrap_or_default();
-            if !mems.is_empty() {
-                out.push_str("## Memories\n");
-                out.push_str(&crate::cli::render_search(&mems));
-                out.push('\n');
-            }
-
-            // 3) Procedures (error->fix lessons), if any match by context.
+            // Procedures (error->fix lessons), if any match by context.
             if let Ok(procs) = crate::procedure::recall(cfg, None, Some(query), limit).await {
                 let trimmed = procs.trim();
                 if !trimmed.is_empty() && !trimmed.to_lowercase().contains("no ") {
