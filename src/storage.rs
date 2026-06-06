@@ -1439,6 +1439,27 @@ pub async fn search(
         }
     }
 
+    // Link layer (opt-in): depress memories whose derived facts went stale, so
+    // the KG's belief revision is felt by vector search. A memory that produced
+    // a now-superseded fact sinks below fresh ones. Best-effort: a lookup error
+    // leaves ranking untouched (never a hard dependency on the read path).
+    if config.staleness_aware_search {
+        if let Ok(stale_srcs) = crate::knowledge::stale_source_memory_ids(config).await {
+            if !stale_srcs.is_empty() {
+                for c in &mut cands {
+                    if stale_srcs.contains(&c.id) {
+                        c.score *= 0.3; // strong depression; keeps it findable, not top
+                    }
+                }
+                cands.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+    }
+
     cands.truncate(limit);
 
     // Record which memories were surfaced, for decay (phase Д2/Д4). In-process

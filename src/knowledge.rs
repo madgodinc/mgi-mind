@@ -465,6 +465,67 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
     Ok(facts)
 }
 
+/// Link layer: the set of `source_memory_id`s whose derived facts have gone
+/// stale/superseded/propagation-shadowed. Vector search uses this to depress
+/// memories whose extracted knowledge is no longer current — the cross-silo
+/// staleness signal. Empty set if the facts collection is absent.
+pub async fn stale_source_memory_ids(
+    config: &MindConfig,
+) -> Result<std::collections::HashSet<String>> {
+    use qdrant_client::qdrant::value::Kind;
+    let mut out = std::collections::HashSet::new();
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(out);
+    }
+    let filter = Filter {
+        must_not: vec![Condition::matches("status", "active".to_string())],
+        ..Default::default()
+    };
+    let mut offset = None;
+    loop {
+        let mut b = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            b = b.offset(o);
+        }
+        let resp = client.scroll(b).await?;
+        for point in &resp.result {
+            let status = point
+                .payload
+                .get("status")
+                .and_then(|v| match &v.kind {
+                    Some(Kind::StringValue(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            if status.is_empty() || status == "active" {
+                continue;
+            }
+            if let Some(Kind::StringValue(src)) = point
+                .payload
+                .get("source_memory_id")
+                .and_then(|v| v.kind.as_ref())
+            {
+                if !src.is_empty() {
+                    out.insert(src.clone());
+                }
+            }
+        }
+        match resp.next_page_offset {
+            Some(o) => offset = Some(o),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
 /// Soft-delete: mark a fact `valid = false` instead of physically removing it,
 /// so the temporal-validity flag is actually honored (audit #13).
 pub async fn invalidate_fact(config: &MindConfig, id: &str) -> Result<()> {

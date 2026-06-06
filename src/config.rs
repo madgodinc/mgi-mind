@@ -57,6 +57,12 @@ pub struct MindConfig {
     /// How many dense candidates to fetch and rerank before returning `limit`.
     #[serde(default = "default_rerank_top_k")]
     pub rerank_top_k: usize,
+    /// Link layer: when on, vector search depresses memories whose derived facts
+    /// have gone stale/superseded (cross-silo staleness awareness), so e.g. an
+    /// old "I live in Seattle" note sinks once the KG knows the user moved.
+    /// Off by default — opt-in until validated against retrieval recall.
+    #[serde(default)]
+    pub staleness_aware_search: bool,
     /// v1.5 Phase 6: install profile selecting per-mode confidence-score
     /// anchors. Default `chat-only` matches the legacy single-user behaviour
     /// — existing configs that pre-date v1.5 deserialise unchanged.
@@ -92,6 +98,7 @@ impl Default for MindConfig {
             rerank_enabled: true,
             rerank_model: default_rerank_model(),
             rerank_top_k: default_rerank_top_k(),
+            staleness_aware_search: false,
             install_mode: crate::install_mode::InstallMode::default(),
         }
     }
