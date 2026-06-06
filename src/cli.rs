@@ -892,7 +892,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             // LLM-extractor: a separate OpenAI client (gpt-4o-mini) used for
             // extraction — the oracle/mechanism upper-bound path.
             let llm_extractor: Option<Box<dyn LlmClient>> = if llm_extract {
-                Some(Box::new(OpenAiClient::from_env("gpt-4o-mini")?))
+                // Extractor model is selectable (STALE_EXTRACT_MODEL); defaults
+                // to gpt-4o-mini for parity with the answerer. A stronger model
+                // (gpt-4o) infers subtle implicit state more reliably — disclosed
+                // as a stronger-extractor configuration, not the default.
+                let m = std::env::var("STALE_EXTRACT_MODEL")
+                    .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+                Some(Box::new(OpenAiClient::from_env(&m)?))
             } else {
                 None
             };
