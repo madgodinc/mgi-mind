@@ -526,6 +526,7 @@ async fn wipe_and_seed(config: &MindConfig) -> Result<()> {
         // Multi — many can be true at once; never duel/supersede:
         ("owns", Cardinality::Multi),
         ("health_condition", Cardinality::Multi),
+        ("observation", Cardinality::Multi),
     ] {
         knowledge::register_cardinality(config, pred, card).await?;
     }
@@ -819,7 +820,13 @@ async fn llm_extract(
         (e.g. night-shift/day-shift), commute_distance (how far/long to work), \
         activity_level (mostly-indoors/sedentary vs active/outdoors), altitude \
         (sea-level vs high-altitude/mountain — infer from thin-air cues). \
-        For each, the object must be the user's \
+        Additionally, when the user mentions a vivid ENVIRONMENTAL or LIFESTYLE \
+        cue that hints at their situation but you cannot map it to a slot above \
+        with confidence (e.g. \"found a scorpion, relentless dry heat\", \"thin \
+        air on my hike\", \"constant damp\"), emit it as predicate \
+        \"observation\" with the object being a short paraphrase of the cue — \
+        these are kept as reasoning context, not as resolved state. \
+        For each slot fact, the object must be the user's \
         own CURRENT, durable state — infer the canonical value, do not copy a \
         raw phrase. IGNORE one-off events, questions, hypotheticals, advice, and \
         things merely mentioned. If nothing durable, output [].";
@@ -941,6 +948,7 @@ async fn verify_triple(
         "primary_device" => "the object must be a device the user primarily uses (a phone/laptop/etc.)",
         "religion" => "the object must be the user's religion or faith tradition",
         "schedule" => "the object must be the user's durable work/sleep schedule (e.g. night-shift, day-shift, early riser)",
+        "observation" => "the object must be a short paraphrase of a real environmental/lifestyle cue the user stated about their own situation (kept as reasoning context)",
         "commute_distance" => "the object must be the user's usual distance/time to work (e.g. 30 miles, 10 minutes, short, long)",
         "activity_level" => "the object must describe the user's durable activity level (e.g. mostly-indoors, sedentary, active, outdoors-a-lot)",
         "altitude" => "the object must be the elevation of where the user lives (e.g. sea-level, high-altitude, mountain)",
@@ -1210,7 +1218,10 @@ async fn axis_facts(config: &MindConfig) -> Result<(Vec<(String, String)>, Vec<(
             let status = get("status");
             // Restrict to seeded axes only in fixed-axis mode; in dynamic-axis
             // mode surface every user predicate (no cherry-picking the 4 axes).
+            // "observation" facts are reasoning fuel for the adjudicator, NOT
+            // answers — never show them to the answerer.
             if !subject.eq_ignore_ascii_case("user")
+                || predicate == "observation"
                 || (!dynaxis_on() && !SEEDED_AXES.contains(&predicate.as_str()))
             {
                 continue;
