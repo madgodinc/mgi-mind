@@ -526,6 +526,64 @@ pub async fn stale_source_memory_ids(
     Ok(out)
 }
 
+/// Ids of all non-active (retired) facts: stale / superseded / shadowed.
+/// Feeds the link-index spreading walk in retrieval.
+pub async fn retired_fact_ids(config: &MindConfig) -> Result<Vec<String>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let filter = Filter {
+        must_not: vec![Condition::matches("status", "active".to_string())],
+        ..Default::default()
+    };
+    let mut ids = Vec::new();
+    let mut offset = None;
+    loop {
+        let mut b = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            b = b.offset(o);
+        }
+        let resp = client.scroll(b).await?;
+        for p in &resp.result {
+            let status = p
+                .payload
+                .get("status")
+                .and_then(|v| match &v.kind {
+                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            if status.is_empty() || status == "active" {
+                continue;
+            }
+            if let Some(pid) = &p.id {
+                match &pid.point_id_options {
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => {
+                        ids.push(u.clone())
+                    }
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => {
+                        ids.push(n.to_string())
+                    }
+                    None => {}
+                }
+            }
+        }
+        match resp.next_page_offset {
+            Some(o) => offset = Some(o),
+            None => break,
+        }
+    }
+    Ok(ids)
+}
+
 /// Soft-delete: mark a fact `valid = false` instead of physically removing it,
 /// so the temporal-validity flag is actually honored (audit #13).
 pub async fn invalidate_fact(config: &MindConfig, id: &str) -> Result<()> {

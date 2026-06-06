@@ -28,6 +28,10 @@ pub const FACTS_COLLECTION: &str = "_kg_facts";
 /// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
 /// Lazily created on first cardinality registration; absent predicate = Multi.
 pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
+/// Cross-silo link index (vectorless): edges between memories, facts, and
+/// procedures (DerivedFrom, Supersedes, SharedEntity). The connective tissue
+/// that lets one silo's change propagate to another.
+pub const LINKS_COLLECTION: &str = "_links";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -1444,7 +1448,17 @@ pub async fn search(
     // a now-superseded fact sinks below fresh ones. Best-effort: a lookup error
     // leaves ranking untouched (never a hard dependency on the read path).
     if config.staleness_aware_search {
-        if let Ok(stale_srcs) = crate::knowledge::stale_source_memory_ids(config).await {
+        if let Ok(mut stale_srcs) = crate::knowledge::stale_source_memory_ids(config).await {
+            // Also walk the link index (DerivedFrom edges) if it's been built —
+            // catches edges the direct scan can't see (e.g. once procedures link
+            // in). Union of both sources of "memory behind a retired fact".
+            if let Ok(retired_fact_ids) = crate::knowledge::retired_fact_ids(config).await {
+                if let Ok(linked) =
+                    crate::links::memories_of_facts(config, &retired_fact_ids).await
+                {
+                    stale_srcs.extend(linked);
+                }
+            }
             if !stale_srcs.is_empty() {
                 for c in &mut cands {
                     if stale_srcs.contains(&c.id) {

@@ -15,6 +15,7 @@ mod error;
 #[cfg(feature = "extractor")]
 mod extractor;
 mod ingest;
+mod links;
 mod install_detect;
 mod install_mode;
 mod integrity;

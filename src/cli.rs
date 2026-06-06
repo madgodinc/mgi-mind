@@ -342,6 +342,10 @@ pub enum Commands {
     /// recall.
     DuelValidity,
 
+    /// Rebuild the cross-silo link index (_links): DerivedFrom (fact->source
+    /// memory) and Supersedes (active->retired fact) edges. Batch/maintenance.
+    LinksRebuild,
+
     /// STALE bench sweep: walk a small grid of constant overrides and
     /// emit per-run results into a directory. Scaffold — wraps the
     /// existing bench-stale single-run harness so calibration tooling
@@ -944,6 +948,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
                 Ok(())
             }
+        }
+        Commands::LinksRebuild => {
+            let config = crate::config::MindConfig::load()?;
+            let n = crate::links::rebuild(&config).await?;
+            println!("Link index rebuilt: {n} edges");
+            Ok(())
         }
         Commands::BenchStaleSweep {
             dataset,
