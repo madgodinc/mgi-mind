@@ -480,17 +480,49 @@ impl LlmClient for GeminiClient {
             "{}/models/{}:generateContent",
             self.base_url, self.model
         );
-        let resp = qa_http()?
-            .post(&url)
-            // Key as header, not query string — keeps it out of any URL logging.
-            .header("x-goog-api-key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("gemini generateContent request")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("read gemini response body")?;
+        // Retry transient overload (503 UNAVAILABLE / 429 rate-limit) with
+        // exponential backoff. gemini-flash spikes "high demand" 503s under load;
+        // without retry the caller fails open and silently drops the extracted
+        // facts for that chunk, biasing the benchmark down. Up to 5 attempts,
+        // ~1s,2s,4s,8s backoff.
+        let mut text = String::new();
+        let mut status = reqwest::StatusCode::OK;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..5u32 {
+            match qa_http()?
+                .post(&url)
+                .header("x-goog-api-key", &self.api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    status = resp.status();
+                    text = resp.text().await.context("read gemini response body")?;
+                    if status.is_success() {
+                        last_err = None;
+                        break;
+                    }
+                    let retryable = status.as_u16() == 503
+                        || status.as_u16() == 429
+                        || status.as_u16() == 500;
+                    last_err = Some(anyhow!("gemini HTTP {status}: {text}"));
+                    if !retryable || attempt == 4 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(anyhow::Error::new(e).context("gemini request"));
+                    if attempt == 4 {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000u64 << attempt)).await;
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
         if !status.is_success() {
             return Err(anyhow!("gemini HTTP {status}: {text}"));
         }
