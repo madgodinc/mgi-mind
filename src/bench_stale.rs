@@ -512,8 +512,13 @@ async fn wipe_and_seed(config: &MindConfig) -> Result<()> {
         // single current value that can change over time -> TemporalSingle
         ("age_or_life_stage", Cardinality::TemporalSingle),
         ("religious_or_spiritual_affiliation", Cardinality::TemporalSingle),
+        ("political_affiliation", Cardinality::TemporalSingle),
+        ("timezone", Cardinality::TemporalSingle),
+        ("ambient_light_or_noise_level", Cardinality::TemporalSingle),
+        ("current_activity_moment", Cardinality::TemporalSingle),
         ("current_residence_location", Cardinality::TemporalSingle),
         ("region_or_climate", Cardinality::TemporalSingle),
+        ("current_weather_or_season", Cardinality::TemporalSingle),
         ("housing_type", Cardinality::TemporalSingle),
         ("household_composition", Cardinality::TemporalSingle),
         ("employment_status", Cardinality::TemporalSingle),
@@ -1011,7 +1016,24 @@ async fn ingest_haystack(
         // lost. Give the API extractor the full session (large chunk window).
         let chunk_chars = if llm_extractor.is_some() { 100_000 } else { 4000 };
         let mut triples = Vec::new();
+        let slot_extract_on =
+            matches!(std::env::var("STALE_SLOT_EXTRACT").as_deref(), Ok("1") | Ok("true"));
         for chunk in session_chunks(turns, chunk_chars) {
+            // Taxi slot path takes priority when enabled — even with a cloud
+            // client (taxi-cloud), it fills the slot form rather than the old
+            // free-form llm_extract prompt.
+            if slot_extract_on {
+                let res = if let Some(c) = llm_extractor {
+                    crate::extractor::extract_facts_slots_cloud(extract_cfg, c, &chunk).await
+                } else {
+                    crate::extractor::extract_facts_slots(extract_cfg, &chunk).await
+                };
+                match res {
+                    Ok(mut t) => triples.append(&mut t),
+                    Err(e) => eprintln!("  [ingest] slot-extract failed: {e:#}"),
+                }
+                continue;
+            }
             // LLM-extractor path: a strong API model returns triples.
             if let Some(c) = llm_extractor {
                 match llm_extract(c, &chunk).await {
@@ -1038,17 +1060,6 @@ async fn ingest_haystack(
                 match file_extract(dir, &chunk).await {
                     Ok(mut t) => triples.append(&mut t),
                     Err(e) => eprintln!("  [ingest] file-extract failed: {e:#}"),
-                }
-                continue;
-            }
-            // Taxi / slot-filling extractor (STALE_SLOT_EXTRACT=1): the schema
-            // asks narrow per-slot questions; the model only answers. Lets a
-            // small/fast local model extract cleanly without "understanding" the
-            // whole chunk.
-            if matches!(std::env::var("STALE_SLOT_EXTRACT").as_deref(), Ok("1") | Ok("true")) {
-                match crate::extractor::extract_facts_slots(extract_cfg, &chunk).await {
-                    Ok(mut t) => triples.append(&mut t),
-                    Err(e) => eprintln!("  [ingest] slot-extract failed: {e:#}"),
                 }
                 continue;
             }
@@ -1262,7 +1273,13 @@ async fn axis_facts(config: &MindConfig) -> Result<(Vec<(String, String)>, Vec<(
                 continue;
             }
             match status.as_str() {
-                "stale" | "superseded" => stale.push((predicate, object)),
+                // propagation_shadowed = the cross-axis adjudicator's Type II
+                // mark (arid climate shadowed the Portland residence); it MUST
+                // count as stale here or the answerer still sees the dead fact
+                // as current and the whole Type II path scores 0.
+                "stale" | "superseded" | "propagation_shadowed" => {
+                    stale.push((predicate, object))
+                }
                 _ => active.push((predicate, object)),
             }
         }
@@ -1343,21 +1360,58 @@ async fn implicit_adjudicate(config: &MindConfig, client: &dyn LlmClient) -> Res
         availability, location, feasibility, continuity, arrangement, or status \
         the old fact silently relied on. Examples: a new city breaks the old \
         city's basis; a desert/dry climate breaks the basis of living in a rainy \
-        city; high-altitude breaks a sea-level home. \
+        city; high-altitude breaks a sea-level home. A changed home location \
+        also breaks facts that silently depended on the OLD place: a local \
+        commute or transport habit tied to the old city, a stocked \
+        household/emergency kit left behind, an arrangement reachable only \
+        there. Mark those stale only when the new location is genuinely \
+        incompatible with them — NOT facts that travel with the user wherever \
+        they live (a pet, a remote job, a diet, a relationship). \
+        A later fact can be an INDIRECT SIGN that an earlier fact's situation \
+        has ENDED even when no replacement value is stated: a change of \
+        legal/residential status, a resource that is now depleted or \
+        unavailable, or a new routine that occupies the same role or hours the \
+        old fact claimed. When the later fact only makes sense if the earlier \
+        situation is over, the earlier fact is stale. \
         Do NOT mark stale for mere topic overlap, two facts that can both be \
         true at once, or general life change that doesn't break a specific \
         basis. Ask: does the later fact make the earlier one no longer safe to \
         assume as current? If you cannot name the broken basis, leave it. \
-        Output ONLY a JSON array of the integer indices of the now-unsafe \
-        earlier facts. If none, output [].";
-    let user = format!("Facts (chronological):\n{listing}\nIndices of now-stale earlier facts:");
-    let params = GenParams { temperature: Some(0.0), max_tokens: 64 };
+        Output a JSON object of the form {\"stale\": [<indices>]} listing the \
+        integer indices of the now-unsafe earlier facts. If none, output \
+        {\"stale\": []}.";
+    let user = format!("Facts (chronological):\n{listing}\nReturn the JSON object {{\"stale\": [...]}} now:");
+    // The judge runs as a THINKING model (it must reason that arid climate is
+    // incompatible with a rainy-city residence), so the budget has to cover ~400
+    // tokens of deliberation PLUS the JSON object. 256 truncates inside the
+    // thoughts and returns an empty body; 1024 leaves room for both. json_mode
+    // yields a JSON object, so we ask for {"stale": [...]} rather than a bare
+    // array (which the model prefaces with prose).
+    let params = GenParams { temperature: Some(0.0), max_tokens: 1024 };
+    if std::env::var("STALE_DEBUG").is_ok() {
+        eprintln!("    [adjudicate-input] {} facts:\n{}", facts.len(), listing.trim());
+    }
     let raw = match client.generate(system, &[ChatTurn { role: "user".into(), content: user }], &params).await {
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
-    let cleaned = raw.find('[').and_then(|a| raw.rfind(']').map(|b| raw[a..=b].to_string())).unwrap_or_default();
-    let idxs: Vec<usize> = serde_json::from_str(&cleaned).unwrap_or_default();
+    if std::env::var("STALE_DEBUG").is_ok() {
+        eprintln!("    [adjudicate-raw] judge reply: {raw:?}");
+    }
+    // Carve out the JSON object and read its "stale" array. Falls back to a bare
+    // array if the model ignored the object shape, so either form parses.
+    let obj_slice = raw.find('{').and_then(|a| raw.rfind('}').map(|b| raw[a..=b].to_string()));
+    let idxs: Vec<usize> = obj_slice
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("stale").and_then(|a| a.as_array()).map(|a| {
+            a.iter().filter_map(|x| x.as_u64().map(|u| u as usize)).collect()
+        }))
+        .or_else(|| {
+            let arr = raw.find('[').and_then(|a| raw.rfind(']').map(|b| raw[a..=b].to_string()))?;
+            serde_json::from_str::<Vec<usize>>(&arr).ok()
+        })
+        .unwrap_or_default();
     for i in idxs {
         if let Some((id, p, o, _)) = facts.get(i) {
             if !id.is_empty() {
@@ -1749,6 +1803,15 @@ pub async fn run(
     llm_extractor: Option<&dyn LlmClient>,
 ) -> Result<StaleReport> {
     let config = MindConfig::load()?;
+    // STALE exercises environment/sensory state (weather, light/noise, timezone),
+    // which the product gates off by default. The bench is exactly the env-axes
+    // use case, so turn them on here unless the caller already set the flag.
+    if std::env::var("MGIMIND_ENV_AXES").is_err() {
+        // Safe: set once at bench start, before any extraction task is spawned.
+        unsafe {
+            std::env::set_var("MGIMIND_ENV_AXES", "1");
+        }
+    }
     let mut scenarios = load_dataset(&dataset)?;
     if let Some(n) = limit {
         scenarios.truncate(n);

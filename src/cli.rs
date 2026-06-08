@@ -911,7 +911,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                 // as a stronger-extractor configuration, not the default.
                 let m = std::env::var("STALE_EXTRACT_MODEL")
                     .unwrap_or_else(|_| "gpt-4o-mini".to_string());
-                Some(Box::new(OpenAiClient::from_env(&m)?))
+                // taxi-cloud: allow a Gemini extractor (OpenAI RPD often exhausted).
+                // .thinking(true): this same client is reused by the cross-axis
+                // adjudicator, which must reason about fact incompatibility; the
+                // slot extractor tolerates thinking given its 2500-token budget.
+                if m.starts_with("gemini") {
+                    Some(Box::new(GeminiClient::from_env(&m)?.json_mode(true).thinking(true)))
+                } else {
+                    Some(Box::new(OpenAiClient::from_env(&m)?))
+                }
             } else {
                 None
             };

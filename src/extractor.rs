@@ -1263,6 +1263,45 @@ pub struct Slot {
     pub question: &'static str,
 }
 
+/// Two honest layers of the schema (Mad's 2026-06-06 split). CORE axes are the
+/// real "AI memory of the user" — durable human state (location, work, beliefs,
+/// relationships, health, goals). ENV axes are environment/sensory state
+/// (weather, ambient light/noise, timezone) — useful for embodied-agent
+/// world-models and the STALE benchmark, but NOT human memory. ENV slots are
+/// only filled when MGIMIND_ENV_AXES is set (default: core-only), so the product
+/// never passes environment estimation off as memory about the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    Core,
+    Env,
+}
+
+/// Predicates that are environment/sensory state, not human memory. Everything
+/// else is Core. Kept as an explicit list so the split is auditable.
+const ENV_PREDICATES: &[&str] = &[
+    "current_weather_or_season",
+    "ambient_light_or_noise_level",
+    "timezone",
+    "current_activity_moment",
+];
+
+pub fn slot_layer(predicate: &str) -> Layer {
+    if ENV_PREDICATES.contains(&predicate) {
+        Layer::Env
+    } else {
+        Layer::Core
+    }
+}
+
+/// Whether env-layer slots are active this run. Off by default: the product is
+/// "memory of the user" (core only). Set MGIMIND_ENV_AXES=1 for STALE/agent runs.
+pub fn env_axes_enabled() -> bool {
+    matches!(
+        std::env::var("MGIMIND_ENV_AXES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// The fixed life-domains (the "districts" of the map). The navigator picks
 /// which districts a chunk touches; only those districts' slots are then filled.
 pub fn all_domains() -> &'static [&'static str] {
@@ -1292,9 +1331,14 @@ pub fn default_slots() -> &'static [Slot] {
         Slot { domain: "core_identity_and_demographics", predicate: "age_or_life_stage", question: "What is the person's age or general life stage? Answer short, or NONE." },
         Slot { domain: "core_identity_and_demographics", predicate: "languages_spoken", question: "Which languages does the person speak? Answer language(s), or NONE." },
         Slot { domain: "core_identity_and_demographics", predicate: "religious_or_spiritual_affiliation", question: "What is the person's religious or spiritual affiliation, if any (as shown by their practices or statements)? Answer one word, or NONE." },
+        Slot { domain: "core_identity_and_demographics", predicate: "political_affiliation", question: "What is the person's political affiliation or leaning (e.g. independent, Democrat, conservative, progressive)? Answer short, or NONE." },
         // physical_living_situation
         Slot { domain: "physical_living_situation", predicate: "current_residence_location", question: "In what city, town, or place does the person currently live? Answer the place, or NONE." },
         Slot { domain: "physical_living_situation", predicate: "region_or_climate", question: "What is the region or climate where the person lives (e.g. arid, humid, coastal, high-altitude)? You may infer from indirect environmental signs. Answer short, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "current_weather_or_season", question: "What weather or seasonal conditions is the person experiencing right now (e.g. heatwave, cold snap, rainy season, dry spell)? This is the present condition, not the long-term climate. Answer short, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "timezone", question: "What time zone does the person live in (e.g. Pacific Time, Eastern European Time, or a city implying one)? You may infer from indirect signs. Answer short, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "ambient_light_or_noise_level", question: "What is the typical light or noise level of the person's everyday surroundings (e.g. dim, bright sunlight, very quiet, loud/noisy)? Answer short, or NONE." },
+        Slot { domain: "physical_living_situation", predicate: "current_activity_moment", question: "What activity or situation is the person engaged in at this very moment (e.g. on a train in transit, in a yoga class, at the gym)? This is what they are doing right now, not a habit. Answer short, or NONE." },
         Slot { domain: "physical_living_situation", predicate: "housing_type", question: "What kind of dwelling does the person occupy (apartment, house, etc.)? Answer one word, or NONE." },
         Slot { domain: "physical_living_situation", predicate: "household_composition", question: "Who does the person live with? Answer short, or NONE." },
         // work_and_livelihood
@@ -1323,7 +1367,7 @@ pub fn default_slots() -> &'static [Slot] {
         Slot { domain: "interests_and_preferences", predicate: "hobbies_and_leisure", question: "What hobbies or leisure activities does the person regularly do? Answer short, or NONE." },
         Slot { domain: "interests_and_preferences", predicate: "goals_and_aspirations", question: "What ongoing goal or aspiration is the person pursuing? Answer short, or NONE." },
         // daily_logistics_and_possessions
-        Slot { domain: "daily_logistics_and_possessions", predicate: "primary_transport_mode", question: "What is the main way the person gets around day to day? Answer one word, or NONE." },
+        Slot { domain: "daily_logistics_and_possessions", predicate: "primary_transport_mode", question: "What is the person's HABITUAL day-to-day way of getting around (e.g. car, bike, subway, walking)? Only answer if it is their regular habit, NOT a one-off trip they happen to be on right now. Answer one word, or NONE." },
         Slot { domain: "daily_logistics_and_possessions", predicate: "primary_device", question: "What is the capability of the computer/device the person mainly relies on? You may infer from what it can or cannot handle. Answer short, or NONE." },
         Slot { domain: "daily_logistics_and_possessions", predicate: "pet_owned", question: "Does the person keep a pet, and what kind? Answer the animal, or NONE." },
         Slot { domain: "daily_logistics_and_possessions", predicate: "preparedness", question: "Does the person keep an emergency/household kit stocked, or are belongings minimal? Answer short, or NONE." },
@@ -1376,62 +1420,148 @@ async fn navigate_domains(
     }
 }
 
+/// Cloud navigator: same routing as navigate_domains but via a cloud client, so
+/// taxi-cloud needs no local server at all. Returns ALL domains on any failure.
+async fn navigate_domains_cloud(
+    client: &dyn crate::qa_judge::LlmClient,
+    text: &str,
+) -> Vec<String> {
+    use crate::qa_judge::{ChatTurn, GenParams};
+    let domains = all_domains();
+    let list = domains.join(", ");
+    let system = "You route a conversation to the life-domains it touches. Output \
+        ONLY a JSON array of the domain names the conversation says or implies \
+        something durable about the user for. Include a domain on ANY relevant signal.";
+    let user = format!("Domains: {list}\n\nConversation:\n{text}\n\nRelevant domains (JSON array):");
+    let turns = [ChatTurn { role: "user".into(), content: user }];
+    let params = GenParams { temperature: Some(0.0), max_tokens: 200 };
+    match client.generate(system, &turns, &params).await {
+        Ok(raw) => {
+            // Cloud models may wrap the array in prose/fences; extract the array.
+            let slice = raw
+                .find('[')
+                .and_then(|a| raw.rfind(']').map(|b| &raw[a..=b]))
+                .unwrap_or(raw.trim());
+            let picked: Vec<String> = serde_json::from_str(slice).unwrap_or_default();
+            let valid: Vec<String> = picked
+                .into_iter()
+                .filter(|d| domains.contains(&d.as_str()))
+                .collect();
+            if valid.is_empty() {
+                domains.iter().map(|s| s.to_string()).collect()
+            } else {
+                valid
+            }
+        }
+        Err(_) => domains.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 /// "Taxi" / slot-filling extraction, SINGLE CALL + grammar. The schema is the
 /// map: one form with all slots. The model makes ONE trip, fills the form it's
 /// handed, and forgets — it never decides WHAT to extract (the form already
 /// asks). A grammar guarantees valid output, so even a small fast model returns
 /// clean typed values instead of mangled free text or 38 noisy guesses.
 /// Intelligence in the map, not the driver.
-pub async fn extract_facts_slots(config: &ExtractConfig, text: &str) -> anyhow::Result<Vec<Triple>> {
-    let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
-    let _permit = sem.acquire().await?;
-    let (port, api_key) = ensure_server(config.variant).await?;
-    let cfg = config.clone();
+/// True when a slot value is a non-answer the small model emitted instead of an
+/// empty string: "none", "n/a", "not specified (in the conversation)", "unknown",
+/// "not applicable", etc. We strip surrounding punctuation/parens first so wrapped
+/// forms like "None (not specified...)" are caught. Anything left that still starts
+/// with or equals one of the null phrases is dropped. Keeps real values intact.
+fn is_null_answer(val: &str) -> bool {
+    let low = val
+        .to_ascii_lowercase()
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_string();
+    if low.is_empty() {
+        return true;
+    }
+    const NULL_PHRASES: &[&str] = &[
+        "none",
+        "n/a",
+        "na",
+        "null",
+        "nil",
+        "unknown",
+        "unspecified",
+        "not specified",
+        "not stated",
+        "not mentioned",
+        "not provided",
+        "not given",
+        "not applicable",
+        "not available",
+        "not indicated",
+        "no information",
+        "not enough information",
+        "cannot determine",
+        "can't determine",
+        "no value",
+    ];
+    NULL_PHRASES
+        .iter()
+        .any(|p| low == *p || low.starts_with(p))
+}
 
-    // NAVIGATION: pick relevant districts first, fill only their slots. Disable
-    // with MGIMIND_NAV=0 to fill the whole map (slower). Navigator off => all.
+/// True when the model echoed (part of) the slot's own question back as the
+/// answer. We compare on word sets: if most of the value's words also appear in
+/// the question, or the value ends in a question mark, it is an echo, not data.
+fn echoes_question(val: &str, question: &str) -> bool {
+    if val.ends_with('?') {
+        return true;
+    }
+    let words: Vec<&str> = val.split_whitespace().collect();
+    if words.len() < 4 {
+        return false; // short real answers ("New York City") never count as echo
+    }
+    let q: std::collections::HashSet<String> =
+        question.split_whitespace().map(|w| w.to_ascii_lowercase()).collect();
+    let overlap = words
+        .iter()
+        .filter(|w| q.contains(&w.to_ascii_lowercase()))
+        .count();
+    overlap * 2 >= words.len() // >=50% of the value's words are from the question
+}
+
+/// The slots active for this text: navigated districts, filtered by layer.
+/// Shared by the local (granite) and cloud (taxi-cloud) slot extractors.
+async fn active_slots_for(
+    port: u16,
+    api_key: &str,
+    cfg: &ExtractConfig,
+    text: &str,
+) -> Vec<&'static Slot> {
     let nav_on = !matches!(std::env::var("MGIMIND_NAV").as_deref(), Ok("0") | Ok("false"));
     let active_domains: Vec<String> = if nav_on {
-        navigate_domains(port, &api_key, &cfg, text).await
+        navigate_domains(port, api_key, cfg, text).await
     } else {
         all_domains().iter().map(|s| s.to_string()).collect()
     };
-    let slots: Vec<&Slot> = default_slots()
+    let env_on = env_axes_enabled();
+    default_slots()
         .iter()
         .filter(|s| active_domains.iter().any(|d| d == s.domain))
-        .collect();
-    if slots.is_empty() {
-        return Ok(Vec::new());
-    }
+        .filter(|s| env_on || slot_layer(s.predicate) == Layer::Core)
+        .collect()
+}
 
-    // One form over the navigated slots; grammar constrains the shape.
+/// The form body listing each slot's predicate + question.
+fn slots_form_body(slots: &[&Slot]) -> String {
     let mut form = String::new();
-    for slot in &slots {
+    for slot in slots {
         form.push_str(&format!("- {}: {}\n", slot.predicate, slot.question));
     }
-    let prompt = format!(
-        "<|system|>\nYou fill in a form about the user from the conversation. \
-         For each field below, give the value if the conversation states or \
-         clearly implies it, otherwise an empty string. Output ONE JSON object \
-         with exactly these fields. Short values only.\n<|user|>\nConversation:\n{text}\n\nFields:\n{form}\n<|assistant|>\n"
-    );
-    let raw = call_completion_schema(port, &api_key, &prompt, &cfg, Some(slots_form_schema(&slots))).await?;
+    form
+}
 
-    // Parse the form object; each non-empty, non-junk field becomes a triple.
+/// Parse a filled-form JSON object into triples, applying the junk filters.
+fn parse_form_to_triples(raw: &str, slots: &[&Slot]) -> Vec<Triple> {
     let obj: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or(serde_json::Value::Null);
     let mut triples = Vec::new();
     if let Some(map) = obj.as_object() {
-        for slot in &slots {
+        for slot in slots {
             let val = map.get(slot.predicate).and_then(|v| v.as_str()).unwrap_or("").trim();
-            let low = val.to_ascii_lowercase();
-            if val.is_empty()
-                || low == "none"
-                || low == "n/a"
-                || low.contains("not stated")
-                || low.contains("not mentioned")
-                || low.contains("unknown")
-                || val.len() > 60
-            {
+            if is_null_answer(val) || val.len() > 60 || echoes_question(val, slot.question) {
                 continue;
             }
             triples.push(Triple {
@@ -1441,7 +1571,159 @@ pub async fn extract_facts_slots(config: &ExtractConfig, text: &str) -> anyhow::
             });
         }
     }
+    triples
+}
+
+/// Taxi-cloud: the same slot form, but filled by a smart cloud model instead of
+/// the local 2B. The 2B hallucinates unsupported slot values (it cannot leave a
+/// field empty under form pressure); a capable model fills only what the text
+/// supports and leaves the rest empty. Navigator still runs locally (cheap) to
+/// pick districts; only the form fill goes to the cloud client. No grammar is
+/// used (cloud models follow the JSON instruction without it).
+pub async fn extract_facts_slots_cloud(
+    _config: &ExtractConfig,
+    client: &dyn crate::qa_judge::LlmClient,
+    text: &str,
+) -> anyhow::Result<Vec<Triple>> {
+    use crate::qa_judge::{ChatTurn, GenParams};
+    // No local server needed: navigator and form both run on the cloud client.
+    let nav_on = !matches!(std::env::var("MGIMIND_NAV").as_deref(), Ok("0") | Ok("false"));
+    let active_domains: Vec<String> = if nav_on {
+        navigate_domains_cloud(client, text).await
+    } else {
+        all_domains().iter().map(|s| s.to_string()).collect()
+    };
+    let env_on = env_axes_enabled();
+    let slots: Vec<&Slot> = default_slots()
+        .iter()
+        .filter(|s| active_domains.iter().any(|d| d == s.domain))
+        .filter(|s| env_on || slot_layer(s.predicate) == Layer::Core)
+        .collect();
+    if slots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let form = slots_form_body(&slots);
+    let system = "You fill in a form about the user from the conversation. For \
+        each field, give the value ONLY if the conversation states it or \
+        unambiguously implies it; otherwise leave it an empty string. Never \
+        guess or invent a plausible value. When the conversation describes a \
+        CHANGE (a move to a new place, a new license/registration, a switched \
+        job or routine), record the field's NEW value, not the old one — an \
+        indirect cue of a change (a new local document, leaving the old home, a \
+        different commute) is enough to fill the field it implies. Output ONE \
+        JSON object with exactly these fields. Short values only.";
+    let user = format!("Conversation:\n{text}\n\nFields:\n{form}\n\nReturn the JSON object now.");
+    let turns = [ChatTurn { role: "user".into(), content: user }];
+    // The form has ~30 fields; the model echoes every key (even empty ones), so
+    // 800 tokens truncates the JSON mid-object and the parse yields nothing.
+    // 2500 leaves headroom for a full object with several filled values.
+    let params = GenParams { temperature: Some(0.0), max_tokens: 2500 };
+    let raw = client.generate(system, &turns, &params).await?;
+    if std::env::var("STALE_DEBUG").is_ok() {
+        eprintln!("[cloud-extract] raw reply: {raw:?}");
+    }
+    // Cloud models wrap the JSON object in markdown fences or prose; the local
+    // path gets a clean object from the grammar, but here we must carve out the
+    // object ourselves before parse_form_to_triples (which does a strict parse).
+    let json = raw
+        .find('{')
+        .and_then(|a| raw.rfind('}').map(|b| &raw[a..=b]))
+        .unwrap_or(raw.trim());
+    Ok(parse_form_to_triples(json, &slots))
+}
+
+pub async fn extract_facts_slots(config: &ExtractConfig, text: &str) -> anyhow::Result<Vec<Triple>> {
+    let sem = EXTRACTION_SEMAPHORE.get_or_init(|| Semaphore::new(1));
+    let _permit = sem.acquire().await?;
+    let (port, api_key) = ensure_server(config.variant).await?;
+    let cfg = config.clone();
+
+    let slots = active_slots_for(port, &api_key, &cfg, text).await;
+    if slots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One form over the navigated slots; grammar constrains the shape.
+    let form = slots_form_body(&slots);
+    let prompt = format!(
+        "<|system|>\nYou fill in a form about the user from the conversation. \
+         For each field below, give the value if the conversation states or \
+         clearly implies it, otherwise an empty string. If the conversation \
+         describes a CHANGE (a move, a new license, a switched job), put the \
+         NEW value in the field, not the old one. Output ONE JSON object \
+         with exactly these fields. Short values only.\n<|user|>\nConversation:\n{text}\n\nFields:\n{form}\n<|assistant|>\n"
+    );
+    let raw = call_completion_schema(port, &api_key, &prompt, &cfg, Some(slots_form_schema(&slots))).await?;
+    let mut triples = parse_form_to_triples(&raw, &slots);
+
+    // Hallucination gate. A weak model fills navigated slots with plausible but
+    // unsupported values ("housing_type=house", "region=Mediterranean") because
+    // the form pressures it to answer. Re-read the text and drop any fact the
+    // text does not actually support. Off via MGIMIND_VERIFY=0 (ablation).
+    let verify_on = !matches!(std::env::var("MGIMIND_VERIFY").as_deref(), Ok("0") | Ok("false"));
+    if verify_on && !triples.is_empty() {
+        triples = verify_facts_against_text(port, &api_key, &cfg, text, triples).await;
+    }
     Ok(triples)
+}
+
+/// Entailment gate for the slot extractor: ask the model, in one call, which of
+/// the candidate facts are actually supported by the text. Returns only the
+/// supported ones. On any parse/transport failure we keep all candidates (the
+/// gate is best-effort and must never silently empty the memory).
+async fn verify_facts_against_text(
+    port: u16,
+    api_key: &str,
+    cfg: &ExtractConfig,
+    text: &str,
+    candidates: Vec<Triple>,
+) -> Vec<Triple> {
+    let mut listing = String::new();
+    for (i, t) in candidates.iter().enumerate() {
+        listing.push_str(&format!("{i}: {} = {}\n", t.predicate, t.object));
+    }
+    let n = candidates.len();
+    let prompt = format!(
+        "<|system|>\nYou check whether each fact is supported by the text. A fact \
+         is SUPPORTED only if the text states it or unambiguously implies it. If \
+         the text does not mention it, it is NOT supported, even if plausible. \
+         Output ONE JSON object: {{\"supported\": [list of indices that are \
+         supported]}}.\n<|user|>\nText:\n{text}\n\nFacts:\n{listing}\n<|assistant|>\n"
+    );
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "supported": { "type": "array", "items": { "type": "integer" } }
+        },
+        "required": ["supported"]
+    });
+    let raw = match call_completion_schema(port, api_key, &prompt, cfg, Some(schema)).await {
+        Ok(r) => r,
+        Err(_) => return candidates, // transport failure -> keep all (best-effort)
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw.trim()) {
+        Ok(v) => v,
+        Err(_) => return candidates,
+    };
+    let keep: std::collections::HashSet<usize> = parsed
+        .get("supported")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|u| u as usize)).collect())
+        .unwrap_or_default();
+    // If the model returned an empty/garbage set but we had candidates, that is
+    // more likely a model miss than "everything is a hallucination" — keep all.
+    if keep.is_empty() {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, t)| t)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .take(n)
+        .collect()
 }
 
 /// Cross-predicate staleness adjudication via the local model (Type II / J_theta).
@@ -1577,6 +1859,52 @@ async fn call_completion_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn null_answers_are_dropped() {
+        // The exact junk granite emitted in the nav diagnostic.
+        for j in [
+            "Not specified",
+            "Not specified in the conversation",
+            "None (not specified in the conversation)",
+            "None",
+            "n/a",
+            "N/A",
+            "  unknown  ",
+            "not mentioned",
+            "Not applicable.",
+            "",
+        ] {
+            assert!(is_null_answer(j), "should drop: {j:?}");
+        }
+        // Real values must survive.
+        for v in ["Seattle", "Austin", "Photographer", "coastal", "Mexican"] {
+            assert!(!is_null_answer(v), "should keep: {v:?}");
+        }
+    }
+
+    #[test]
+    fn echoed_questions_are_dropped() {
+        let q = "In what city, town, or place does the person currently live? Answer the place, or NONE.";
+        assert!(echoes_question("In what city, town, or place does the person currently live?", q));
+        assert!(echoes_question("what place does the person live", q));
+        // Real answers survive.
+        assert!(!echoes_question("Seattle", q));
+        assert!(!echoes_question("South Lamar and Barton Springs, Austin, Texas", q));
+        assert!(!echoes_question("New York City", q));
+    }
+
+    #[test]
+    fn env_axes_are_classified_separately() {
+        // Env axes = environment/sensory, not human memory.
+        for p in ["current_weather_or_season", "ambient_light_or_noise_level", "timezone"] {
+            assert_eq!(slot_layer(p), Layer::Env, "{p} should be Env");
+        }
+        // Core = the real memory about the person.
+        for p in ["current_residence_location", "occupation_or_role", "relationship_status", "political_affiliation"] {
+            assert_eq!(slot_layer(p), Layer::Core, "{p} should be Core");
+        }
+    }
 
     #[test]
     fn parse_round_trips_lowercase_canonical() {

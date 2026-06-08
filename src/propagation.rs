@@ -114,7 +114,13 @@ pub const ADJUDICATE_SYSTEM: &str = "You audit a person's memory for facts \
     continuity, arrangement, or status the old fact silently relied on. \
     Examples: a new city breaks the old city's basis; a desert/dry climate \
     breaks the basis of living in a rainy city; high-altitude breaks a \
-    sea-level home. Do NOT mark stale for mere topic overlap, facts that can \
+    sea-level home. A changed home location also breaks facts that silently \
+    depended on the OLD place: a local commute or transport habit tied to the \
+    old city, a stocked household/emergency kit left behind, an arrangement or \
+    service reachable only there. Mark those stale only when the new location \
+    is genuinely incompatible with them — NOT facts that travel with the person \
+    wherever they live (a pet, a remote job, a diet, a relationship). Do NOT \
+    mark stale for mere topic overlap, facts that can \
     both be true at once, or general change that breaks no specific basis. If \
     you cannot name the broken basis, leave it. Output ONLY a JSON array of the \
     integer indices of the now-unsafe earlier facts. If none, output [].";

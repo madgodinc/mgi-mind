@@ -388,6 +388,11 @@ pub struct GeminiClient {
     base_url: String,
     /// When true, request `application/json` response MIME (judge wants JSON).
     json_mode: bool,
+    /// When true, let the model think (gemini-flash is a thinking model). Off by
+    /// default: form-filling extraction wants the token budget on the answer,
+    /// not deliberation. The cross-axis adjudicator needs it ON to reason about
+    /// fact incompatibility (desert climate ⊥ rainy-city residence).
+    thinking: bool,
 }
 
 impl GeminiClient {
@@ -401,12 +406,21 @@ impl GeminiClient {
                 "https://generativelanguage.googleapis.com/v1beta".to_string()
             }),
             json_mode: false,
+            thinking: false,
         })
     }
 
     /// Enable JSON response MIME — the STALE judge returns a strict JSON object.
     pub fn json_mode(mut self, on: bool) -> Self {
         self.json_mode = on;
+        self
+    }
+
+    /// Let the model deliberate. Needed by the cross-axis adjudicator (it must
+    /// reason that arid climate is incompatible with a rainy-city residence);
+    /// leave off for form-filling extraction so the token budget hits the answer.
+    pub fn thinking(mut self, on: bool) -> Self {
+        self.thinking = on;
         self
     }
 }
@@ -441,6 +455,16 @@ impl LlmClient for GeminiClient {
         }
         if self.json_mode {
             gen_config["responseMimeType"] = serde_json::json!("application/json");
+        }
+        // gemini-*-flash-latest now resolves to a THINKING model (gemini-3.5-flash)
+        // that spends the whole maxOutputTokens budget on internal reasoning and
+        // returns an empty/truncated body. Form-filling extraction wants the
+        // budget on the answer, so we disable thinking there (thinkingBudget=0)
+        // — otherwise slot-extract returns 0 facts. The cross-axis adjudicator,
+        // by contrast, NEEDS thinking to infer incompatibility, so it sets
+        // .thinking(true) and we leave the budget at the model default.
+        if !self.thinking {
+            gen_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": 0 });
         }
 
         let mut body = serde_json::json!({
