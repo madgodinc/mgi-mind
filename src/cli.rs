@@ -278,9 +278,12 @@ pub enum Commands {
         /// to the paper's memory-framework column. Reads OPENAI_API_KEY.
         #[arg(long, default_value = "gpt-4o-mini")]
         backbone: String,
-        /// Judge model (STALE paper uses a Gemini flash-lite). Reads
-        /// GEMINI_API_KEY.
-        #[arg(long, default_value = "gemini-flash-latest")]
+        /// Judge model (STALE paper uses a Gemini flash-lite, 95.8% human
+        /// agreement). Reads GEMINI_API_KEY. NOTE: do NOT use the
+        /// `gemini-flash-latest` alias — it resolves to the dear THINKING model
+        /// gemini-3.5-flash ($9/1M out), which burned $84 on 2026-06-08. Pin the
+        /// cheap lite explicitly ($0.25/$1.50 per 1M, ~18x cheaper).
+        #[arg(long, default_value = "gemini-3.1-flash-lite")]
         judge: String,
         /// Extractor variant for ingest (default / lite). Production path.
         #[arg(long, default_value = "default")]
