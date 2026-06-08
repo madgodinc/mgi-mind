@@ -128,6 +128,9 @@ pub struct SearchResult {
     pub library: String,
     pub content: String,
     pub source: Option<String>,
+    /// Which agent wrote this memory (multi-agent writes). None for the 12k
+    /// legacy points and any single-agent write that did not tag an author.
+    pub author: Option<String>,
     pub created_at: Option<String>,
     pub score: f32,
 }
@@ -365,6 +368,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         ("created_at", FieldType::Datetime),
         // `type` (keyword) so a search can scope to memory vs procedure (phase Д2).
         ("type", FieldType::Keyword),
+        // `author` (keyword) so a multi-agent deployment can scope "what did
+        // agent X contribute". Legacy points lack the field and are unaffected.
+        ("author", FieldType::Keyword),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -763,6 +769,21 @@ pub async fn add_memory(
     content: &str,
     source: Option<&str>,
 ) -> Result<usize> {
+    add_memory_authored(config, library, content, source, None).await
+}
+
+/// Like `add_memory` but records which agent wrote the memory (payload `author`
+/// field). The point ID is unchanged — `author` is provenance, not identity —
+/// so a second agent writing identical content still lands on the same point
+/// (idempotent), with the latest writer's author tag. Use from the multi-agent
+/// HTTP surface; the plain `add_memory` keeps single-agent callers untouched.
+pub async fn add_memory_authored(
+    config: &MindConfig,
+    library: &str,
+    content: &str,
+    source: Option<&str>,
+    author: Option<&str>,
+) -> Result<usize> {
     if !is_registered(library) {
         anyhow::bail!(
             "{}",
@@ -842,6 +863,7 @@ pub async fn add_memory(
                 library,
                 source,
                 TYPE_MEMORY,
+                author,
             ),
         ));
     }
@@ -929,6 +951,7 @@ pub async fn add_quarantined(
         TYPE_MEMORY,
         Some(true),
         Some(reason),
+        None,
     );
 
     client
@@ -1281,6 +1304,7 @@ pub async fn add_memories_batch(
                 library,
                 src.as_deref(),
                 TYPE_MEMORY,
+                None,
             ),
         ));
     }
@@ -1305,9 +1329,10 @@ fn build_payload(
     library: &str,
     source: Option<&str>,
     mem_type: &str,
+    author: Option<&str>,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
     build_payload_full(
-        content, hash, created_at, updated_at, library, source, mem_type, None, None,
+        content, hash, created_at, updated_at, library, source, mem_type, None, None, author,
     )
 }
 
@@ -1327,6 +1352,7 @@ fn build_payload_full(
     mem_type: &str,
     quarantined: Option<bool>,
     quarantine_reason: Option<&str>,
+    author: Option<&str>,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("content".into(), content.into());
@@ -1343,6 +1369,13 @@ fn build_payload_full(
     }
     if let Some(r) = quarantine_reason {
         payload.insert("quarantine_reason".into(), r.into());
+    }
+    // Author = which agent wrote this (provenance, NOT identity). Kept out of
+    // deterministic_id deliberately: the point ID stays content-addressed so
+    // re-ingest idempotency, quarantine-promote, and _links resolution are
+    // unaffected. Legacy points simply lack the key.
+    if let Some(a) = author {
+        payload.insert("author".into(), a.into());
     }
     payload
 }
@@ -1413,6 +1446,7 @@ pub async fn search(
                 library: extract_string(payload, "library").unwrap_or_default(),
                 content: extract_string(payload, "content").unwrap_or_default(),
                 source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
                 created_at: extract_string(payload, "created_at"),
                 score: point.score,
             }
@@ -2386,6 +2420,7 @@ pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResu
                 library: extract_string(payload, "library").unwrap_or_default(),
                 content: truncate_str(&content, 200),
                 source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
                 created_at: extract_string(payload, "created_at"),
                 score: 0.0,
             }
@@ -2557,6 +2592,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, 
                 lib,
                 source.as_deref(),
                 TYPE_MEMORY,
+                None,
             );
             let (s_idx, s_val) = sparse_vector(&content);
             let vectors = NamedVectors::default()
@@ -2634,6 +2670,34 @@ mod tests {
         assert_ne!(a, c, "different content must differ");
         assert_ne!(a, d, "different library must differ");
         assert!(uuid::Uuid::parse_str(&a).is_ok());
+    }
+
+    #[test]
+    fn author_is_payload_not_identity() {
+        // The critical invariant: author must NOT enter the point id. Two
+        // agents writing identical content must collapse to the SAME point
+        // (idempotent, quarantine-promote, _links all rely on this).
+        let id_via_quarantine = quarantine_id_for("lib", "shared fact");
+        let id_direct = deterministic_id("lib", "shared fact");
+        assert_eq!(
+            id_via_quarantine, id_direct,
+            "quarantine id must equal the content-addressed id regardless of author"
+        );
+        // And the payload carries author as a plain field, independent of id.
+        let p = build_payload(
+            "shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, Some("agentB"),
+        );
+        assert_eq!(
+            extract_string(&p, "author").as_deref(),
+            Some("agentB"),
+            "author must land in the payload"
+        );
+        // No author → no key (legacy points stay byte-identical).
+        let p2 = build_payload("shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, None);
+        assert!(
+            extract_string(&p2, "author").is_none(),
+            "absent author must not add a payload key"
+        );
     }
 
     #[test]

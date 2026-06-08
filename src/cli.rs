@@ -2190,6 +2190,9 @@ pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String 
             r.id
         );
         let _ = writeln!(out, "   {}", r.content);
+        if let Some(author) = &r.author {
+            let _ = writeln!(out, "   author: {author}");
+        }
         if let Some(src) = &r.source {
             let _ = writeln!(out, "   source: {src}");
         }
