@@ -14,6 +14,7 @@ mod embedder;
 mod error;
 #[cfg(feature = "extractor")]
 mod extractor;
+mod http_api;
 mod ingest;
 mod install_detect;
 mod install_mode;

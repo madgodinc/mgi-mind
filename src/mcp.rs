@@ -275,7 +275,11 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
 ///   progress goes to stderr so stdout stays pure JSON-RPC);
 /// - 3 vault tools return static instruction text - secrets never flow over MCP.
-async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Result<String> {
+/// Dispatch a single tool call by name with JSON args, returning the rendered
+/// tool text. Shared by the MCP stdio loop and the loopback HTTP API
+/// (`http_api.rs`). stdio-independent: takes config as a parameter and returns
+/// a value, so it is safe to call from an axum handler.
+pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Result<String> {
     // Tools that need storage/knowledge require a loaded config + running Qdrant.
     let warm = |needs_config: bool| -> Result<&MindConfig> {
         let _ = needs_config;
