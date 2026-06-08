@@ -348,6 +348,15 @@ pub enum Commands {
         #[arg(long)]
         no_open: bool,
     },
+    /// Serve a loopback HTTP tool-surface for external multi-agent systems.
+    /// Exposes a small allowlist (memory search/recall/add/ingest, fact add)
+    /// over 127.0.0.1 with a per-process bearer token. Destructive/bulk tools
+    /// are NOT exposed. `X-Agent: <id>` tags the author (audit hint, not auth).
+    ServeHttp {
+        /// Port to bind on 127.0.0.1. Omit for a random free port.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Auto-extract & ingest memory candidates (phase Д2). Routes filtered
     /// candidates through the v0.11 relevance gate: clearly low-signal
     /// items are sent to the quarantine layer (still retrievable for
@@ -828,6 +837,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, !no_open).await
+        }
+        Commands::ServeHttp { port } => {
+            let config = crate::config::MindConfig::load()
+                .context("Failed to load config — run `mgimind init` first")?;
+            crate::http_api::run(config, port).await
         }
         Commands::Ingest {
             library,
