@@ -172,19 +172,33 @@ async fn handle_message(config: Option<&MindConfig>, msg: Value) -> Option<Value
     }
 }
 
-/// Best-effort retrieval policy. The MCP protocol gives a server no way to
-/// gate generation, so this is text the client *may* surface to the model — it
-/// is not enforcement. Phrased as triggers, not rules, so the model can apply
-/// judgment instead of mechanically calling tools on every turn.
+/// Operating policy injected into the client at MCP `initialize`. The protocol
+/// cannot force a tool call, so this is the strongest lever available: a
+/// default-ON posture (verify before acting, capture before moving on) instead
+/// of the old opt-in "consider searching" wording, which gave the model an out
+/// on every turn and left the store unused.
 const RETRIEVAL_INSTRUCTIONS: &str = "\
-mgi-mind is the user's persistent memory across sessions. Before answering, \
-consider calling mind_search when the user: (1) asks about a project, person, \
-preference, or decision by name; (2) uses meta-cues like \"did I tell you\", \
-\"do you remember\", \"have you forgotten\", \"you should know\"; (3) negates \
-something to verify (\"isn't it X?\"); (4) references prior conversations. \
-Use mind_context once at session start to see what libraries exist. This is \
-best-effort guidance, not a hard requirement — the model decides when retrieval \
-is worth the round-trip.";
+mgi-mind is the user's persistent memory and source of truth across sessions. \
+Treat your own recollection as a draft to verify against it.\n\
+\n\
+BEFORE acting or making any factual claim about the user's projects, people, \
+environment, preferences, or past decisions: call mind_search (or \
+mind_recall_all) first. Assume your context is stale. Skip the lookup for \
+general knowledge, arithmetic, and turns that work only on content the user \
+supplied in this conversation (formatting, summarizing their pasted text, \
+explaining a snippet they showed you).\n\
+\n\
+ALWAYS search first on: a named project/person/tool; meta-cues (\"did I tell \
+you\", \"do you remember\", \"you should know\"); a negation to verify (\"isn't \
+it X?\"); a reference to prior work (\"like last time\", \"the file we were \
+editing\"); anything the user states as a fixed preference or decision.\n\
+\n\
+AFTER resolving something worth keeping (a decision, a fact, an error->fix): \
+capture it with mind_add or mind_learn before moving on — uncaptured context is \
+lost next session.\n\
+\n\
+Call mind_context once at session start for recent state and the library list. \
+Unsure whether a turn needs a lookup? call mind_should_search first.";
 
 fn initialize_result() -> Value {
     json!({
@@ -1562,9 +1576,10 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_carries_retrieval_instructions() {
-        // The MCP `instructions` field is the only programmatic channel for
-        // best-effort "search before answer" policy. If it disappears, clients
-        // lose the only signal we have — guard it.
+        // The MCP `instructions` field is the only programmatic channel for the
+        // "verify before acting" policy. If it disappears, clients lose the only
+        // signal we have — guard it, and guard the opt-out posture (search
+        // before acting, not "consider searching").
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
         let resp = handle_message(None, msg).await.unwrap();
         let instr = resp["result"]["instructions"]
@@ -1575,8 +1590,8 @@ mod tests {
             "instructions must mention mind_search"
         );
         assert!(
-            instr.contains("best-effort"),
-            "instructions must call this best-effort (no MCP enforcement)"
+            instr.contains("source of truth") && instr.contains("BEFORE"),
+            "instructions must carry the default-on 'verify before acting' posture"
         );
     }
 

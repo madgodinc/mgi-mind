@@ -371,6 +371,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         // `author` (keyword) so a multi-agent deployment can scope "what did
         // agent X contribute". Legacy points lack the field and are unaffected.
         ("author", FieldType::Keyword),
+        // `quarantined` (bool) so the `must_not quarantined` filter on every
+        // search and the quarantine count don't degrade to a full payload scan.
+        ("quarantined", FieldType::Bool),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -1203,6 +1206,26 @@ pub async fn quarantine_list(
 ) -> Result<Vec<QuarantineEntry>> {
     let page = quarantine_list_page(config, library, limit, None).await?;
     Ok(page.entries)
+}
+
+/// How many memories are quarantined right now. Used by `mind_context` to make
+/// the quarantine surface visible (otherwise it is a black hole no agent ever
+/// checks). Best-effort: 0 on any error so context-building never fails.
+pub async fn quarantine_count(config: &MindConfig) -> Result<u64> {
+    let client = get_client(config).await?;
+    let filter = Filter {
+        must: vec![Condition::matches("quarantined", true)],
+        ..Default::default()
+    };
+    let resp = client
+        .count(
+            qdrant_client::qdrant::CountPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .exact(true),
+        )
+        .await
+        .context("quarantine count")?;
+    Ok(resp.result.map(|r| r.count).unwrap_or(0))
 }
 
 /// Fetch a single quarantined entry with full (untruncated) content. Returns
