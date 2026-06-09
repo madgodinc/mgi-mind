@@ -738,6 +738,41 @@ pub async fn memory_detail(
     .await)
 }
 
+/// True if `content` already exists in `library` as a LIVE (non-quarantined)
+/// memory. Because ids are content-addressed, a re-asserted memory lands on the
+/// same id; this lets ingest tell "already kept" apart from "new" so it never
+/// demotes a kept memory into quarantine on a low-novelty re-write. Best-effort:
+/// a fetch failure returns false (treat as "not known live"), never an error
+/// that would abort the write path.
+///
+/// Single-chunk assumption: this checks `deterministic_id(library, trimmed)`,
+/// which only equals a stored point when the content fits in ONE chunk (the
+/// common case for facts/notes). Content longer than `CHUNK_CHARS` is stored as
+/// N per-chunk points with no whole-content id, so this returns false for it —
+/// a long re-assertion is not recognized here (it falls through to the normal
+/// quarantine path). Acceptable: low_novelty rarely fires on long content.
+pub async fn live_memory_exists(config: &MindConfig, library: &str, content: &str) -> bool {
+    let id = deterministic_id(library, content.trim());
+    let Ok(client) = get_client(config).await else {
+        return false;
+    };
+    let pid: qdrant_client::qdrant::PointId = id.into();
+    let Ok(resp) = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid])
+                .with_payload(true),
+        )
+        .await
+    else {
+        return false;
+    };
+    match resp.result.into_iter().next() {
+        // Present and NOT quarantined → it's a live memory we already keep.
+        Some(point) => !extract_bool(&point.payload, "quarantined").unwrap_or(false),
+        None => false,
+    }
+}
+
 /// Edit a memory core's content (the viewer's edit mode). Because point IDs are
 /// content-addressed (`deterministic_id`), changing the text changes the ID — so
 /// an edit is "delete the old point, write the new content" while CARRYING OVER
@@ -880,10 +915,16 @@ pub async fn add_memory_authored(
     ensure_memories_collection(&client, config.vector_size).await?;
     tracing::debug!(library, "add_memory: ensure_memories_collection done");
 
-    // Chunk, dropping trivially short fragments.
+    // Chunk, trimming each fragment and dropping trivially short ones. Trimming
+    // the STORED chunk (not just testing the trimmed length) is what keeps the
+    // content-addressed id trim-stable: `deterministic_id` of a stored chunk then
+    // matches `quarantine_id_for` and `live_memory_exists`, which both trim. Skip
+    // it and a whitespace-padded re-assertion lands on a different id and dodges
+    // the dedup/re-assertion guards entirely.
     let chunks: Vec<String> = chunk_text(content, CHUNK_CHARS)
         .into_iter()
-        .filter(|c| c.trim().chars().count() >= 3)
+        .map(|c| c.trim().to_string())
+        .filter(|c| c.chars().count() >= 3)
         .collect();
     if chunks.is_empty() {
         return Ok(0);
