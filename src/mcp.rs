@@ -394,6 +394,16 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let results = crate::storage::history(cfg, limit).await?;
             Ok(crate::cli::render_history(&results))
         }
+        "mind_by_agent" => {
+            // What did one agent contribute (multi-agent visibility). Reads the
+            // indexed `author` keyword field — no semantic query needed.
+            let cfg = warm(true)?;
+            let agent = arg_str(args, "agent")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'agent'"))?;
+            let limit = arg_u64(args, "limit", 20) as usize;
+            let results = crate::storage::by_author(cfg, agent, limit).await?;
+            Ok(crate::cli::render_search(&results))
+        }
         "mind_quarantine_list" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library");

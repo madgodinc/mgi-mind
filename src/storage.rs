@@ -2433,6 +2433,62 @@ pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResu
     Ok(results)
 }
 
+/// What did a given agent contribute — memories tagged `author = agent`, newest
+/// first. Uses the indexed `author` keyword field (no embedding, no query
+/// vector). This is the reader that makes inter-agent writes visible: an
+/// external coordinator can ask "show me what the Soloist wrote" without a
+/// semantic query. Returns at most `limit` results.
+pub async fn by_author(
+    config: &MindConfig,
+    agent: &str,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    let filter = Filter {
+        must: vec![Condition::matches("author", agent.to_string())],
+        must_not: vec![Condition::matches("quarantined", true)],
+        ..Default::default()
+    };
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .limit(limit as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("by_author scroll failed")?;
+
+    let results = response
+        .result
+        .into_iter()
+        .map(|point| {
+            let payload = &point.payload;
+            let content = extract_string(payload, "content").unwrap_or_default();
+            SearchResult {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                library: extract_string(payload, "library").unwrap_or_default(),
+                content: truncate_str(&content, 200),
+                source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
+                created_at: extract_string(payload, "created_at"),
+                score: 0.0,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
 pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> Result<usize> {
     if format != "json" && format != "md" {
         anyhow::bail!("Unsupported format: {format}. Use json or md");
