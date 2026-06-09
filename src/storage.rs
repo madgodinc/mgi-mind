@@ -2712,6 +2712,81 @@ pub fn restore(input: &str) -> Result<()> {
     Ok(())
 }
 
+// ===== Encrypted backup (roadmap v1.2 local half) =====
+// On-disk format of an encrypted backup file:
+//   magic "MGIBK1\0" (7 bytes) | backup_salt (32 bytes) | nonce+ciphertext
+// The ciphertext is AES-256-GCM over the gzip+tar of the data dir. The key is
+// derived from the user's passphrase + the per-file `backup_salt` via the
+// vault's pinned Argon2id — a SEPARATE salt from `vault.salt` so backup and
+// secret-vault rotation stay independent (critic's key-separation requirement).
+// S3/chunked transport (v1.2 full) sits on top of this blob unchanged.
+
+const BACKUP_MAGIC: &[u8; 7] = b"MGIBK1\0";
+
+/// Write an encrypted backup of the whole data dir to `output`, protected by
+/// `passphrase`. The archive is built in memory, then encrypted; nothing
+/// plaintext touches disk.
+pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
+    use rand::RngCore;
+
+    let home = crate::config::mind_home();
+
+    // gzip+tar the data dir into an in-memory buffer.
+    let mut archive: Vec<u8> = Vec::new();
+    {
+        let enc = flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(".", &home)
+            .context("Failed to archive data directory")?;
+        tar.into_inner()?.finish()?;
+    }
+
+    // Fresh per-backup salt → key, then encrypt the archive bytes.
+    let mut salt = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    let key = crate::vault::derive_key_with_salt(passphrase, &salt)
+        .context("backup key derivation failed")?;
+    let blob = crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
+
+    // magic | salt | nonce+ciphertext
+    let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
+    out.extend_from_slice(BACKUP_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&blob);
+    crate::util::atomic_write(std::path::Path::new(output), &out)
+        .with_context(|| format!("Failed to write encrypted backup {output}"))?;
+    Ok(())
+}
+
+/// Restore an encrypted backup written by `backup_encrypted`.
+pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
+    let data = std::fs::read(input)
+        .with_context(|| format!("Failed to read encrypted backup {input}"))?;
+    if data.len() < BACKUP_MAGIC.len() + 32 {
+        anyhow::bail!("Not a valid mgi-mind encrypted backup (too short)");
+    }
+    if &data[..BACKUP_MAGIC.len()] != BACKUP_MAGIC {
+        anyhow::bail!("Not a valid mgi-mind encrypted backup (bad magic)");
+    }
+    let salt: [u8; 32] = data[BACKUP_MAGIC.len()..BACKUP_MAGIC.len() + 32]
+        .try_into()
+        .expect("32-byte slice");
+    let blob = &data[BACKUP_MAGIC.len() + 32..];
+
+    let key = crate::vault::derive_key_with_salt(passphrase, &salt)
+        .context("backup key derivation failed")?;
+    let archive = crate::vault::decrypt_with_key(blob, &key)
+        .context("backup decryption failed — wrong passphrase?")?;
+
+    let home = crate::config::mind_home();
+    std::fs::create_dir_all(&home)?;
+    let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
+    let mut tar = tar::Archive::new(dec);
+    tar.unpack(&home)
+        .context("Failed to extract encrypted backup")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2848,5 +2923,51 @@ mod tests {
             qdrant_client::qdrant::Value::from("not-a-float"),
         );
         assert!(payload_get_confidence(&payload).is_none());
+    }
+
+    #[test]
+    fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
+        // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
+        // (Serial-safe: uses a unique dir; env is set/cleared within the test.)
+        let base = std::env::temp_dir().join(format!(
+            "mgimind-bk-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = home.join("marker.txt");
+        std::fs::write(&marker, b"crescendo-secret-state").unwrap();
+
+        let bk = base.join("out.enc");
+        let bk_s = bk.to_str().unwrap();
+
+        // Backup encrypted, then wipe the home, then restore.
+        // SAFETY: test-only, single-threaded within this test body.
+        unsafe { std::env::set_var("MGIMIND_HOME", &home) };
+        backup_encrypted(bk_s, "correct horse battery staple").unwrap();
+
+        // The blob must not contain the plaintext marker.
+        let raw = std::fs::read(&bk).unwrap();
+        assert_eq!(&raw[..BACKUP_MAGIC.len()], BACKUP_MAGIC, "magic header");
+        assert!(
+            !raw.windows(b"crescendo-secret-state".len())
+                .any(|w| w == b"crescendo-secret-state"),
+            "plaintext must not appear in the encrypted backup"
+        );
+
+        // Wrong passphrase must fail (AES-GCM auth tag).
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(
+            restore_encrypted(bk_s, "wrong passphrase").is_err(),
+            "wrong passphrase must not restore"
+        );
+
+        // Correct passphrase round-trips the marker back.
+        restore_encrypted(bk_s, "correct horse battery staple").unwrap();
+        let restored = std::fs::read(&marker).unwrap();
+        assert_eq!(restored, b"crescendo-secret-state");
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
