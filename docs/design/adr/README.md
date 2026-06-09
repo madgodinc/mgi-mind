@@ -10,9 +10,11 @@ Order matters: 0001 is the foundation; 0004 is a reaction to 0003;
 | # | Title | Status |
 |---|-------|--------|
 | 0001 | Cardinality enum instead of single_valued_predicates list | accepted |
-| 0002 | Mechanism 1 invariant — never hard-delete a fact | accepted |
+| 0002 | Mechanism 1 invariant: never hard-delete a fact | accepted |
 | 0003 | §10 q5 three guarantees on the background loop | accepted |
 | 0004 | Install-mode profiles with illustrative-only anchors | accepted |
+| 0005 | Superseded distinct from Stale | accepted |
+| 0006 | Derived state lives in droppable side collections | accepted |
 
 ## When to write an ADR
 
