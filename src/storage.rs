@@ -694,6 +694,15 @@ pub(crate) async fn existing_payload_string(
     extract_string(&point.payload, key)
 }
 
+/// True if the given id is a stored procedure (`type = procedure`). Used by
+/// `mind_outcome` to decide whether a test/compile signal should also bump the
+/// procedural success/fail counters.
+pub async fn is_procedure(config: &MindConfig, id: &str) -> Result<bool> {
+    let client = get_client(config).await?;
+    Ok(existing_payload_string(&client, MEMORIES_COLLECTION, id, "type").await.as_deref()
+        == Some(TYPE_PROCEDURE))
+}
+
 /// v1.6 step 1: batched payload read — one `get_points` call returns
 /// every requested string-shaped payload field for a single point.
 ///
