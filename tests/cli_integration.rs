@@ -189,6 +189,74 @@ fn add_then_search_finds_the_memory() {
     );
 }
 
+/// Regression: re-asserting an already-stored memory must keep it LIVE, not
+/// demote it into quarantine. The low-novelty gate fires on the second identical
+/// write (zero new tokens vs the stored neighbor); before the fix that quarantined
+/// the candidate, and because quarantine_id == deterministic_id it CLOBBERED the
+/// live point — a re-write silently lost a memory the user clearly wanted. Now a
+/// re-assertion of a live memory is a no-op and the memory stays searchable.
+#[test]
+fn reasserting_a_memory_keeps_it_live() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itreassert_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let memory = "The launch retrospective is scheduled for the second Tuesday of every month.";
+    let (ok, _o, e) = run(&["create", &lib]);
+    assert!(ok, "create failed: {e}");
+    // Ingest the SAME memory several times — first stores it, the rest hit the
+    // low-novelty gate and must be treated as re-assertions (no-op), not demotions.
+    // Include a whitespace-padded variant: the stored id is trim-canonicalized, so
+    // padding must NOT dodge the guard and spawn a duplicate / clobber.
+    let padded = format!("   {memory}  ");
+    for variant in [memory, memory, padded.as_str(), memory] {
+        let (ok, o, e) = run(&["ingest", "--library", &lib, "--memory", variant]);
+        assert!(ok, "ingest failed:\nstdout:{o}\nstderr:{e}");
+    }
+
+    // It must still be retrievable by ordinary search (quarantined points are not).
+    let (ok, out, err) = run(&[
+        "search",
+        "when is the launch retrospective",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    let _ = run(&["drop", &lib]);
+    assert!(ok, "search failed: {err}");
+    assert!(
+        out.contains("launch retrospective"),
+        "a re-asserted memory must stay live and searchable, got:\n{out}"
+    );
+}
+
 /// Same retrieval path as above, but driven over the **MCP stdio transport** end
 /// to end: feed JSON-RPC `initialize` + `tools/call` lines into `mgimind mcp` and
 /// assert the `mind_search` response retrieves what `mind_add` stored. Proves the
