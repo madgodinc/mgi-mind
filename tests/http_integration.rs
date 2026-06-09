@@ -122,21 +122,6 @@ fn http_surface_full_contract() {
     let bearer = format!("Authorization: Bearer {token}");
     let lib = format!("ithttp_{}", std::process::id());
 
-    // Libraries are created by the operator (CLI), not over the HTTP surface —
-    // create is not an allowlisted route, so the Band writes only to libraries
-    // that already exist. Pre-create it here the way an operator would.
-    let created = Command::new(bin())
-        .args(["create", &lib])
-        .env("MGIMIND_HOME", &mind)
-        .env("ORT_DYLIB_PATH", &ort)
-        .output()
-        .expect("spawn mgimind create");
-    assert!(
-        created.status.success(),
-        "library create failed: {}",
-        String::from_utf8_lossy(&created.stderr)
-    );
-
     // 1) Wait for /health to come up. Detect a bind failure (port busy / leaked
     //    server from a prior run) FAST via try_wait instead of polling 30s.
     let health = format!("{base}/health");
@@ -175,6 +160,45 @@ fn http_surface_full_contract() {
     assert_eq!(
         code, 401,
         "a bad bearer token must be rejected with 401 on a protected route"
+    );
+
+    // 2b) Create the working library over HTTP — the Band makes its own library,
+    //     no operator pre-step. The only structure-mutating route, non-destructive.
+    let create = format!("{base}/library/create");
+    let cbody = serde_json::json!({"name": lib}).to_string();
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &cbody,
+        &create,
+    ]);
+    assert_eq!(
+        code, 200,
+        "library create over HTTP should succeed, got {code}: {out}"
+    );
+
+    // 2c) A reserved library name must be refused with a clean 4xx, not created —
+    //     the namespace guard reaches the untrusted HTTP caller.
+    let rbody = serde_json::json!({"name": "_procedures"}).to_string();
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &rbody,
+        &create,
+    ]);
+    assert!(
+        (400..500).contains(&code),
+        "a reserved library name must be refused with 4xx, not {code}: {out}"
     );
 
     // 3) Ingest a memory as alice → 200, stored.
