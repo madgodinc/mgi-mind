@@ -244,6 +244,20 @@ pub async fn add_fact(
     predicate: &str,
     object: &str,
 ) -> Result<String> {
+    add_fact_authored(config, subject, predicate, object, None).await
+}
+
+/// Like `add_fact` but records which agent asserted the fact (payload `author`
+/// field). Identity (the fact id from subject+predicate+object) is unchanged —
+/// author is provenance, mirroring memory-side `add_memory_authored`. Used by
+/// the multi-agent HTTP surface; the plain `add_fact` stays unattributed.
+pub async fn add_fact_authored(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    author: Option<&str>,
+) -> Result<String> {
     // Post-critic (PR #5): acquire per-(subject, predicate) lock so
     // concurrent add_fact on the same axis cannot race the duel.
     // Held until the end of add_fact (including the upsert + dampen
@@ -336,6 +350,11 @@ pub async fn add_fact(
     payload.insert("valid".into(), "true".into());
     payload.insert("type".into(), "fact".into());
     payload.insert("status".into(), status.as_str().into());
+    // Which agent asserted this fact (multi-agent writes). Absent for the
+    // single-agent path; legacy facts simply lack the key.
+    if let Some(a) = author {
+        payload.insert("author".into(), a.into());
+    }
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);

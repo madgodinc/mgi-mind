@@ -383,7 +383,9 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             if raw.is_none() && candidates.is_empty() {
                 anyhow::bail!("mind_ingest needs either 'raw' text or a 'candidates' array");
             }
-            let report = crate::ingest::run_ingest(cfg, raw, candidates, library).await?;
+            let author = arg_str(args, "agent");
+            let report =
+                crate::ingest::run_ingest_authored(cfg, raw, candidates, library, author).await?;
             Ok(report.render())
         }
         "mind_history" => {
@@ -455,7 +457,9 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'predicate'"))?;
             let object = arg_str(args, "object")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'object'"))?;
-            let id = crate::knowledge::add_fact(cfg, subject, predicate, object).await?;
+            let author = arg_str(args, "agent");
+            let id =
+                crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author).await?;
             Ok(format!(
                 "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
             ))
