@@ -59,6 +59,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
         .route("/api/consolidate", get(api_consolidate_dry_run))
         .route("/api/ingest/recent", get(api_ingest_recent))
+        .route("/api/graph", get(api_graph))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -394,6 +395,112 @@ async fn api_quarantine_promote(
             .note("manual promote via viewer UI"),
     );
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
+}
+
+/// The brain as a graph: cores (nodes) connected by neurons (edges), for a
+/// visual "dig inside the mind" browser.
+///
+/// Core kinds: `library` (a memory region), `memory` (a stored chunk — the
+/// bright cores), `entity` (a fact subject/object concept).
+///
+/// Neuron kinds: `fact` (entity-predicate-entity, the knowledge-graph wiring),
+/// `holds` (library to memory), `mention` (a memory text names a known entity
+/// via non-LLM substring match — the associative threads).
+///
+/// Shape is cytoscape/d3-friendly. `limit` caps memory cores per library so a
+/// huge store still renders.
+async fn api_graph(
+    State(state): State<AppState>,
+    Query(q): Query<GraphQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    let cfg = &state.config;
+    let per_lib = q.limit;
+
+    use std::collections::BTreeMap;
+    // Dedupe nodes by id; an entity appearing as both subject and object is one
+    // core. Map id -> node json so later inserts (e.g. kind upgrade) are cheap.
+    let mut nodes: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut edges: Vec<serde_json::Value> = Vec::new();
+
+    // --- entity cores + fact neurons ---
+    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let mut entities: Vec<String> = Vec::new();
+    for f in &facts {
+        if !f.valid {
+            continue;
+        }
+        for e in [&f.subject, &f.object] {
+            nodes.entry(e.clone()).or_insert_with(|| {
+                entities.push(e.clone());
+                serde_json::json!({ "id": e, "label": e, "kind": "entity" })
+            });
+        }
+        edges.push(serde_json::json!({
+            "source": f.subject, "target": f.object, "label": f.predicate,
+            "kind": "fact", "id": f.id,
+        }));
+    }
+
+    // --- library + memory cores, holds + mention neurons ---
+    let libs = crate::storage::list_libraries(cfg).await.map_err(internal)?;
+    for lib in &libs {
+        if lib.starts_with('_') {
+            continue;
+        }
+        let lib_id = format!("lib:{lib}");
+        nodes.entry(lib_id.clone()).or_insert_with(|| {
+            serde_json::json!({ "id": lib_id, "label": lib, "kind": "library" })
+        });
+        let mems = crate::storage::list_memories(cfg, lib, per_lib)
+            .await
+            .unwrap_or_default();
+        for m in &mems {
+            let mid = format!("mem:{}", m.id);
+            let snippet: String = m.content.chars().take(80).collect();
+            nodes.insert(
+                mid.clone(),
+                serde_json::json!({ "id": mid, "label": snippet, "kind": "memory" }),
+            );
+            edges.push(serde_json::json!({
+                "source": lib_id, "target": mid, "label": "holds", "kind": "holds",
+            }));
+            // Associative threads: a memory that names a known entity.
+            let lc = m.content.to_lowercase();
+            for e in &entities {
+                if e.len() >= 4 && lc.contains(&e.to_lowercase()) {
+                    edges.push(serde_json::json!({
+                        "source": mid, "target": e, "label": "mentions", "kind": "mention",
+                    }));
+                }
+            }
+        }
+    }
+
+    let node_list: Vec<serde_json::Value> = nodes.into_values().collect();
+    Ok(Json(serde_json::json!({
+        "nodes": node_list,
+        "edges": edges,
+        "stats": {
+            "nodes": node_list.len(), "edges": edges.len(),
+            "facts": facts.len(), "libraries": libs.len(),
+        },
+    })))
+}
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    token: Option<String>,
+    #[serde(default = "default_graph_limit")]
+    limit: usize,
+}
+
+fn default_graph_limit() -> usize {
+    200
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> Response {
