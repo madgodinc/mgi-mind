@@ -28,6 +28,7 @@ mod procedure;
 mod provenance;
 mod relevance;
 mod reranker;
+mod retrieval_policy;
 mod secrets;
 mod session;
 mod session_ingest;

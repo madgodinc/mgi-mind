@@ -348,6 +348,24 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             }
             Ok(out)
         }
+        "mind_should_search" => {
+            // Live, query-aware search-before-answer advice (the runtime half of
+            // the policy that AI_INSTRUCTIONS documents and bench_policy scores
+            // offline). Advisory only — MCP cannot force a search.
+            let cfg = warm(true)?;
+            let query = arg_str(args, "query")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
+            // Known project/library names are the strongest P1 signal; pull them
+            // from the registered libraries (no separate registry — audit #18).
+            let libs: Vec<String> = crate::storage::list_libraries(cfg)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| !l.starts_with('_'))
+                .collect();
+            let advice = crate::retrieval_policy::classify(query, &libs);
+            Ok(crate::retrieval_policy::render(&advice))
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -950,6 +968,17 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_should_search",
+            "description": "Decide whether to search memory BEFORE answering a user query. Returns priority (must-search / should-search / answer-directly), the reason, and which libraries to search first. Call this on a turn when unsure; it implements the search-before-answer trigger policy (named project, meta-cue like 'did I tell you', negation to verify, cross-session reference). Advisory — it cannot force a search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The user's query to classify" }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "mind_add",
             "description": "Add a memory entry",
             "inputSchema": {
@@ -1425,8 +1454,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            38,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) = 38"
+            39,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) = 39"
         );
         let deprecated = tools
             .iter()
@@ -1438,8 +1467,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 23,
-            "non-deprecated surface is 23 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all)"
+            live_surface, 24,
+            "non-deprecated surface is 24 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all + 1 mind_should_search)"
         );
     }
 
@@ -1550,11 +1579,12 @@ mod tests {
     async fn tools_list_returns_v1_5_surface() {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
-        // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) = 38 total.
+        // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
+        // = 39 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 38);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 39);
     }
 
     #[tokio::test]
