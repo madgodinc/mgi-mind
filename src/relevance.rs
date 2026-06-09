@@ -81,6 +81,12 @@ pub struct GateConfig {
     /// Defaults to common noise sources (lock files, build artifacts, IDE
     /// metadata, secrets-bearing dotfiles).
     pub blacklist_path_substrings: Vec<String>,
+    /// Vendored-doc filename stems (readme, changelog, license, …). Matched
+    /// against the source's FILENAME STEM only — a file named `README.md`
+    /// matches, but a path containing "readme" elsewhere (e.g. a project named
+    /// `readme-generator`) does NOT. Keeps a migration's dumped third-party docs
+    /// out without quarantining the user's own files.
+    pub blacklist_doc_stems: Vec<String>,
     /// Tool names matching any of these get quarantined. Defaults to read-only
     /// tools whose output is usually transient and rarely worth storing.
     pub blacklist_tool_names: Vec<String>,
@@ -108,6 +114,21 @@ impl Default for GateConfig {
                 ".lock".into(),
                 ".cache/".into(),
                 "/tmp/".into(),
+            ],
+            // Vendored project docs: a 2026-05-29 migration dumped 7800+
+            // CHANGELOG/README of OTHER repos into memory. Matched against the
+            // FILENAME STEM only (not a path substring) so a project legitimately
+            // named "license-checker" or a folder "readme-assets" is NOT
+            // quarantined — only a file actually called README.md / LICENSE / etc.
+            blacklist_doc_stems: vec![
+                "readme".into(),
+                "changelog".into(),
+                "license".into(),
+                "licence".into(),
+                "code_of_conduct".into(),
+                "contributing".into(),
+                "authors".into(),
+                "notice".into(),
             ],
             blacklist_tool_names: vec![
                 // These tend to surface ephemeral info; user-curated memory
@@ -192,15 +213,28 @@ pub fn check_cheap(candidate: &Candidate<'_>, cfg: &GateConfig) -> Verdict {
     }
 
     // Blacklist by source path: lock files, build artifacts, secrets dirs.
-    if let Some(src) = candidate.source
-        && cfg
+    // Case-insensitive; patterns are authored lowercase. Path substrings here
+    // are genuine path fragments (".env", "target/"), not doc names.
+    if let Some(src) = candidate.source {
+        let src_lower = src.to_lowercase();
+        if cfg
             .blacklist_path_substrings
             .iter()
-            .any(|p| src.contains(p))
-    {
-        return Verdict::Quarantine {
-            reason: "blacklist_path".into(),
-        };
+            .any(|p| src_lower.contains(p.as_str()))
+        {
+            return Verdict::Quarantine {
+                reason: "blacklist_path".into(),
+            };
+        }
+        // Vendored docs: match the FILENAME STEM only, so "README.md" is caught
+        // but "readme-generator/notes.md" or a "license-checker" project is not.
+        let basename = src_lower.rsplit(['/', '\\']).next().unwrap_or(&src_lower);
+        let stem = basename.split('.').next().unwrap_or(basename);
+        if cfg.blacklist_doc_stems.iter().any(|s| stem == s.as_str()) {
+            return Verdict::Quarantine {
+                reason: "blacklist_doc".into(),
+            };
+        }
     }
 
     // Blacklist by tool name.
@@ -321,6 +355,55 @@ mod tests {
             tool_name: None,
         };
         assert_eq!(check_cheap(&c, &cfg).reason(), Some("blacklist_path"));
+    }
+
+    #[test]
+    fn vendored_doc_quarantined_case_insensitive() {
+        let cfg = GateConfig::default();
+        // Real migration dumps had uppercase filenames (README.md, CHANGELOG.md);
+        // patterns are lowercase. Match must be case-insensitive or none of the
+        // 7800+ vendored docs would be caught. Matched on filename stem.
+        for path in [
+            "other-repo/README.md",
+            "vendor/CHANGELOG.md",
+            "dep/LICENSE",
+            "x/Contributing.md",
+        ] {
+            let c = Candidate {
+                content: "Installation: run npm install then npm start to launch the app",
+                source: Some(path),
+                tool_name: None,
+            };
+            assert_eq!(
+                check_cheap(&c, &cfg).reason(),
+                Some("blacklist_doc"),
+                "expected {path} to be blacklisted as a doc",
+            );
+        }
+    }
+
+    #[test]
+    fn doc_stem_does_not_overmatch_paths() {
+        let cfg = GateConfig::default();
+        // The user's OWN files and projects whose path merely CONTAINS a doc word
+        // must pass — the stem match is filename-only, not a path substring.
+        for path in [
+            "projects/license-checker/design.md",
+            "readme-generator/src/main.rs",
+            "notes/my-changelog-thoughts.md", // filename stem is "my-changelog-thoughts"
+            "vendor/readme-assets/logo-notes.md",
+        ] {
+            let c = Candidate {
+                content: "We decided to ship the narrow v0.1 first and widen it in v0.2 after release",
+                source: Some(path),
+                tool_name: None,
+            };
+            assert_eq!(
+                check_cheap(&c, &cfg).reason(),
+                None,
+                "expected {path} to pass the gate (own file, not a vendored doc)",
+            );
+        }
     }
 
     #[test]
