@@ -590,7 +590,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let id = arg_str(args, "id")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
             let worked = arg_bool(args, "worked", false);
-            crate::procedure::outcome(cfg, id, worked).await
+            // Manual outcome — no deterministic signal, so don't verify.
+            crate::procedure::outcome(cfg, id, worked, false).await
         }
         "mind_outcome" => {
             // v1.5 Phase 7 step 7.1: generalised external-signal API.
@@ -621,21 +622,27 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 source,
                 ts: chrono::Utc::now().to_rfc3339(),
             };
-            let mut out = crate::outcome::record(cfg, memory_id, signal).await?;
+            let (mut out, signal_was_new) =
+                crate::outcome::record_with_novelty(cfg, memory_id, signal).await?;
             // Bridge: a test_passed/code_compiled signal on a PROCEDURE is the
             // "the fix actually worked" signal the procedural layer needs — so
-            // also bump its success/fail counters (→ `verified` once it has a
-            // real success). Without this bridge, mind_outcome only logged an
-            // external signal and procedures stayed unverified. This is the
-            // explicit-signal path (critic): no session-window correlation, the
-            // caller names the procedure id directly.
+            // also bump its success/fail counters (→ `verified` on a real
+            // success). Without this bridge, mind_outcome only logged an external
+            // signal and procedures stayed unverified. Explicit-signal path (no
+            // session-window correlation, the caller names the procedure id).
+            // Only bump on a NEW signal — re-posting the same (type, source)
+            // dedups the log, so the counter must not inflate on redelivery.
             let is_proc_signal = matches!(
                 signal_type,
                 crate::outcome::OutcomeSignal::TestPassed
                     | crate::outcome::OutcomeSignal::CodeCompiled
             );
-            if is_proc_signal && crate::storage::is_procedure(cfg, memory_id).await? {
-                let note = crate::procedure::outcome(cfg, memory_id, success).await?;
+            if signal_was_new
+                && is_proc_signal
+                && crate::storage::is_procedure(cfg, memory_id).await?
+            {
+                // Deterministic signal → a success both counts and verifies.
+                let note = crate::procedure::outcome(cfg, memory_id, success, success).await?;
                 out.push('\n');
                 out.push_str(&note);
             }

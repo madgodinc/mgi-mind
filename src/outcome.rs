@@ -231,13 +231,29 @@ pub async fn record(
     memory_id: &str,
     new_signal: ExternalSignal,
 ) -> anyhow::Result<String> {
+    Ok(record_with_novelty(config, memory_id, new_signal).await?.0)
+}
+
+/// Like `record`, but also reports whether the (signal_type, source) pair was
+/// NEW (true) or a re-post of an existing one (false). The procedure bridge
+/// uses this so re-posting the same test_passed signal doesn't double-bump the
+/// procedure's success_count — the signal log dedups, but the counter bump
+/// would otherwise inflate on every redelivery (CI retries, idempotent webhooks).
+pub async fn record_with_novelty(
+    config: &crate::config::MindConfig,
+    memory_id: &str,
+    new_signal: ExternalSignal,
+) -> anyhow::Result<(String, bool)> {
     let mut existing = crate::storage::read_external_signals(config, memory_id).await?;
     let type_name = serde_json::to_string(&new_signal.signal_type)
         .unwrap_or_else(|_| "<unknown>".to_string())
         .trim_matches('"')
         .to_string();
+    let count_before = existing.len();
     existing.push(new_signal.clone());
     let deduped = dedup_keep_latest(existing);
+    // New iff the dedup didn't collapse our push back onto an existing key.
+    let is_new = deduped.len() > count_before;
     crate::storage::write_external_signals(config, memory_id, &deduped).await?;
 
     // v1.5 Phase 7 step 7.3 — error-rate guardrail. After every
@@ -255,11 +271,14 @@ pub async fn record(
         String::new()
     };
 
-    Ok(format!(
-        "Recorded {type_name} (success={}) on {memory_id} from source '{}' — {} distinct signal(s) now logged.{guardrail_msg}",
-        new_signal.success,
-        new_signal.source,
-        deduped.len(),
+    Ok((
+        format!(
+            "Recorded {type_name} (success={}) on {memory_id} from source '{}' — {} distinct signal(s) now logged.{guardrail_msg}",
+            new_signal.success,
+            new_signal.source,
+            deduped.len(),
+        ),
+        is_new,
     ))
 }
 

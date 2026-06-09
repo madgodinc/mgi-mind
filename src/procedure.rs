@@ -66,18 +66,35 @@ fn normalize_token(tok: &str) -> Option<String> {
     Some(joined)
 }
 
-/// Rank recalled procedures by the proactivity rule: verified first, then by net
-/// success (success - fail), then by retrieval score. Pure, so it is unit-tested.
+/// Combined ranking score for one procedure. Relevance (retrieval `score`) is
+/// the base; a verified flag and a positive worked-ratio BOOST it, repeated
+/// failures DEMOTE it. This replaces the old hard verified-first gate, where any
+/// verified hit beat any unverified one regardless of relevance — so a perfectly
+/// matching fix that simply hadn't earned a test signal yet never surfaced. Now
+/// a strong match can still win, but a proven fix gets a real edge.
+fn rank_score(h: &ProcedureHit) -> f32 {
+    let mut s = h.score;
+    if h.verified {
+        s += 0.25; // a deterministic-signal-verified fix is trustworthy
+    }
+    // worked-ratio in [-1, 1]: many successes lift, repeated fails sink.
+    let total = h.success_count + h.fail_count;
+    if total > 0 {
+        let ratio = (h.success_count - h.fail_count) as f32 / total as f32;
+        // scale by confidence (more outcomes → stronger pull), capped.
+        let confidence = (total as f32 / 5.0).min(1.0);
+        s += 0.20 * ratio * confidence;
+    }
+    s
+}
+
+/// Rank recalled procedures by combined relevance + trust score (see
+/// `rank_score`). Pure, so it is unit-tested.
 pub fn rank(mut hits: Vec<ProcedureHit>) -> Vec<ProcedureHit> {
     hits.sort_by(|a, b| {
-        b.verified
-            .cmp(&a.verified)
-            .then((b.success_count - b.fail_count).cmp(&(a.success_count - a.fail_count)))
-            .then(
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
+        rank_score(b)
+            .partial_cmp(&rank_score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     hits
 }
@@ -120,7 +137,7 @@ fn render(hits: &[ProcedureHit], limit: usize) -> String {
     if hits.is_empty() {
         return "No matching procedures found.".to_string();
     }
-    let mut s = String::from("Procedures (verified first):\n");
+    let mut s = String::from("Procedures (ranked by relevance + trust):\n");
     for h in hits.iter().take(limit) {
         let mark = if h.verified {
             "✓ verified"
@@ -141,13 +158,19 @@ fn render(hits: &[ProcedureHit], limit: usize) -> String {
     s
 }
 
-/// Record the outcome of reusing a procedure (self-correction loop).
-pub async fn outcome(config: &MindConfig, id: &str, worked: bool) -> Result<String> {
-    storage::procedure_outcome(config, id, worked).await?;
+/// Record the outcome of reusing a procedure (self-correction loop). `verify`
+/// promotes to `verified=true` on success — pass it only for a deterministic
+/// signal (test/compile), never a human "seems fine".
+pub async fn outcome(config: &MindConfig, id: &str, worked: bool, verify: bool) -> Result<String> {
+    storage::procedure_outcome(config, id, worked, verify).await?;
     Ok(format!(
         "Recorded outcome for {id}: {}.",
         if worked {
-            "worked (success++)"
+            if verify {
+                "worked (success++, verified)"
+            } else {
+                "worked (success++)"
+            }
         } else {
             "failed (fail++, demoted)"
         }
@@ -196,18 +219,27 @@ mod tests {
     }
 
     #[test]
-    fn rank_puts_verified_first() {
-        let hits = vec![hit("unv", false, 10, 0, 0.9), hit("ver", true, 0, 0, 0.1)];
+    fn rank_verified_boosts_but_does_not_override_relevance() {
+        // A strongly-matching unverified fix (0.9) must still beat a barely-
+        // matching verified one (0.1) — the old hard gate buried real matches.
+        let hits = vec![hit("unv", false, 0, 0, 0.9), hit("ver", true, 0, 0, 0.1)];
         let r = rank(hits);
-        assert_eq!(
-            r[0].id, "ver",
-            "verified outranks a high-scoring unverified"
-        );
+        assert_eq!(r[0].id, "unv", "strong relevance wins over a weak verified");
+    }
+
+    #[test]
+    fn rank_verified_wins_a_close_call() {
+        // When relevance is close, the verified flag tips it (+0.25 boost).
+        let hits = vec![hit("unv", false, 0, 0, 0.6), hit("ver", true, 0, 0, 0.5)];
+        let r = rank(hits);
+        assert_eq!(r[0].id, "ver", "verified tips a near-tie");
     }
 
     #[test]
     fn rank_demotes_failing_fix() {
-        let hits = vec![hit("bad", false, 0, 5, 0.9), hit("good", false, 5, 0, 0.1)];
+        // A repeatedly-failing fix sinks below a proven one even at higher base
+        // score, once the worked-ratio penalty applies.
+        let hits = vec![hit("bad", false, 0, 5, 0.7), hit("good", false, 5, 0, 0.6)];
         let r = rank(hits);
         assert_eq!(r[0].id, "good", "net-positive fix outranks a failing one");
     }
