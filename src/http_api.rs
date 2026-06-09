@@ -94,6 +94,9 @@ pub async fn run(
         .route("/memory/ingest", post(memory_ingest))
         .route("/memory/by-agent", post(memory_by_agent))
         .route("/fact/add", post(fact_add))
+        .route("/session/start", post(session_start))
+        .route("/session/end", post(session_end))
+        .route("/session/last", post(session_last))
         .with_state(state);
 
     let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
@@ -115,8 +118,9 @@ pub async fn run(
         eprintln!("  agents: {agent_names}");
     }
     eprintln!(
-        "  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add  GET /health"
+        "  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add"
     );
+    eprintln!("          POST /session/{{start,end,last}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
 
@@ -281,4 +285,61 @@ async fn memory_by_agent(
         with_agent(args, &headers, derived)
     };
     call(&state, "mind_by_agent", merged).await
+}
+
+// ----- continuity (session) --------------------------------------------------
+// The multi-agent payoff: an agent can resume from where a prior run (its own,
+// or a teammate's) left off. The session is keyed by agent — with per-agent
+// tokens the agent is derived from the token, so "resume my session" needs no
+// body field; a coordinator can also resume a named agent by passing `agent`.
+
+/// Inject `action` and resolve the agent (body > token/header) into the args,
+/// then dispatch `mind_session`.
+fn session_call_args(mut args: Value, action: &str, headers: &HeaderMap, derived: Option<String>) -> Value {
+    if let Value::Object(map) = &mut args {
+        map.insert("action".to_string(), Value::String(action.to_string()));
+        // Explicit body `agent` wins (coordinator resuming a named agent);
+        // otherwise use the token-derived / header identity.
+        let has_explicit = map.get("agent").and_then(|v| v.as_str()).is_some();
+        if !has_explicit && let Some(agent) = derived.or_else(|| agent_of(headers)) {
+            map.insert("agent".to_string(), Value::String(agent));
+        }
+    }
+    args
+}
+
+async fn session_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_session", session_call_args(args, "start", &headers, derived)).await
+}
+
+async fn session_end(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_session", session_call_args(args, "end", &headers, derived)).await
+}
+
+async fn session_last(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_session", session_call_args(args, "last", &headers, derived)).await
 }
