@@ -65,6 +65,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/ingest/recent", get(api_ingest_recent))
         .route("/api/graph", get(api_graph))
         .route("/api/pulse", get(api_pulse))
+        .route("/api/node/:id", get(api_node))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -506,6 +507,62 @@ struct GraphQuery {
 
 fn default_graph_limit() -> usize {
     200
+}
+
+/// One core's full detail — the lazy "zoom inside" fetch on click. The graph
+/// stays light (structure + short labels); this loads the full content and the
+/// core's neighbours + history on demand. `id` is "mem:<uuid>", "lib:<name>",
+/// or an entity text.
+async fn api_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let cfg = &state.config;
+
+    if let Some(mem_id) = id.strip_prefix("mem:") {
+        let detail = crate::storage::memory_detail(cfg, mem_id)
+            .await
+            .map_err(internal)?;
+        let history = crate::audit::for_target(mem_id).unwrap_or_default();
+        return Ok(Json(serde_json::json!({
+            "id": id, "kind": "memory", "detail": detail, "history": history,
+        })));
+    }
+
+    if let Some(lib) = id.strip_prefix("lib:") {
+        // A region: its memories (capped) + count.
+        let mems = crate::storage::list_memories(cfg, lib, 50)
+            .await
+            .unwrap_or_default();
+        let items: Vec<serde_json::Value> = mems
+            .iter()
+            .map(|m| {
+                let snippet: String = m.content.chars().take(160).collect();
+                serde_json::json!({ "id": format!("mem:{}", m.id), "snippet": snippet })
+            })
+            .collect();
+        return Ok(Json(serde_json::json!({
+            "id": id, "kind": "library", "library": lib, "members": items,
+        })));
+    }
+
+    // Otherwise treat it as an entity: the facts it participates in.
+    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let related: Vec<serde_json::Value> = facts
+        .iter()
+        .filter(|f| f.valid && (f.subject == id || f.object == id))
+        .map(|f| {
+            serde_json::json!({
+                "subject": f.subject, "predicate": f.predicate, "object": f.object,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "id": id, "kind": "entity", "facts": related,
+    })))
 }
 
 /// Live pulse feed (SSE). Each `data:` line is a `PulseEvent` JSON: an impulse
