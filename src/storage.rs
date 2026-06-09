@@ -28,6 +28,11 @@ pub const FACTS_COLLECTION: &str = "_kg_facts";
 /// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
 /// Lazily created on first cardinality registration; absent predicate = Multi.
 pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
+/// Derived-state side collection (ADR 0006) for procedure outcome stats:
+/// success/fail counts, verified flag, last_used. Vectorless, keyed by the core
+/// procedure point's id. Droppable — recall degrades to "no trust boost" when it
+/// is absent, never errors, never hides a procedure.
+pub const PROCSTATS_COLLECTION: &str = "_mod_procstats";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -435,6 +440,18 @@ async fn create_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
 /// a session, so once we've ensured a collection + its indexes, we skip all of it.
 static MEMORIES_READY: AtomicBool = AtomicBool::new(false);
 static FACTS_READY: AtomicBool = AtomicBool::new(false);
+static PROCSTATS_READY: AtomicBool = AtomicBool::new(false);
+
+/// Idempotently ensure `_mod_procstats` exists, cached per-process so the hot
+/// outcome/learn paths don't pay a Qdrant round-trip on every call.
+async fn ensure_procstats_collection(client: &Qdrant) -> Result<()> {
+    if PROCSTATS_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    create_vectorless_collection(client, PROCSTATS_COLLECTION).await?;
+    PROCSTATS_READY.store(true, Ordering::Release);
+    Ok(())
+}
 
 pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
     if MEMORIES_READY.load(Ordering::Acquire) {
@@ -1967,25 +1984,41 @@ pub struct ProcedureHit {
     pub score: f32,
 }
 
-/// Fetch an existing procedure's preserved fields (counts, created_at, verified)
-/// so a re-learn keeps history instead of resetting it.
+/// Fetch an existing procedure's preserved fields (created_at from the core
+/// point; counts + verified from the derived `_mod_procstats` collection per
+/// ADR 0006) so a re-learn keeps history instead of resetting it. Returns
+/// `(created_at, success_count, fail_count, verified)`.
+///
+/// Upgrade safety: a pre-Step-10 procedure carries its counts on the CORE point
+/// and has no `_mod_procstats` row. Seed from the core fields, then override with
+/// the side row when present — so a re-learn of a legacy procedure preserves its
+/// real history instead of resetting it to zero (then `add_procedure` writes it
+/// back into the side collection, healing it forward).
 async fn existing_procedure(client: &Qdrant, id: &str) -> (Option<String>, i64, i64, bool) {
     let pid: qdrant_client::qdrant::PointId = id.to_string().into();
-    let Ok(resp) = client
+    let (created_at, mut succ, mut fail, mut verified) = match client
         .get_points(GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid]).with_payload(true))
         .await
-    else {
-        return (None, 0, 0, false);
+    {
+        Ok(resp) => match resp.result.into_iter().next() {
+            Some(p) => (
+                extract_string(&p.payload, "created_at"),
+                extract_int(&p.payload, "success_count").unwrap_or(0),
+                extract_int(&p.payload, "fail_count").unwrap_or(0),
+                extract_string(&p.payload, "verified").as_deref() == Some("true"),
+            ),
+            None => (None, 0, 0, false),
+        },
+        Err(_) => (None, 0, 0, false),
     };
-    let Some(point) = resp.result.into_iter().next() else {
-        return (None, 0, 0, false);
-    };
-    (
-        extract_string(&point.payload, "created_at"),
-        extract_int(&point.payload, "success_count").unwrap_or(0),
-        extract_int(&point.payload, "fail_count").unwrap_or(0),
-        extract_string(&point.payload, "verified").as_deref() == Some("true"),
-    )
+    let stats = procstats_one(client, id).await;
+    // The side row, when present, is the live source — it overrides the legacy seed.
+    if stats.success_count != 0 || stats.fail_count != 0 || stats.verified {
+        succ = stats.success_count;
+        fail = stats.fail_count;
+        verified = stats.verified;
+    }
+    (created_at, succ, fail, verified)
 }
 
 /// Store (or update) a procedure. `norm_error` is the already-normalized error
@@ -2004,7 +2037,18 @@ pub async fn add_procedure(
     ensure_memories_collection(&client, config.vector_size).await?;
 
     let id = procedure_id(norm_error, fix);
-    let (existing_created, succ, fail, was_verified) = existing_procedure(&client, &id).await;
+    let (existing_created, mut succ, mut fail, mut was_verified) =
+        existing_procedure(&client, &id).await;
+    // Genuinely-new procedure (no core point at this id): any _mod_procstats row
+    // is a stale orphan from a procedure that was deleted then re-learned with the
+    // same (error, fix). The delete was an explicit "drop this history" signal, so
+    // do not resurrect it — clear the orphan and start fresh.
+    if existing_created.is_none() {
+        delete_procstats(&client, &id).await;
+        succ = 0;
+        fail = 0;
+        was_verified = false;
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let created_at = existing_created.unwrap_or_else(|| now.clone());
 
@@ -2031,16 +2075,10 @@ pub async fn add_procedure(
     if let Some(p) = provenance {
         payload.insert("provenance".into(), p.into());
     }
-    // verified latches: once true (a real signal), a manual re-learn won't unset it.
-    let verified = verified || was_verified;
-    payload.insert(
-        "verified".into(),
-        if verified { "true" } else { "false" }.into(),
-    );
-    payload.insert("success_count".into(), succ.into());
-    payload.insert("fail_count".into(), fail.into());
+    // Derived stats (counts, verified) live in _mod_procstats (ADR 0006), NOT on
+    // this core point. created_at/updated_at are raw lifecycle fields and stay.
     payload.insert("created_at".into(), created_at.into());
-    payload.insert("updated_at".into(), now.into());
+    payload.insert("updated_at".into(), now.clone().into());
 
     client
         .upsert_points(
@@ -2052,6 +2090,31 @@ pub async fn add_procedure(
         )
         .await
         .context("Failed to store procedure")?;
+
+    // verified latches: once a real signal set it true, a manual re-learn won't
+    // unset it. Persist counts + verified to the side collection so a re-learn
+    // preserves history. Only write when there's history to preserve or this
+    // learn carries the verified signal, so a plain manual learn doesn't create
+    // an all-zero stats row.
+    let verified = verified || was_verified;
+    if verified || succ != 0 || fail != 0 {
+        ensure_procstats_collection(&client)
+            .await
+            .context("ensure _mod_procstats")?;
+        let mut stats: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+        stats.insert("success_count".into(), succ.into());
+        stats.insert("fail_count".into(), fail.into());
+        stats.insert(
+            "verified".into(),
+            if verified { "true" } else { "false" }.into(),
+        );
+        stats.insert("last_used".into(), now.into());
+        let spoint = PointStruct::new(id.clone(), NamedVectors::default(), stats);
+        client
+            .upsert_points(UpsertPointsBuilder::new(PROCSTATS_COLLECTION, vec![spoint]).wait(true))
+            .await
+            .context("Failed to persist procedure stats")?;
+    }
     Ok(id)
 }
 
@@ -2118,6 +2181,13 @@ pub async fn recall_procedures(
                 trigger_context: extract_string(p, "trigger_context").unwrap_or_default(),
                 fix: extract_string(p, "fix").unwrap_or_default(),
                 provenance: extract_string(p, "provenance"),
+                // Seed trust signals from LEGACY core-point fields. Post-upgrade
+                // procedures have none here (zeros) and get them from
+                // _mod_procstats below; PRE-upgrade procedures still carry them on
+                // the core point and would otherwise reset to unverified on the
+                // first recall after this change. The side-collection read below
+                // overrides when a row exists, so this is a no-data-loss fallback,
+                // not a second source of truth.
                 verified: extract_string(p, "verified").as_deref() == Some("true"),
                 success_count: extract_int(p, "success_count").unwrap_or(0),
                 fail_count: extract_int(p, "fail_count").unwrap_or(0),
@@ -2125,6 +2195,23 @@ pub async fn recall_procedures(
             }
         })
         .collect();
+
+    // Batch-fetch derived stats for the candidate ids from _mod_procstats. O(k)
+    // by id-set, not a scan. Existence-guarded + default-on-miss. When a row
+    // exists it OVERRIDES the legacy seed (the side collection is the live source
+    // for any procedure touched since the upgrade); when absent, the legacy seed
+    // stands. Dropping the collection leaves post-upgrade procedures at zeros
+    // (degrade, never error) while pre-upgrade ones keep their real historical
+    // counts — neither is a ghost.
+    let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+    let stats = procstats_for(&client, &ids).await;
+    for h in &mut hits {
+        if let Some(s) = stats.get(&h.id) {
+            h.verified = s.verified;
+            h.success_count = s.success_count;
+            h.fail_count = s.fail_count;
+        }
+    }
 
     // Normalize the raw RRF scores into [0,1]. RRF fractions are tiny (~0.016
     // for a rank-0 hit, k=60), so the verified/worked boosts in `rank_score`
@@ -2173,12 +2260,24 @@ pub async fn list_procedures_for_backfill(config: &MindConfig) -> Result<Vec<(St
         let response = client.scroll(builder).await?;
         for point in &response.result {
             let id = point.id.as_ref().map(format_point_id).unwrap_or_default();
+            // Legacy seed from the core point (pre-Step-10 procedures); overridden
+            // below by _mod_procstats for any procedure with stats since.
             let succ = extract_int(&point.payload, "success_count").unwrap_or(0);
             out.push((id, succ));
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
             None => break,
+        }
+    }
+    // Post-Step-10 (ADR 0006) counts live in _mod_procstats; override the legacy
+    // core-point seed so this backfill isn't half-blind to procedures touched
+    // since the move. Existence-guarded — absent collection leaves the seed.
+    let ids: Vec<String> = out.iter().map(|(id, _)| id.clone()).collect();
+    let stats = procstats_for(&client, &ids).await;
+    for (id, succ) in &mut out {
+        if let Some(s) = stats.get(id) {
+            *succ = s.success_count;
         }
     }
     Ok(out)
@@ -2321,35 +2420,133 @@ pub async fn write_external_signals(
 /// error-learning loop: a green test after a mind_learn fix marks that playbook
 /// trustworthy so recall surfaces it first. Without it, every recorded fix
 /// stayed unverified forever and never ranked above noise.
+/// Derived outcome stats for one procedure (ADR 0006). Lives in
+/// `_mod_procstats`, not on the core procedure point. `Default` is the
+/// degrade-on-miss value: zero counts, unverified — so a dropped collection
+/// ranks every procedure by relevance alone, never errors.
+#[derive(Debug, Clone, Default)]
+pub struct ProcStats {
+    pub success_count: i64,
+    pub fail_count: i64,
+    pub verified: bool,
+}
+
+/// Read stats for a set of procedure ids from `_mod_procstats`. Existence-guarded
+/// and default-on-miss: if the collection was dropped, or an id has no row, that
+/// id maps to `ProcStats::default()`. This is the read pattern ADR 0006's
+/// toggle-test depends on — a bare get_points on a missing collection would error.
+pub async fn procstats_for(
+    client: &Qdrant,
+    ids: &[String],
+) -> std::collections::HashMap<String, ProcStats> {
+    let mut out = std::collections::HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    // Dropped/never-created collection → everything defaults. Never an error.
+    if !client
+        .collection_exists(PROCSTATS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return out;
+    }
+    let pids: Vec<qdrant_client::qdrant::PointId> =
+        ids.iter().map(|i| i.to_string().into()).collect();
+    let Ok(resp) = client
+        .get_points(GetPointsBuilder::new(PROCSTATS_COLLECTION, pids).with_payload(true))
+        .await
+    else {
+        return out;
+    };
+    for point in resp.result {
+        let Some(id) = point.id.as_ref().map(format_point_id) else {
+            continue;
+        };
+        out.insert(
+            id,
+            ProcStats {
+                success_count: extract_int(&point.payload, "success_count").unwrap_or(0),
+                fail_count: extract_int(&point.payload, "fail_count").unwrap_or(0),
+                verified: extract_string(&point.payload, "verified").as_deref() == Some("true"),
+            },
+        );
+    }
+    out
+}
+
+/// Read stats for a single procedure id (convenience over `procstats_for`).
+async fn procstats_one(client: &Qdrant, id: &str) -> ProcStats {
+    procstats_for(client, std::slice::from_ref(&id.to_string()))
+        .await
+        .remove(id)
+        .unwrap_or_default()
+}
+
+/// Best-effort delete of a procedure's derived stats row (ADR 0006 orphan
+/// cleanup). Silent on a missing collection or a failed delete — an orphan stats
+/// row for a deleted procedure is never read, so this must never fail a delete.
+async fn delete_procstats(client: &Qdrant, id: &str) {
+    if !client
+        .collection_exists(PROCSTATS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let _ = client
+        .delete_points(
+            DeletePointsBuilder::new(PROCSTATS_COLLECTION)
+                .points(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await;
+}
+
 pub async fn procedure_outcome(
     config: &MindConfig,
     id: &str,
     worked: bool,
     verify: bool,
 ) -> Result<()> {
-    use qdrant_client::qdrant::SetPayloadPointsBuilder;
     let client = get_client(config).await?;
-    let (_, succ, fail, _) = existing_procedure(&client, id).await;
+    // Stats are derived state: they live in _mod_procstats, not on the core
+    // procedure point (ADR 0006). Read the current counts from there, bump, and
+    // upsert back — so dropping the side collection drops the trust signal
+    // cleanly without touching the procedure itself.
+    ensure_procstats_collection(&client)
+        .await
+        .context("ensure _mod_procstats")?;
+    let cur = procstats_one(&client, id).await;
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
-    if worked {
-        payload.insert("success_count".into(), (succ + 1).into());
-        if verify {
-            payload.insert("verified".into(), "true".into());
-        }
+    // Carry both counts every time so the row is self-contained (a later read
+    // of a single field doesn't depend on a prior partial upsert).
+    let succ = if worked {
+        cur.success_count + 1
     } else {
-        payload.insert("fail_count".into(), (fail + 1).into());
-    }
+        cur.success_count
+    };
+    let fail = if worked {
+        cur.fail_count
+    } else {
+        cur.fail_count + 1
+    };
+    payload.insert("success_count".into(), succ.into());
+    payload.insert("fail_count".into(), fail.into());
+    // verified latches true once a real signal sets it.
+    let verified = cur.verified || (worked && verify);
+    payload.insert(
+        "verified".into(),
+        if verified { "true" } else { "false" }.into(),
+    );
     payload.insert("last_used".into(), now.into());
 
-    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let point = PointStruct::new(id.to_string(), NamedVectors::default(), payload);
     client
-        .set_payload(
-            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
-                .points_selector(PointsIdsList { ids: vec![pid] })
-                .wait(true),
-        )
+        .upsert_points(UpsertPointsBuilder::new(PROCSTATS_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to record procedure outcome")?;
     Ok(())
@@ -2378,6 +2575,12 @@ pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Res
         )
         .await
         .context("Failed to delete memory")?;
+
+    // Best-effort: drop any derived stats row for this id (ADR 0006 orphan
+    // cleanup). A procedure carries one; a plain memory carries none, so this is
+    // a no-op there. Non-fatal — an orphaned stats row is never read for a
+    // missing procedure, so a failure here must not fail the delete.
+    delete_procstats(&client, id).await;
 
     let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, _library, id);
     if let Some(content) = before {
