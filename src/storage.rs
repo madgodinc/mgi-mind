@@ -1032,8 +1032,11 @@ pub async fn add_quarantined(
         .await
         .context("Failed to quarantine candidate")?;
 
+    // Use the dedicated Quarantine op (not Add) so the "where did writes go"
+    // tally can tell a quarantined candidate apart from a real store — this is
+    // the only audit event for a quarantine, content + reason included.
     crate::audit::record(
-        crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, &id)
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Quarantine, library, &id)
             .actor("relevance-gate")
             .after(truncate_for_audit(trimmed))
             .note(format!("quarantined: {reason}")),

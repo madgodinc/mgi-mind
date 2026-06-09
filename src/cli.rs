@@ -589,6 +589,18 @@ pub enum AuditAction {
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
     Show { id: String },
+    /// "Where did my writes go?" — tally stored vs dropped (near-dup skip,
+    /// quarantine, secret-skip) over the audit log, and show the content of
+    /// the dropped candidates so a "lost memory" is recoverable. The near-dup
+    /// skips are the unrecoverable ones — look there first.
+    Writes {
+        /// Only events newer than this many hours ago (e.g. 168 = last week).
+        #[arg(long, value_name = "HOURS")]
+        since_hours: Option<i64>,
+        /// Show up to this many dropped-candidate snippets (default 20).
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -860,6 +872,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 since_hours,
             } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
+            AuditAction::Writes { since_hours, limit } => {
+                cmd_audit_writes(since_hours, limit).await
+            }
         },
         Commands::Viewer {
             no_open,
@@ -1066,6 +1081,83 @@ async fn cmd_audit_show(id: &str) -> Result<()> {
         print_audit_event(ev);
     }
     println!("\n{} event(s) for '{id}'.", events.len());
+    Ok(())
+}
+
+/// "Where did my writes go?" — read the audit log and tally how ingest
+/// candidates ended up: stored, near-dup-skipped (unrecoverable), quarantined
+/// (recoverable), or secret-skipped. Then print the dropped candidates' content
+/// so a "lost memory" can actually be found. Reads the existing log — works on
+/// the current binary, no restart needed for historical events.
+async fn cmd_audit_writes(since_hours: Option<i64>, limit: usize) -> Result<()> {
+    let cutoff = since_hours.map(|h| chrono::Utc::now() - chrono::Duration::hours(h));
+    let events: Vec<crate::audit::AuditEvent> = crate::audit::load_all()?
+        .into_iter()
+        .filter(|ev| match cutoff {
+            None => true,
+            Some(c) => chrono::DateTime::parse_from_rfc3339(&ev.ts)
+                .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                .unwrap_or(false),
+        })
+        .collect();
+
+    use crate::audit::AuditOp;
+    let mut stored = 0usize;
+    let mut dup = 0usize;
+    let mut quar = 0usize;
+    let mut secret = 0usize;
+    // Dropped candidates worth showing, newest last (load_all is append-order).
+    let mut drops: Vec<&crate::audit::AuditEvent> = Vec::new();
+    for ev in &events {
+        match ev.op {
+            // Only the dedicated Ingest op — manual mind_add emits Add and the
+            // quarantine path emits Quarantine, so neither is miscounted as a
+            // genuine ingest store.
+            AuditOp::Ingest => stored += 1,
+            AuditOp::SkipDup => {
+                dup += 1;
+                drops.push(ev);
+            }
+            AuditOp::Quarantine => {
+                quar += 1;
+                drops.push(ev);
+            }
+            AuditOp::SkipSecret => secret += 1,
+            _ => {}
+        }
+    }
+
+    let window = match since_hours {
+        Some(h) => format!("last {h}h"),
+        None => "all time".to_string(),
+    };
+    println!("Write outcomes ({window}):");
+    println!("  stored:          {stored}");
+    println!("  near-dup skip:   {dup}   (UNRECOVERABLE — most likely place a write was lost)");
+    println!("  quarantined:     {quar}   (recoverable: mind_quarantine action=promote)");
+    println!("  secret-skipped:  {secret}   (content intentionally not logged)");
+
+    if drops.is_empty() {
+        println!("\nNo recoverable dropped candidates in this window.");
+        return Ok(());
+    }
+    // Show the most recent `limit` drops with their content.
+    let show_from = drops.len().saturating_sub(limit);
+    println!(
+        "\nDropped candidates (showing {} of {}, newest last):",
+        drops.len() - show_from,
+        drops.len()
+    );
+    for ev in &drops[show_from..] {
+        let op = serde_json::to_string(&ev.op)
+            .unwrap_or_else(|_| "?".into())
+            .trim_matches('"')
+            .to_string();
+        let note = ev.note.as_deref().unwrap_or("");
+        let content = ev.after.as_deref().unwrap_or("(no content recorded)");
+        println!("\n  [{op}] {} — {note}", ev.ts);
+        println!("    {content}");
+    }
     Ok(())
 }
 

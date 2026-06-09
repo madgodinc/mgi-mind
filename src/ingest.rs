@@ -215,8 +215,21 @@ pub async fn run_ingest_authored(
     for cand in candidates {
         match cand {
             Candidate::Memory { content } => {
-                if crate::secrets::scan(&content).is_some() {
+                if let Some(hit) = crate::secrets::scan(&content) {
                     report.skipped_secret += 1;
+                    let label = hit.reason;
+                    // Record the drop WITHOUT the content (it's a secret) — just
+                    // the detector label, so the skip is auditable but nothing
+                    // sensitive lands in the log.
+                    crate::audit::record(
+                        crate::audit::AuditEvent::new(
+                            crate::audit::AuditOp::SkipSecret,
+                            library.to_string(),
+                            String::new(),
+                        )
+                        .actor("ingest")
+                        .note(format!("secret-skipped ({label})")),
+                    );
                     continue;
                 }
 
@@ -284,7 +297,9 @@ pub async fn run_ingest_authored(
                         continue;
                     }
                     // Otherwise, quarantine the candidate (write with the flag,
-                    // do not surface in ordinary search).
+                    // do not surface in ordinary search). add_quarantined already
+                    // emits the single Quarantine audit event (content + reason),
+                    // so the tally counts it without a second redundant emit here.
                     let _ = crate::storage::add_quarantined(
                         config,
                         library,
@@ -304,6 +319,24 @@ pub async fn run_ingest_authored(
                     && score >= INGEST_DEDUP_THRESHOLD
                 {
                     report.skipped_dup += 1;
+                    // This drop is UNRECOVERABLE (no quarantine row), and a
+                    // correction to a stale fact is exactly the case most likely
+                    // to read as a near-dup of the thing it means to replace. So
+                    // log the dropped content + the score, making a "lost write"
+                    // answerable from the audit log and giving us the data to
+                    // decide later whether this threshold eats real corrections.
+                    crate::audit::record(
+                        crate::audit::AuditEvent::new(
+                            crate::audit::AuditOp::SkipDup,
+                            library.to_string(),
+                            String::new(),
+                        )
+                        .actor("ingest")
+                        .after(crate::storage::truncate_for_audit(&content))
+                        .note(format!(
+                            "near-dup skip (score {score:.3} ≥ {INGEST_DEDUP_THRESHOLD})"
+                        )),
+                    );
                     continue;
                 }
                 // add_memory also secret-scrubs and is idempotent on exact content.
@@ -317,6 +350,19 @@ pub async fn run_ingest_authored(
                 .await?;
                 if n > 0 {
                     report.stored_memories += 1;
+                    // Emit the dedicated Ingest op so "audit writes" can count
+                    // genuine ingest stores apart from manual mind_add (which
+                    // emits Add). add_memory_authored already logged the Add with
+                    // the content; this carries no content, just the store signal.
+                    crate::audit::record(
+                        crate::audit::AuditEvent::new(
+                            crate::audit::AuditOp::Ingest,
+                            library.to_string(),
+                            String::new(),
+                        )
+                        .actor("ingest")
+                        .note("stored via ingest"),
+                    );
                     // v1.4 Phase 5 step 5.5: fire-and-forget auto-extraction
                     // through a bounded mpsc queue (post-critic fix). The
                     // worker is a single dedicated task; bursts drop
