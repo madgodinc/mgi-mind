@@ -1868,7 +1868,7 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
             } else {
                 let _ = writeln!(
                     out,
-                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); duel rule resolution arrives in Phase 2"
+                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); resolved by the duel rule on write"
                 );
             }
         }
