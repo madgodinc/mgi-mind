@@ -137,10 +137,10 @@ async fn call(state: &AppState, tool: &str, args: Value) -> Response {
 /// Merge the X-Agent header into the args object under `agent` (author tag),
 /// without clobbering an explicit `agent` already in the body.
 fn with_agent(mut args: Value, headers: &HeaderMap) -> Value {
-    if let Some(agent) = agent_of(headers) {
-        if let Value::Object(map) = &mut args {
-            map.entry("agent").or_insert(Value::String(agent));
-        }
+    if let Some(agent) = agent_of(headers)
+        && let Value::Object(map) = &mut args
+    {
+        map.entry("agent").or_insert(Value::String(agent));
     }
     args
 }
