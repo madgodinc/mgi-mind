@@ -18,6 +18,37 @@ LLM-judged QA numbers** — that is apples to oranges. A QA mode (answerer + jud
 explicitly labeled API mode for like-for-like comparison with e.g. Mem0) is planned
 as a separate, opt-in path; it is not part of this zero-API core.
 
+## What a benchmark can and cannot tell you about this system
+
+Run any test you want against MGI-Mind. Benchmarking it is your right, and R@k
+above is one honest slice of what it does. But no single benchmark scores the
+whole system, and that is a property of the system, not a dodge.
+
+Most memory benchmarks assume a shape: ingest some text, ask a question, check
+whether the right passage comes back. MGI-Mind does that, and R@k measures it.
+The rest of what it does has no standard test to sit in. The duel rule resolves
+two facts that contradict each other on the same axis. The doubt window re-tests
+a belief instead of letting it ossify. Inheritance discounting keeps an echoed
+fact from outranking a first-hand one. Bi-temporal axes answer "where did I live
+in 2024" separately from "where do I live now." Procedures carry an error to the
+fix that worked before. Multiple agents write to one store and you can ask who
+wrote what and resume where another left off. A standard recall test scores none
+of these, because the field has not agreed on how to score them.
+
+So measuring MGI-Mind against one number flattens it. Pick the recall test and
+you miss conflict resolution. Pick a QA test and you measure someone else's LLM
+on top of the memory, then call the result the memory's. There is no harness that
+exercises the duel rule, the doubt window, the bi-temporal axes, the procedural
+layer, and the multi-agent surface at once, scoring each on its own terms.
+
+This is not a claim to be better. It is a claim to be different. MGI-Mind is a
+technical brain that coordinates how an AI works over time, not only a passage
+store. It carries strengths a passage store has no slot for, and it sits outside
+the systems the current benchmarks were built to rank. Different, not superior.
+If you want to evaluate it, evaluate the behavior you care about and report that
+behavior. We report the slices we can measure honestly, and we name the parts no
+public test reaches yet.
+
 ## How recall is computed (LongMemEval, session-level)
 
 For each question:

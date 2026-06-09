@@ -275,7 +275,11 @@ async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
 /// - 11 tools call text-returning `crate::cli::run_*` cores (download/doctor
 ///   progress goes to stderr so stdout stays pure JSON-RPC);
 /// - 3 vault tools return static instruction text - secrets never flow over MCP.
-async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Result<String> {
+///
+/// Shared by the MCP stdio loop and the loopback HTTP API in http_api.rs; it is
+/// stdio-independent (config is a parameter, the result is a value), so an axum
+/// handler can call it directly.
+pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Result<String> {
     // Tools that need storage/knowledge require a loaded config + running Qdrant.
     let warm = |needs_config: bool| -> Result<&MindConfig> {
         let _ = needs_config;
@@ -296,6 +300,72 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let results = crate::storage::search(cfg, query, library, limit, tier).await?;
             Ok(crate::cli::render_search(&results))
         }
+        "mind_recall_all" => {
+            // Unified recall across all three silos in one call: facts (current
+            // first), memories, and procedures. A lean fusion over the existing
+            // per-silo queries — no cross-silo coordinator/link-layer needed.
+            // This is what /memory/recall over HTTP wants instead of aliasing
+            // plain search.
+            let cfg = warm(true)?;
+            let query = arg_str(args, "query")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
+            let limit = arg_u64(args, "limit", 5) as usize;
+            let mut out = String::new();
+
+            // Facts (current ones first; invalid ones are excluded by the query).
+            if let Ok(facts) = crate::knowledge::query_facts(cfg, query).await {
+                let current: Vec<_> = facts.iter().filter(|f| f.valid).take(limit).collect();
+                if !current.is_empty() {
+                    out.push_str("## Facts (current)\n");
+                    for f in current {
+                        out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+                    }
+                    out.push('\n');
+                }
+            }
+
+            // Memories (semantic).
+            if let Ok(mems) = crate::storage::search(cfg, query, None, limit, 2).await
+                && !mems.is_empty()
+            {
+                out.push_str("## Memories\n");
+                out.push_str(&crate::cli::render_search(&mems));
+                out.push('\n');
+            }
+
+            // Procedures (error->fix lessons matching by context).
+            if let Ok(procs) = crate::procedure::recall(cfg, None, Some(query), limit).await {
+                let trimmed = procs.trim();
+                if !trimmed.is_empty() && !trimmed.to_lowercase().starts_with("no ") {
+                    out.push_str("## Procedures\n");
+                    out.push_str(trimmed);
+                    out.push('\n');
+                }
+            }
+
+            if out.is_empty() {
+                out.push_str("(nothing found across memories, facts, or procedures)");
+            }
+            Ok(out)
+        }
+        "mind_should_search" => {
+            // Live, query-aware search-before-answer advice (the runtime half of
+            // the policy that AI_INSTRUCTIONS documents and bench_policy scores
+            // offline). Advisory only — MCP cannot force a search.
+            let cfg = warm(true)?;
+            let query = arg_str(args, "query")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
+            // Known project/library names are the strongest P1 signal; pull them
+            // from the registered libraries (no separate registry — audit #18).
+            let libs: Vec<String> = crate::storage::list_libraries(cfg)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| !l.starts_with('_'))
+                .collect();
+            let advice = crate::retrieval_policy::classify(query, &libs);
+            Ok(crate::retrieval_policy::render(&advice))
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -303,7 +373,11 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let content = arg_str(args, "content")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'content'"))?;
             let source = arg_str(args, "source");
-            let n = crate::storage::add_memory(cfg, library, content, source).await?;
+            // `agent` is the optional author tag (set by the multi-agent HTTP
+            // surface). Absent on the MCP stdio path → unattributed write.
+            let author = arg_str(args, "agent");
+            let n = crate::storage::add_memory_authored(cfg, library, content, source, author)
+                .await?;
             Ok(format!("Added {n} chunk(s) to '{library}'"))
         }
         "mind_provenance_add" => {
@@ -375,7 +449,9 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             if raw.is_none() && candidates.is_empty() {
                 anyhow::bail!("mind_ingest needs either 'raw' text or a 'candidates' array");
             }
-            let report = crate::ingest::run_ingest(cfg, raw, candidates, library).await?;
+            let author = arg_str(args, "agent");
+            let report =
+                crate::ingest::run_ingest_authored(cfg, raw, candidates, library, author).await?;
             Ok(report.render())
         }
         "mind_history" => {
@@ -383,6 +459,16 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
             let limit = arg_u64(args, "limit", 10) as usize;
             let results = crate::storage::history(cfg, limit).await?;
             Ok(crate::cli::render_history(&results))
+        }
+        "mind_by_agent" => {
+            // What did one agent contribute (multi-agent visibility). Reads the
+            // indexed `author` keyword field — no semantic query needed.
+            let cfg = warm(true)?;
+            let agent = arg_str(args, "agent")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'agent'"))?;
+            let limit = arg_u64(args, "limit", 20) as usize;
+            let results = crate::storage::by_author(cfg, agent, limit).await?;
+            Ok(crate::cli::render_search(&results))
         }
         "mind_quarantine_list" => {
             let cfg = warm(true)?;
@@ -447,7 +533,9 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'predicate'"))?;
             let object = arg_str(args, "object")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'object'"))?;
-            let id = crate::knowledge::add_fact(cfg, subject, predicate, object).await?;
+            let author = arg_str(args, "agent");
+            let id =
+                crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author).await?;
             Ok(format!(
                 "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
             ))
@@ -519,7 +607,25 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
                 source,
                 ts: chrono::Utc::now().to_rfc3339(),
             };
-            crate::outcome::record(cfg, memory_id, signal).await
+            let mut out = crate::outcome::record(cfg, memory_id, signal).await?;
+            // Bridge: a test_passed/code_compiled signal on a PROCEDURE is the
+            // "the fix actually worked" signal the procedural layer needs — so
+            // also bump its success/fail counters (→ `verified` once it has a
+            // real success). Without this bridge, mind_outcome only logged an
+            // external signal and procedures stayed unverified. This is the
+            // explicit-signal path (critic): no session-window correlation, the
+            // caller names the procedure id directly.
+            let is_proc_signal = matches!(
+                signal_type,
+                crate::outcome::OutcomeSignal::TestPassed
+                    | crate::outcome::OutcomeSignal::CodeCompiled
+            );
+            if is_proc_signal && crate::storage::is_procedure(cfg, memory_id).await? {
+                let note = crate::procedure::outcome(cfg, memory_id, success).await?;
+                out.push('\n');
+                out.push_str(&note);
+            }
+            Ok(out)
         }
 
         // ---- Terminal-only 3 (vault; never touch secrets over MCP) ----
@@ -560,6 +666,12 @@ async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> Resu
         }
         "mind_list" => crate::cli::run_list().await,
         "mind_doctor" => crate::cli::run_doctor(arg_bool(args, "fix", false)).await,
+        "mind_visualize" => {
+            // Open the 3D memory visualization (spawns the viewer detached and
+            // returns the URL). Use when the user asks to see/show their memory
+            // or "the brain".
+            crate::cli::run_visualize(true).await
+        }
         "mind_delete" => {
             let library = arg_str(args, "library")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'library'"))?;
@@ -850,6 +962,34 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_recall_all",
+            "description": "Unified recall across all memory types at once (facts + memories + procedures) for one query. Current facts first, then semantic memories, then matching error->fix procedures. One call instead of three separate searches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to recall" },
+                    "limit": { "type": "number", "default": 5, "description": "Max per silo" }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "mind_should_search",
+            "description": "Decide whether to search memory BEFORE answering a user query. Returns priority (must-search / should-search / answer-directly), the reason, and which libraries to search first. Call this on a turn when unsure; it implements the search-before-answer trigger policy (named project, meta-cue like 'did I tell you', negation to verify, cross-session reference). Advisory — it cannot force a search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The user's query to classify" }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "mind_visualize",
+            "description": "Open the 3D memory visualization in the user's browser — the brain as glowing cores (memories, facts, regions) wired by neurons, with live pulses. Call this when the user asks to SEE or SHOW their memory / 'the brain' / how memory looks. Spawns a local viewer and returns the URL.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
             "name": "mind_add",
             "description": "Add a memory entry",
             "inputSchema": {
@@ -1036,7 +1176,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_outcome",
-            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail.",
+            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail. When memory_id is a PROCEDURE and signal_type is test_passed or code_compiled, this also bumps the procedure's success/fail counters — so a green test after a mind_learn fix marks that playbook verified without a separate mind_procedure_outcome call. Pass the procedure id returned by mind_learn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1325,8 +1465,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            37,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) = 37"
+            40,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) = 40"
         );
         let deprecated = tools
             .iter()
@@ -1338,8 +1478,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 22,
-            "non-deprecated surface is 22 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome)"
+            live_surface, 25,
+            "non-deprecated surface is 25 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all + 1 mind_should_search + 1 mind_visualize)"
         );
     }
 
@@ -1450,11 +1590,12 @@ mod tests {
     async fn tools_list_returns_v1_5_surface() {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
-        // 1 v1.5 (mind_outcome) = 37 total.
+        // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
+        // + 1 (mind_visualize) = 40 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 37);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 40);
     }
 
     #[tokio::test]

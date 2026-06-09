@@ -166,6 +166,11 @@ fn current_path() -> Option<&'static PathBuf> {
 /// return success because we couldn't write a log line would be the wrong
 /// tradeoff.
 pub fn record(event: AuditEvent) {
+    // Emit a live pulse for the viewer's graph, independent of whether the
+    // audit FILE is enabled — the visual feed should pulse even on a system
+    // that has audit logging turned off.
+    emit_pulse(&event);
+
     let Some(path) = current_path() else {
         return; // disabled
     };
@@ -195,6 +200,48 @@ pub fn record(event: AuditEvent) {
     if let Err(e) = writeln!(file, "{line}") {
         tracing::warn!("audit: failed to write line: {e}");
     }
+}
+
+/// Map an audit event to a live graph pulse. Writes (Add/FactAdd/...) are
+/// "write" impulses toward the affected core; quarantine/consolidate-style ops
+/// are "process". Reads are emitted separately at the read sites, not here.
+fn emit_pulse(event: &AuditEvent) {
+    use crate::pulse::{PulseEvent, PulseKind};
+    let (kind, target) = match event.op {
+        // New cores written.
+        AuditOp::Add | AuditOp::Ingest => {
+            let t = if !event.target.is_empty() {
+                format!("mem:{}", event.target)
+            } else {
+                format!("lib:{}", event.library)
+            };
+            (PulseKind::Write, t)
+        }
+        AuditOp::FactAdd => (PulseKind::Write, "fact".to_string()),
+        AuditOp::ProcedureAdd => (PulseKind::Write, format!("mem:{}", event.target)),
+        AuditOp::LibraryCreate | AuditOp::LibraryDrop => {
+            (PulseKind::Write, format!("lib:{}", event.library))
+        }
+        // Internal processing — duel/quarantine/consolidate/retest/outcome.
+        AuditOp::Update
+        | AuditOp::Delete
+        | AuditOp::FactInvalidate
+        | AuditOp::ProcedureOutcome
+        | AuditOp::Consolidate
+        | AuditOp::RetestPromote
+        | AuditOp::RetestRecover => {
+            let t = if !event.target.is_empty() {
+                format!("mem:{}", event.target)
+            } else {
+                format!("lib:{}", event.library)
+            };
+            (PulseKind::Process, t)
+        }
+    };
+    let label = format!("{:?}", event.op).to_lowercase();
+    crate::pulse::emit(
+        PulseEvent::new(kind, target, label).actor(Some(event.actor.clone())),
+    );
 }
 
 /// Read all events from the log, oldest first. Skips any trailing line that

@@ -16,10 +16,14 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, Sse},
+    },
+    routing::{delete, get, patch, post},
 };
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -42,7 +46,20 @@ struct AppState {
 
 /// Entry point used by `Commands::Viewer`.
 pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
-    let token = Uuid::new_v4().to_string();
+    run_on(config, open_browser, None, None).await
+}
+
+/// Run the viewer, optionally on a fixed `port` and with a caller-supplied
+/// `token`. `mind_visualize` uses this so it can spawn the viewer detached and
+/// still know the exact URL to hand back (a random port + internal token would
+/// be invisible to the parent MCP process).
+pub async fn run_on(
+    config: MindConfig,
+    open_browser: bool,
+    port: Option<u16>,
+    token: Option<String>,
+) -> Result<()> {
+    let token = token.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state = AppState {
         config: Arc::new(config),
         token: Arc::new(token.clone()),
@@ -59,12 +76,18 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
         .route("/api/consolidate", get(api_consolidate_dry_run))
         .route("/api/ingest/recent", get(api_ingest_recent))
+        .route("/api/graph", get(api_graph))
+        .route("/api/pulse", get(api_pulse))
+        .route("/api/node/:id", get(api_node))
+        .route("/api/node/:id", patch(api_edit_node))
         .with_state(state);
 
-    // Random free port: ask the OS for 0, then read what it gave us.
-    let listener = TcpListener::bind("127.0.0.1:0")
+    // Fixed port when asked (so a detached spawn has a knowable URL), else a
+    // random free port.
+    let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
+    let listener = TcpListener::bind(&bind)
         .await
-        .context("Failed to bind 127.0.0.1 on a free port")?;
+        .with_context(|| format!("Failed to bind {bind}"))?;
     let addr = listener.local_addr().context("Failed to read bound port")?;
     let url = format!("http://{}/?token={}", addr, token);
 
@@ -394,6 +417,220 @@ async fn api_quarantine_promote(
             .note("manual promote via viewer UI"),
     );
     Ok(Json(serde_json::json!({"ok": true, "id": id})))
+}
+
+/// The brain as a graph: cores (nodes) connected by neurons (edges), for a
+/// visual "dig inside the mind" browser.
+///
+/// Core kinds: `library` (a memory region), `memory` (a stored chunk — the
+/// bright cores), `entity` (a fact subject/object concept).
+///
+/// Neuron kinds: `fact` (entity-predicate-entity, the knowledge-graph wiring),
+/// `holds` (library to memory), `mention` (a memory text names a known entity
+/// via non-LLM substring match — the associative threads).
+///
+/// Shape is cytoscape/d3-friendly. `limit` caps memory cores per library so a
+/// huge store still renders.
+async fn api_graph(
+    State(state): State<AppState>,
+    Query(q): Query<GraphQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    let auth = AuthQuery {
+        token: q.token.clone(),
+    };
+    check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    let cfg = &state.config;
+    let per_lib = q.limit;
+
+    use std::collections::BTreeMap;
+    // Dedupe nodes by id; an entity appearing as both subject and object is one
+    // core. Map id -> node json so later inserts (e.g. kind upgrade) are cheap.
+    let mut nodes: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut edges: Vec<serde_json::Value> = Vec::new();
+
+    // --- entity cores + fact neurons ---
+    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let mut entities: Vec<String> = Vec::new();
+    for f in &facts {
+        if !f.valid {
+            continue;
+        }
+        for e in [&f.subject, &f.object] {
+            nodes.entry(e.clone()).or_insert_with(|| {
+                entities.push(e.clone());
+                serde_json::json!({ "id": e, "label": e, "kind": "entity" })
+            });
+        }
+        edges.push(serde_json::json!({
+            "source": f.subject, "target": f.object, "label": f.predicate,
+            "kind": "fact", "id": f.id,
+        }));
+    }
+
+    // --- library + memory cores, holds + mention neurons ---
+    let libs = crate::storage::list_libraries(cfg).await.map_err(internal)?;
+    for lib in &libs {
+        if lib.starts_with('_') {
+            continue;
+        }
+        let lib_id = format!("lib:{lib}");
+        nodes.entry(lib_id.clone()).or_insert_with(|| {
+            serde_json::json!({ "id": lib_id, "label": lib, "kind": "library" })
+        });
+        let mems = crate::storage::list_memories(cfg, lib, per_lib)
+            .await
+            .unwrap_or_default();
+        for m in &mems {
+            let mid = format!("mem:{}", m.id);
+            let snippet: String = m.content.chars().take(80).collect();
+            nodes.insert(
+                mid.clone(),
+                serde_json::json!({ "id": mid, "label": snippet, "kind": "memory" }),
+            );
+            edges.push(serde_json::json!({
+                "source": lib_id, "target": mid, "label": "holds", "kind": "holds",
+            }));
+            // Associative threads: a memory that names a known entity.
+            let lc = m.content.to_lowercase();
+            for e in &entities {
+                if e.len() >= 4 && lc.contains(&e.to_lowercase()) {
+                    edges.push(serde_json::json!({
+                        "source": mid, "target": e, "label": "mentions", "kind": "mention",
+                    }));
+                }
+            }
+        }
+    }
+
+    let node_list: Vec<serde_json::Value> = nodes.into_values().collect();
+    Ok(Json(serde_json::json!({
+        "nodes": node_list,
+        "edges": edges,
+        "stats": {
+            "nodes": node_list.len(), "edges": edges.len(),
+            "facts": facts.len(), "libraries": libs.len(),
+        },
+    })))
+}
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    token: Option<String>,
+    #[serde(default = "default_graph_limit")]
+    limit: usize,
+}
+
+fn default_graph_limit() -> usize {
+    200
+}
+
+/// One core's full detail — the lazy "zoom inside" fetch on click. The graph
+/// stays light (structure + short labels); this loads the full content and the
+/// core's neighbours + history on demand. `id` is "mem:<uuid>", "lib:<name>",
+/// or an entity text.
+async fn api_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let cfg = &state.config;
+
+    if let Some(mem_id) = id.strip_prefix("mem:") {
+        let detail = crate::storage::memory_detail(cfg, mem_id)
+            .await
+            .map_err(internal)?;
+        let history = crate::audit::for_target(mem_id).unwrap_or_default();
+        return Ok(Json(serde_json::json!({
+            "id": id, "kind": "memory", "detail": detail, "history": history,
+        })));
+    }
+
+    if let Some(lib) = id.strip_prefix("lib:") {
+        // A region: its memories (capped) + count.
+        let mems = crate::storage::list_memories(cfg, lib, 50)
+            .await
+            .unwrap_or_default();
+        let items: Vec<serde_json::Value> = mems
+            .iter()
+            .map(|m| {
+                let snippet: String = m.content.chars().take(160).collect();
+                serde_json::json!({ "id": format!("mem:{}", m.id), "snippet": snippet })
+            })
+            .collect();
+        return Ok(Json(serde_json::json!({
+            "id": id, "kind": "library", "library": lib, "members": items,
+        })));
+    }
+
+    // Otherwise treat it as an entity: the facts it participates in.
+    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let related: Vec<serde_json::Value> = facts
+        .iter()
+        .filter(|f| f.valid && (f.subject == id || f.object == id))
+        .map(|f| {
+            serde_json::json!({
+                "subject": f.subject, "predicate": f.predicate, "object": f.object,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "id": id, "kind": "entity", "facts": related,
+    })))
+}
+
+/// Edit a memory core's content (viewer edit mode). Body: `{"content": "..."}`.
+/// Only `mem:` cores are editable. Because IDs are content-addressed, the edit
+/// returns the NEW id so the client can re-point its selection.
+async fn api_edit_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let Some(mem_id) = id.strip_prefix("mem:") else {
+        return Err((StatusCode::BAD_REQUEST, "only mem: cores are editable").into_response());
+    };
+    let content = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing 'content'").into_response())?;
+    let new_id = crate::storage::edit_memory(&state.config, mem_id, content)
+        .await
+        .map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": format!("mem:{new_id}") })))
+}
+
+/// Live pulse feed (SSE). Each `data:` line is a `PulseEvent` JSON: an impulse
+/// the brain just emitted (write/read/process). The browser animates it as a
+/// taxi running a neuron toward `target`, colored by `kind`. Best-effort: a
+/// slow client that lags just misses old pulses.
+async fn api_pulse(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let rx = crate::pulse::subscribe();
+    // futures_util::stream::unfold drives the broadcast receiver without adding
+    // a new dependency (no async-stream / tokio-stream crate needed).
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let json = serde_json::to_string(&ev).unwrap_or_default();
+                    return Some((Ok(Event::default().data(json)), rx));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> Response {
