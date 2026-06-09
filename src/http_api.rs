@@ -223,8 +223,8 @@ async fn memory_recall(
     if let Err(c) = check_auth(&state, &headers) {
         return c.into_response();
     }
-    // mind_recall_all is not on this base; mind_search is the recall surface.
-    call(&state, "mind_search", args).await
+    // Unified recall: facts + memories + procedures in one call.
+    call(&state, "mind_recall_all", args).await
 }
 
 async fn memory_add(
