@@ -356,7 +356,16 @@ pub enum Commands {
         /// over SSH or when scripting integration tests.
         #[arg(long)]
         no_open: bool,
+        /// Bind a fixed port instead of a random one (used by `mind_visualize`).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Use a specific bearer token (used by `mind_visualize` so the spawner
+        /// knows the URL). Random per-process if omitted.
+        #[arg(long)]
+        token: Option<String>,
     },
+    /// Open the 3D memory visualization in your browser (alias for `viewer`).
+    Brain,
     /// Serve a loopback HTTP tool-surface for external multi-agent systems.
     /// Exposes a small allowlist (memory search/recall/add/ingest, fact add)
     /// over 127.0.0.1 with a per-process bearer token. Destructive/bulk tools
@@ -848,10 +857,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
         },
-        Commands::Viewer { no_open } => {
+        Commands::Viewer {
+            no_open,
+            port,
+            token,
+        } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
-            crate::viewer::run(config, !no_open).await
+            crate::viewer::run_on(config, !no_open, port, token).await
+        }
+        Commands::Brain => {
+            // Friendly alias for `viewer` — opens the 3D memory visualization.
+            let config = crate::config::MindConfig::load()
+                .context("Failed to load config — run `mgimind init` first")?;
+            crate::viewer::run(config, true).await
         }
         Commands::ServeHttp {
             port,
@@ -2817,6 +2836,53 @@ fn spawn_qdrant_detached() -> Result<u32> {
     // keeps running after we exit.
     std::fs::write(qdrant_pid_path(), pid.to_string())?;
     Ok(pid)
+}
+
+/// Open the 3D memory visualization for an agent (`mind_visualize`). The viewer
+/// is a separate HTTP process, so we spawn it DETACHED on a fixed port with a
+/// known token and return the URL — the MCP server itself speaks stdio and
+/// cannot host the page. Idempotent-ish: if the port is already serving, we
+/// just hand back the URL.
+pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
+    use std::os::unix::process::CommandExt;
+    const PORT: u16 = 4173; // stable, memorable, unlikely to clash
+    let token = uuid::Uuid::new_v4().to_string();
+    let url = format!("http://127.0.0.1:{PORT}/?token={token}");
+
+    // already up? (a previous visualize) — reuse it
+    if std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+        return Ok(format!(
+            "The memory visualization is already open at:\n  http://127.0.0.1:{PORT}/\n\
+             (open it in a browser if it is not visible)."
+        ));
+    }
+
+    let exe = std::env::current_exe().context("cannot find the mgimind binary")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("viewer")
+        .arg("--port")
+        .arg(PORT.to_string())
+        .arg("--token")
+        .arg(&token);
+    if !open_browser {
+        cmd.arg("--no-open");
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0); // detach so it outlives this call
+
+    cmd.spawn().context("Failed to launch the viewer")?;
+
+    // give it a moment to bind the port
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+            break;
+        }
+    }
+    Ok(format!(
+        "Opened the 3D memory visualization. If a browser did not pop up, open:\n  {url}"
+    ))
 }
 
 /// Poll the Qdrant gRPC port until it answers or the timeout elapses. Returns

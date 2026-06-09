@@ -666,6 +666,12 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
         }
         "mind_list" => crate::cli::run_list().await,
         "mind_doctor" => crate::cli::run_doctor(arg_bool(args, "fix", false)).await,
+        "mind_visualize" => {
+            // Open the 3D memory visualization (spawns the viewer detached and
+            // returns the URL). Use when the user asks to see/show their memory
+            // or "the brain".
+            crate::cli::run_visualize(true).await
+        }
         "mind_delete" => {
             let library = arg_str(args, "library")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'library'"))?;
@@ -977,6 +983,11 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 "required": ["query"]
             }
+        }),
+        json!({
+            "name": "mind_visualize",
+            "description": "Open the 3D memory visualization in the user's browser — the brain as glowing cores (memories, facts, regions) wired by neurons, with live pulses. Call this when the user asks to SEE or SHOW their memory / 'the brain' / how memory looks. Spawns a local viewer and returns the URL.",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "mind_add",
@@ -1454,8 +1465,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            39,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) = 39"
+            40,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) = 40"
         );
         let deprecated = tools
             .iter()
@@ -1467,8 +1478,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 24,
-            "non-deprecated surface is 24 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all + 1 mind_should_search)"
+            live_surface, 25,
+            "non-deprecated surface is 25 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all + 1 mind_should_search + 1 mind_visualize)"
         );
     }
 
@@ -1580,11 +1591,11 @@ mod tests {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
         // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
-        // = 39 total.
+        // + 1 (mind_visualize) = 40 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 39);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 40);
     }
 
     #[tokio::test]
