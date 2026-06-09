@@ -95,6 +95,30 @@ fn derive_key(password: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+// ===== Reusable crypto for the encrypted-backup module =====
+// The backup feature reuses the vault's vetted AES-256-GCM + pinned Argon2id
+// primitives, but with a SEPARATE key derived from a SEPARATE salt — backup
+// rotation must not be coupled to secret-vault rotation (different threat
+// model, different blast radius). These thin wrappers expose the primitives
+// without widening the master-key path.
+
+/// Derive a 32-byte key from a passphrase + caller-supplied salt (pinned
+/// Argon2id). The caller owns the salt — backups use their own, not `vault.salt`.
+pub(crate) fn derive_key_with_salt(password: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
+    derive_key(password, salt)
+}
+
+/// Encrypt arbitrary bytes with a caller-derived key (AES-256-GCM,
+/// nonce-prepended format). Used by the backup module.
+pub(crate) fn encrypt_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    encrypt(data, key)
+}
+
+/// Decrypt bytes produced by `encrypt_with_key`.
+pub(crate) fn decrypt_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    decrypt(data, key)
+}
+
 fn encrypt(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|e| anyhow::anyhow!("Cipher init failed: {e}"))?;
@@ -133,9 +157,9 @@ fn decrypt(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 /// Read the master password without echoing it to the terminal (audit #3).
 /// Requires a TTY; over a non-interactive channel (e.g. raw MCP) this errors
 /// instead of silently using an empty password (audit #2).
-fn prompt_password(prompt: &str) -> Result<String> {
+pub(crate) fn prompt_password(prompt: &str) -> Result<String> {
     rpassword::prompt_password(prompt).context(
-        "Vault requires an interactive terminal for the master password. \
+        "This requires an interactive terminal for the passphrase. \
          Run this command directly in a terminal, not through an automated channel.",
     )
 }

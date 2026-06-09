@@ -184,6 +184,18 @@ pub async fn run_ingest(
     candidates: Vec<Candidate>,
     library: &str,
 ) -> Result<IngestReport> {
+    run_ingest_authored(config, raw, candidates, library, None).await
+}
+
+/// Like `run_ingest` but tags every written memory/fact with the asserting
+/// agent (multi-agent HTTP path). The plain `run_ingest` stays unattributed.
+pub async fn run_ingest_authored(
+    config: &MindConfig,
+    raw: Option<&str>,
+    candidates: Vec<Candidate>,
+    library: &str,
+    author: Option<&str>,
+) -> Result<IngestReport> {
     let candidates = if candidates.is_empty() {
         match raw {
             Some(r) => extract_heuristic(r),
@@ -295,8 +307,14 @@ pub async fn run_ingest(
                     continue;
                 }
                 // add_memory also secret-scrubs and is idempotent on exact content.
-                let n =
-                    crate::storage::add_memory(config, library, &content, Some("ingest")).await?;
+                let n = crate::storage::add_memory_authored(
+                    config,
+                    library,
+                    &content,
+                    Some("ingest"),
+                    author,
+                )
+                .await?;
                 if n > 0 {
                     report.stored_memories += 1;
                     // v1.4 Phase 5 step 5.5: fire-and-forget auto-extraction
@@ -319,7 +337,8 @@ pub async fn run_ingest(
                     report.skipped_secret += 1;
                     continue;
                 }
-                crate::knowledge::add_fact(config, &subject, &predicate, &object).await?;
+                crate::knowledge::add_fact_authored(config, &subject, &predicate, &object, author)
+                    .await?;
                 report.stored_facts += 1;
             }
             Candidate::Procedure {

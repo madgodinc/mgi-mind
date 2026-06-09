@@ -4,6 +4,12 @@
 
 **[Latest release: v1.6.4](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.4)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
+<p align="center">
+  <img src="docs/brain-demo.gif" alt="Memory visualized as a brain — glowing cores wired by neurons" width="760">
+  <br>
+  <em>Your memory as a brain — cores (memories, facts, regions) wired by neurons, with live pulses. Run <code>mgimind brain</code> or just ask your assistant to show it.</em>
+</p>
+
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
 assistants read and write memory on their own. Also a normal CLI.
@@ -97,6 +103,14 @@ MGI-Mind is the assembled local version: hybrid + reranked retrieval, the
 relevance gate, dedup, facts, sessions, procedural memory ("error → fix"
 playbooks), and a terminal-only vault — behind one binary you run
 yourself.
+
+A note on evaluating it: one benchmark scores one slice. The conflict
+resolution, the doubt window, the bi-temporal facts, the procedural layer,
+and the multi-agent surface have no single standard test to sit in. MGI-Mind
+is a technical brain that coordinates how an AI works over time, and it sits
+outside the systems today's memory benchmarks were built to rank. Different,
+not superior. [BENCHMARKS.md](BENCHMARKS.md) reports the slices we can measure
+honestly and names the parts no public test reaches yet.
 
 ## Quick start
 

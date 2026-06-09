@@ -106,12 +106,21 @@ pub enum Commands {
     Backup {
         /// Output file path
         output: String,
+        /// Encrypt the backup (AES-256-GCM, passphrase prompted on the
+        /// terminal). Uses a backup-specific key, independent of the secret
+        /// vault. Restore the file with `restore --encrypt`.
+        #[arg(long)]
+        encrypt: bool,
     },
 
     /// Restore from backup
     Restore {
         /// Backup file path
         input: String,
+        /// The backup file is encrypted (written by `backup --encrypt`);
+        /// passphrase is prompted on the terminal.
+        #[arg(long)]
+        encrypt: bool,
     },
 
     /// Export data
@@ -347,6 +356,30 @@ pub enum Commands {
         /// over SSH or when scripting integration tests.
         #[arg(long)]
         no_open: bool,
+        /// Bind a fixed port instead of a random one (used by `mind_visualize`).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Use a specific bearer token (used by `mind_visualize` so the spawner
+        /// knows the URL). Random per-process if omitted.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Open the 3D memory visualization in your browser (alias for `viewer`).
+    Brain,
+    /// Serve a loopback HTTP tool-surface for external multi-agent systems.
+    /// Exposes a small allowlist (memory search/recall/add/ingest, fact add)
+    /// over 127.0.0.1 with a per-process bearer token. Destructive/bulk tools
+    /// are NOT exposed. `X-Agent: <id>` tags the author (audit hint, not auth).
+    ServeHttp {
+        /// Port to bind on 127.0.0.1. Omit for a random free port.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Per-agent bearer token as `NAME:TOKEN` (repeatable). When given, a
+        /// caller's identity is DERIVED from its token (the author tag becomes
+        /// trustworthy and the X-Agent header is ignored). Omit for a single
+        /// anonymous token where X-Agent is a self-asserted hint.
+        #[arg(long = "agent-token", value_name = "NAME:TOKEN")]
+        agent_tokens: Vec<String>,
     },
     /// Auto-extract & ingest memory candidates (phase Д2). Routes filtered
     /// candidates through the v0.11 relevance gate: clearly low-signal
@@ -710,8 +743,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             apply,
         } => cmd_import(&source, &path, &library, apply).await,
         Commands::Stats { json } => cmd_stats(json).await,
-        Commands::Backup { output } => cmd_backup(&output).await,
-        Commands::Restore { input } => cmd_restore(&input).await,
+        Commands::Backup { output, encrypt } => cmd_backup(&output, encrypt).await,
+        Commands::Restore { input, encrypt } => cmd_restore(&input, encrypt).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
@@ -824,10 +857,28 @@ pub async fn run(cli: Cli) -> Result<()> {
             } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
         },
-        Commands::Viewer { no_open } => {
+        Commands::Viewer {
+            no_open,
+            port,
+            token,
+        } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
-            crate::viewer::run(config, !no_open).await
+            crate::viewer::run_on(config, !no_open, port, token).await
+        }
+        Commands::Brain => {
+            // Friendly alias for `viewer` — opens the 3D memory visualization.
+            let config = crate::config::MindConfig::load()
+                .context("Failed to load config — run `mgimind init` first")?;
+            crate::viewer::run(config, true).await
+        }
+        Commands::ServeHttp {
+            port,
+            agent_tokens,
+        } => {
+            let config = crate::config::MindConfig::load()
+                .context("Failed to load config — run `mgimind init` first")?;
+            crate::http_api::run(config, port, agent_tokens).await
         }
         Commands::Ingest {
             library,
@@ -1854,7 +1905,7 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
             } else {
                 let _ = writeln!(
                     out,
-                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); duel rule resolution arrives in Phase 2"
+                    "[INFO] {contested} contested (Type I) + {shadowed} propagation-shadowed (Type II); resolved by the duel rule on write"
                 );
             }
         }
@@ -2176,6 +2227,9 @@ pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String 
             r.id
         );
         let _ = writeln!(out, "   {}", r.content);
+        if let Some(author) = &r.author {
+            let _ = writeln!(out, "   author: {author}");
+        }
         if let Some(src) = &r.source {
             let _ = writeln!(out, "   source: {src}");
         }
@@ -2294,17 +2348,35 @@ pub(crate) async fn run_session_end(agent: &str, summary: &str) -> Result<String
     Ok("Session ended.".to_string())
 }
 
-async fn cmd_backup(output: &str) -> Result<()> {
-    println!("Backing up to {output}...");
-    crate::storage::backup(output)?;
-    println!("Backup complete.");
+async fn cmd_backup(output: &str, encrypt: bool) -> Result<()> {
+    if encrypt {
+        let pass = crate::vault::prompt_password("Set backup passphrase: ")?;
+        let confirm = crate::vault::prompt_password("Confirm backup passphrase: ")?;
+        if pass != confirm {
+            anyhow::bail!("Passphrases do not match — backup aborted.");
+        }
+        println!("Backing up (encrypted) to {output}...");
+        crate::storage::backup_encrypted(output, &pass)?;
+        println!("Encrypted backup complete. Keep the passphrase safe — it cannot be recovered.");
+    } else {
+        println!("Backing up to {output}...");
+        crate::storage::backup(output)?;
+        println!("Backup complete.");
+    }
     Ok(())
 }
 
-async fn cmd_restore(input: &str) -> Result<()> {
-    println!("Restoring from {input}...");
-    crate::storage::restore(input)?;
-    println!("Restore complete.");
+async fn cmd_restore(input: &str, encrypt: bool) -> Result<()> {
+    if encrypt {
+        let pass = crate::vault::prompt_password("Backup passphrase: ")?;
+        println!("Restoring (encrypted) from {input}...");
+        crate::storage::restore_encrypted(input, &pass)?;
+        println!("Restore complete.");
+    } else {
+        println!("Restoring from {input}...");
+        crate::storage::restore(input)?;
+        println!("Restore complete.");
+    }
     Ok(())
 }
 
@@ -2764,6 +2836,53 @@ fn spawn_qdrant_detached() -> Result<u32> {
     // keeps running after we exit.
     std::fs::write(qdrant_pid_path(), pid.to_string())?;
     Ok(pid)
+}
+
+/// Open the 3D memory visualization for an agent (`mind_visualize`). The viewer
+/// is a separate HTTP process, so we spawn it DETACHED on a fixed port with a
+/// known token and return the URL — the MCP server itself speaks stdio and
+/// cannot host the page. Idempotent-ish: if the port is already serving, we
+/// just hand back the URL.
+pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
+    use std::os::unix::process::CommandExt;
+    const PORT: u16 = 4173; // stable, memorable, unlikely to clash
+    let token = uuid::Uuid::new_v4().to_string();
+    let url = format!("http://127.0.0.1:{PORT}/?token={token}");
+
+    // already up? (a previous visualize) — reuse it
+    if std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+        return Ok(format!(
+            "The memory visualization is already open at:\n  http://127.0.0.1:{PORT}/\n\
+             (open it in a browser if it is not visible)."
+        ));
+    }
+
+    let exe = std::env::current_exe().context("cannot find the mgimind binary")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("viewer")
+        .arg("--port")
+        .arg(PORT.to_string())
+        .arg("--token")
+        .arg(&token);
+    if !open_browser {
+        cmd.arg("--no-open");
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0); // detach so it outlives this call
+
+    cmd.spawn().context("Failed to launch the viewer")?;
+
+    // give it a moment to bind the port
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+            break;
+        }
+    }
+    Ok(format!(
+        "Opened the 3D memory visualization. If a browser did not pop up, open:\n  {url}"
+    ))
 }
 
 /// Poll the Qdrant gRPC port until it answers or the timeout elapses. Returns

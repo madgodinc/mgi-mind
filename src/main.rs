@@ -14,6 +14,7 @@ mod embedder;
 mod error;
 #[cfg(feature = "extractor")]
 mod extractor;
+mod http_api;
 mod ingest;
 mod install_detect;
 mod install_mode;
@@ -25,8 +26,10 @@ mod migrate_v14;
 mod outcome;
 mod procedure;
 mod provenance;
+mod pulse;
 mod relevance;
 mod reranker;
+mod retrieval_policy;
 mod secrets;
 mod session;
 mod session_ingest;

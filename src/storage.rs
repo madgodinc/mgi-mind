@@ -128,6 +128,9 @@ pub struct SearchResult {
     pub library: String,
     pub content: String,
     pub source: Option<String>,
+    /// Which agent wrote this memory (multi-agent writes). None for the 12k
+    /// legacy points and any single-agent write that did not tag an author.
+    pub author: Option<String>,
     pub created_at: Option<String>,
     pub score: f32,
 }
@@ -365,6 +368,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         ("created_at", FieldType::Datetime),
         // `type` (keyword) so a search can scope to memory vs procedure (phase Д2).
         ("type", FieldType::Keyword),
+        // `author` (keyword) so a multi-agent deployment can scope "what did
+        // agent X contribute". Legacy points lack the field and are unaffected.
+        ("author", FieldType::Keyword),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -452,6 +458,9 @@ async fn ensure_facts_indexes(client: &Qdrant) {
         ("object", FieldType::Text),
         ("valid", FieldType::Keyword),
         ("created_at", FieldType::Datetime),
+        // Which agent asserted the fact — keyword index so a multi-agent
+        // deployment can scope "facts asserted by agent X".
+        ("author", FieldType::Keyword),
     ];
     for (field, ty) in fields {
         tracing::debug!(field, "ensure_facts_index: start");
@@ -685,6 +694,49 @@ pub(crate) async fn existing_payload_string(
     extract_string(&point.payload, key)
 }
 
+/// True if the given id is a stored procedure (`type = procedure`). Used by
+/// `mind_outcome` to decide whether a test/compile signal should also bump the
+/// procedural success/fail counters.
+pub async fn is_procedure(config: &MindConfig, id: &str) -> Result<bool> {
+    let client = get_client(config).await?;
+    Ok(existing_payload_string(&client, MEMORIES_COLLECTION, id, "type").await.as_deref()
+        == Some(TYPE_PROCEDURE))
+}
+
+/// Full payload of one memory core, by id — the lazy "zoom inside the core"
+/// fetch for the graph viewer. Returns the content + metadata fields, or None
+/// if the id is not a memory point.
+pub async fn memory_detail(config: &MindConfig, id: &str) -> Result<Option<HashMap<String, String>>> {
+    let client = get_client(config).await?;
+    Ok(read_point_payload_strings(
+        &client,
+        MEMORIES_COLLECTION,
+        id,
+        &["content", "library", "type", "source", "author", "created_at", "updated_at"],
+    )
+    .await)
+}
+
+/// Edit a memory core's content (the viewer's edit mode). Because point IDs are
+/// content-addressed (`deterministic_id`), changing the text changes the ID — so
+/// an edit is "delete the old point, write the new content" while CARRYING OVER
+/// the library/author so the core keeps its place and attribution. Returns the
+/// new id. Errors if the id is not an existing memory.
+pub async fn edit_memory(config: &MindConfig, id: &str, new_content: &str) -> Result<String> {
+    let detail = memory_detail(config, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no memory with id {id}"))?;
+    let library = detail
+        .get("library")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("memory {id} has no library"))?;
+    let author = detail.get("author").cloned();
+    // Write the new content (carries author), then delete the old point.
+    add_memory_authored(config, &library, new_content, None, author.as_deref()).await?;
+    delete_memory(config, &library, id).await?;
+    Ok(deterministic_id(&library, new_content.trim()))
+}
+
 /// v1.6 step 1: batched payload read — one `get_points` call returns
 /// every requested string-shaped payload field for a single point.
 ///
@@ -762,6 +814,21 @@ pub async fn add_memory(
     library: &str,
     content: &str,
     source: Option<&str>,
+) -> Result<usize> {
+    add_memory_authored(config, library, content, source, None).await
+}
+
+/// Like `add_memory` but records which agent wrote the memory (payload `author`
+/// field). The point ID is unchanged — `author` is provenance, not identity —
+/// so a second agent writing identical content still lands on the same point
+/// (idempotent), with the latest writer's author tag. Use from the multi-agent
+/// HTTP surface; the plain `add_memory` keeps single-agent callers untouched.
+pub async fn add_memory_authored(
+    config: &MindConfig,
+    library: &str,
+    content: &str,
+    source: Option<&str>,
+    author: Option<&str>,
 ) -> Result<usize> {
     if !is_registered(library) {
         anyhow::bail!(
@@ -842,6 +909,7 @@ pub async fn add_memory(
                 library,
                 source,
                 TYPE_MEMORY,
+                author,
             ),
         ));
     }
@@ -929,6 +997,7 @@ pub async fn add_quarantined(
         TYPE_MEMORY,
         Some(true),
         Some(reason),
+        None,
     );
 
     client
@@ -1281,6 +1350,7 @@ pub async fn add_memories_batch(
                 library,
                 src.as_deref(),
                 TYPE_MEMORY,
+                None,
             ),
         ));
     }
@@ -1297,6 +1367,7 @@ pub async fn add_memories_batch(
     Ok(stored)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_payload(
     content: &str,
     hash: &str,
@@ -1305,9 +1376,10 @@ fn build_payload(
     library: &str,
     source: Option<&str>,
     mem_type: &str,
+    author: Option<&str>,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
     build_payload_full(
-        content, hash, created_at, updated_at, library, source, mem_type, None, None,
+        content, hash, created_at, updated_at, library, source, mem_type, None, None, author,
     )
 }
 
@@ -1327,6 +1399,7 @@ fn build_payload_full(
     mem_type: &str,
     quarantined: Option<bool>,
     quarantine_reason: Option<&str>,
+    author: Option<&str>,
 ) -> HashMap<String, qdrant_client::qdrant::Value> {
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("content".into(), content.into());
@@ -1344,6 +1417,13 @@ fn build_payload_full(
     if let Some(r) = quarantine_reason {
         payload.insert("quarantine_reason".into(), r.into());
     }
+    // Author = which agent wrote this (provenance, NOT identity). Kept out of
+    // deterministic_id deliberately: the point ID stays content-addressed so
+    // re-ingest idempotency, quarantine-promote, and _links resolution are
+    // unaffected. Legacy points simply lack the key.
+    if let Some(a) = author {
+        payload.insert("author".into(), a.into());
+    }
     payload
 }
 
@@ -1354,6 +1434,17 @@ pub async fn search(
     limit: usize,
     tier: u8,
 ) -> Result<Vec<SearchResult>> {
+    // Live read pulse for the viewer (one per search, not per result). Cheap
+    // when no viewer is open (broadcast drops to no subscribers).
+    crate::pulse::emit(crate::pulse::PulseEvent::new(
+        crate::pulse::PulseKind::Read,
+        library.map(|l| format!("lib:{l}")).unwrap_or_else(|| "search".into()),
+        {
+            let q: String = query.chars().take(40).collect();
+            format!("search: {q}")
+        },
+    ));
+
     let client = get_client(config).await?;
     if !client
         .collection_exists(MEMORIES_COLLECTION)
@@ -1413,6 +1504,7 @@ pub async fn search(
                 library: extract_string(payload, "library").unwrap_or_default(),
                 content: extract_string(payload, "content").unwrap_or_default(),
                 source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
                 created_at: extract_string(payload, "created_at"),
                 score: point.score,
             }
@@ -2386,6 +2478,63 @@ pub async fn history(config: &MindConfig, limit: usize) -> Result<Vec<SearchResu
                 library: extract_string(payload, "library").unwrap_or_default(),
                 content: truncate_str(&content, 200),
                 source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
+                created_at: extract_string(payload, "created_at"),
+                score: 0.0,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// What did a given agent contribute — memories tagged `author = agent`, newest
+/// first. Uses the indexed `author` keyword field (no embedding, no query
+/// vector). This is the reader that makes inter-agent writes visible: an
+/// external coordinator can ask "show me what the Soloist wrote" without a
+/// semantic query. Returns at most `limit` results.
+pub async fn by_author(
+    config: &MindConfig,
+    agent: &str,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    let filter = Filter {
+        must: vec![Condition::matches("author", agent.to_string())],
+        must_not: vec![Condition::matches("quarantined", true)],
+        ..Default::default()
+    };
+    let order = OrderBy {
+        key: "created_at".to_string(),
+        direction: Some(Direction::Desc as i32),
+        start_from: None,
+    };
+
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .limit(limit as u32)
+                .with_payload(true)
+                .order_by(order),
+        )
+        .await
+        .context("by_author scroll failed")?;
+
+    let results = response
+        .result
+        .into_iter()
+        .map(|point| {
+            let payload = &point.payload;
+            let content = extract_string(payload, "content").unwrap_or_default();
+            SearchResult {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                library: extract_string(payload, "library").unwrap_or_default(),
+                content: truncate_str(&content, 200),
+                source: extract_string(payload, "source"),
+                author: extract_string(payload, "author"),
                 created_at: extract_string(payload, "created_at"),
                 score: 0.0,
             }
@@ -2557,6 +2706,7 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, 
                 lib,
                 source.as_deref(),
                 TYPE_MEMORY,
+                None,
             );
             let (s_idx, s_val) = sparse_vector(&content);
             let vectors = NamedVectors::default()
@@ -2617,6 +2767,81 @@ pub fn restore(input: &str) -> Result<()> {
     Ok(())
 }
 
+// ===== Encrypted backup (roadmap v1.2 local half) =====
+// On-disk format of an encrypted backup file:
+//   magic "MGIBK1\0" (7 bytes) | backup_salt (32 bytes) | nonce+ciphertext
+// The ciphertext is AES-256-GCM over the gzip+tar of the data dir. The key is
+// derived from the user's passphrase + the per-file `backup_salt` via the
+// vault's pinned Argon2id — a SEPARATE salt from `vault.salt` so backup and
+// secret-vault rotation stay independent (critic's key-separation requirement).
+// S3/chunked transport (v1.2 full) sits on top of this blob unchanged.
+
+const BACKUP_MAGIC: &[u8; 7] = b"MGIBK1\0";
+
+/// Write an encrypted backup of the whole data dir to `output`, protected by
+/// `passphrase`. The archive is built in memory, then encrypted; nothing
+/// plaintext touches disk.
+pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
+    use rand::RngCore;
+
+    let home = crate::config::mind_home();
+
+    // gzip+tar the data dir into an in-memory buffer.
+    let mut archive: Vec<u8> = Vec::new();
+    {
+        let enc = flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(".", &home)
+            .context("Failed to archive data directory")?;
+        tar.into_inner()?.finish()?;
+    }
+
+    // Fresh per-backup salt → key, then encrypt the archive bytes.
+    let mut salt = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    let key = crate::vault::derive_key_with_salt(passphrase, &salt)
+        .context("backup key derivation failed")?;
+    let blob = crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
+
+    // magic | salt | nonce+ciphertext
+    let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
+    out.extend_from_slice(BACKUP_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&blob);
+    crate::util::atomic_write(std::path::Path::new(output), &out)
+        .with_context(|| format!("Failed to write encrypted backup {output}"))?;
+    Ok(())
+}
+
+/// Restore an encrypted backup written by `backup_encrypted`.
+pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
+    let data = std::fs::read(input)
+        .with_context(|| format!("Failed to read encrypted backup {input}"))?;
+    if data.len() < BACKUP_MAGIC.len() + 32 {
+        anyhow::bail!("Not a valid mgi-mind encrypted backup (too short)");
+    }
+    if &data[..BACKUP_MAGIC.len()] != BACKUP_MAGIC {
+        anyhow::bail!("Not a valid mgi-mind encrypted backup (bad magic)");
+    }
+    let salt: [u8; 32] = data[BACKUP_MAGIC.len()..BACKUP_MAGIC.len() + 32]
+        .try_into()
+        .expect("32-byte slice");
+    let blob = &data[BACKUP_MAGIC.len() + 32..];
+
+    let key = crate::vault::derive_key_with_salt(passphrase, &salt)
+        .context("backup key derivation failed")?;
+    let archive = crate::vault::decrypt_with_key(blob, &key)
+        .context("backup decryption failed — wrong passphrase?")?;
+
+    let home = crate::config::mind_home();
+    std::fs::create_dir_all(&home)?;
+    let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
+    let mut tar = tar::Archive::new(dec);
+    tar.unpack(&home)
+        .context("Failed to extract encrypted backup")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2634,6 +2859,34 @@ mod tests {
         assert_ne!(a, c, "different content must differ");
         assert_ne!(a, d, "different library must differ");
         assert!(uuid::Uuid::parse_str(&a).is_ok());
+    }
+
+    #[test]
+    fn author_is_payload_not_identity() {
+        // The critical invariant: author must NOT enter the point id. Two
+        // agents writing identical content must collapse to the SAME point
+        // (idempotent, quarantine-promote, _links all rely on this).
+        let id_via_quarantine = quarantine_id_for("lib", "shared fact");
+        let id_direct = deterministic_id("lib", "shared fact");
+        assert_eq!(
+            id_via_quarantine, id_direct,
+            "quarantine id must equal the content-addressed id regardless of author"
+        );
+        // And the payload carries author as a plain field, independent of id.
+        let p = build_payload(
+            "shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, Some("agentB"),
+        );
+        assert_eq!(
+            extract_string(&p, "author").as_deref(),
+            Some("agentB"),
+            "author must land in the payload"
+        );
+        // No author → no key (legacy points stay byte-identical).
+        let p2 = build_payload("shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, None);
+        assert!(
+            extract_string(&p2, "author").is_none(),
+            "absent author must not add a payload key"
+        );
     }
 
     #[test]
@@ -2725,5 +2978,51 @@ mod tests {
             qdrant_client::qdrant::Value::from("not-a-float"),
         );
         assert!(payload_get_confidence(&payload).is_none());
+    }
+
+    #[test]
+    fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
+        // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
+        // (Serial-safe: uses a unique dir; env is set/cleared within the test.)
+        let base = std::env::temp_dir().join(format!(
+            "mgimind-bk-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = home.join("marker.txt");
+        std::fs::write(&marker, b"crescendo-secret-state").unwrap();
+
+        let bk = base.join("out.enc");
+        let bk_s = bk.to_str().unwrap();
+
+        // Backup encrypted, then wipe the home, then restore.
+        // SAFETY: test-only, single-threaded within this test body.
+        unsafe { std::env::set_var("MGIMIND_HOME", &home) };
+        backup_encrypted(bk_s, "correct horse battery staple").unwrap();
+
+        // The blob must not contain the plaintext marker.
+        let raw = std::fs::read(&bk).unwrap();
+        assert_eq!(&raw[..BACKUP_MAGIC.len()], BACKUP_MAGIC, "magic header");
+        assert!(
+            !raw.windows(b"crescendo-secret-state".len())
+                .any(|w| w == b"crescendo-secret-state"),
+            "plaintext must not appear in the encrypted backup"
+        );
+
+        // Wrong passphrase must fail (AES-GCM auth tag).
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(
+            restore_encrypted(bk_s, "wrong passphrase").is_err(),
+            "wrong passphrase must not restore"
+        );
+
+        // Correct passphrase round-trips the marker back.
+        restore_encrypted(bk_s, "correct horse battery staple").unwrap();
+        let restored = std::fs::read(&marker).unwrap();
+        assert_eq!(restored, b"crescendo-secret-state");
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
