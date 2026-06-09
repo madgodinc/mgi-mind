@@ -26,6 +26,7 @@ mod migrate_v14;
 mod outcome;
 mod procedure;
 mod provenance;
+mod pulse;
 mod relevance;
 mod reranker;
 mod retrieval_policy;

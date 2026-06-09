@@ -16,10 +16,14 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{delete, get, post},
 };
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -60,6 +64,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/consolidate", get(api_consolidate_dry_run))
         .route("/api/ingest/recent", get(api_ingest_recent))
         .route("/api/graph", get(api_graph))
+        .route("/api/pulse", get(api_pulse))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -501,6 +506,34 @@ struct GraphQuery {
 
 fn default_graph_limit() -> usize {
     200
+}
+
+/// Live pulse feed (SSE). Each `data:` line is a `PulseEvent` JSON: an impulse
+/// the brain just emitted (write/read/process). The browser animates it as a
+/// taxi running a neuron toward `target`, colored by `kind`. Best-effort: a
+/// slow client that lags just misses old pulses.
+async fn api_pulse(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let rx = crate::pulse::subscribe();
+    // futures_util::stream::unfold drives the broadcast receiver without adding
+    // a new dependency (no async-stream / tokio-stream crate needed).
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let json = serde_json::to_string(&ev).unwrap_or_default();
+                    return Some((Ok(Event::default().data(json)), rx));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> Response {
