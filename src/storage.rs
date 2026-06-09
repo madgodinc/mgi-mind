@@ -1333,6 +1333,7 @@ pub async fn add_memories_batch(
     Ok(stored)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_payload(
     content: &str,
     hash: &str,
