@@ -106,12 +106,21 @@ pub enum Commands {
     Backup {
         /// Output file path
         output: String,
+        /// Encrypt the backup (AES-256-GCM, passphrase prompted on the
+        /// terminal). Uses a backup-specific key, independent of the secret
+        /// vault. Restore the file with `restore --encrypt`.
+        #[arg(long)]
+        encrypt: bool,
     },
 
     /// Restore from backup
     Restore {
         /// Backup file path
         input: String,
+        /// The backup file is encrypted (written by `backup --encrypt`);
+        /// passphrase is prompted on the terminal.
+        #[arg(long)]
+        encrypt: bool,
     },
 
     /// Export data
@@ -719,8 +728,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             apply,
         } => cmd_import(&source, &path, &library, apply).await,
         Commands::Stats { json } => cmd_stats(json).await,
-        Commands::Backup { output } => cmd_backup(&output).await,
-        Commands::Restore { input } => cmd_restore(&input).await,
+        Commands::Backup { output, encrypt } => cmd_backup(&output, encrypt).await,
+        Commands::Restore { input, encrypt } => cmd_restore(&input, encrypt).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
@@ -2311,17 +2320,35 @@ pub(crate) async fn run_session_end(agent: &str, summary: &str) -> Result<String
     Ok("Session ended.".to_string())
 }
 
-async fn cmd_backup(output: &str) -> Result<()> {
-    println!("Backing up to {output}...");
-    crate::storage::backup(output)?;
-    println!("Backup complete.");
+async fn cmd_backup(output: &str, encrypt: bool) -> Result<()> {
+    if encrypt {
+        let pass = crate::vault::prompt_password("Set backup passphrase: ")?;
+        let confirm = crate::vault::prompt_password("Confirm backup passphrase: ")?;
+        if pass != confirm {
+            anyhow::bail!("Passphrases do not match — backup aborted.");
+        }
+        println!("Backing up (encrypted) to {output}...");
+        crate::storage::backup_encrypted(output, &pass)?;
+        println!("Encrypted backup complete. Keep the passphrase safe — it cannot be recovered.");
+    } else {
+        println!("Backing up to {output}...");
+        crate::storage::backup(output)?;
+        println!("Backup complete.");
+    }
     Ok(())
 }
 
-async fn cmd_restore(input: &str) -> Result<()> {
-    println!("Restoring from {input}...");
-    crate::storage::restore(input)?;
-    println!("Restore complete.");
+async fn cmd_restore(input: &str, encrypt: bool) -> Result<()> {
+    if encrypt {
+        let pass = crate::vault::prompt_password("Backup passphrase: ")?;
+        println!("Restoring (encrypted) from {input}...");
+        crate::storage::restore_encrypted(input, &pass)?;
+        println!("Restore complete.");
+    } else {
+        println!("Restoring from {input}...");
+        crate::storage::restore(input)?;
+        println!("Restore complete.");
+    }
     Ok(())
 }
 
