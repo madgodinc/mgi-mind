@@ -4,6 +4,12 @@
 
 **[Latest release: v1.6.4](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.4)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
+<p align="center">
+  <img src="docs/brain-demo.gif" alt="Memory visualized as a brain — glowing cores wired by neurons" width="760">
+  <br>
+  <em>Your memory as a brain — cores (memories, facts, regions) wired by neurons, with live pulses. Run <code>mgimind brain</code> or just ask your assistant to show it.</em>
+</p>
+
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
 assistants read and write memory on their own. Also a normal CLI.
