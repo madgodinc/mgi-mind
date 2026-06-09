@@ -595,7 +595,47 @@ pub async fn init(config: &MindConfig) -> Result<()> {
 
 // --- Library management -----------------------------------------------------
 
+/// Reserved library names a caller may not create: the internal procedure
+/// namespace, and the collection-name strings (so a `library` tag can't be
+/// confused with an internal collection). Untrusted callers reach this via the
+/// HTTP `/library/create` route, so the guard lives here, not at the CLI.
+const RESERVED_LIBRARY_NAMES: &[&str] = &[
+    PROCEDURE_LIBRARY,
+    MEMORIES_COLLECTION,
+    FACTS_COLLECTION,
+    PREDICATES_COLLECTION,
+    PROCSTATS_COLLECTION,
+];
+
+/// Validate an untrusted library name. Keeps the registry sane (bounded length,
+/// safe charset) and blocks reserved names. A library name is a payload tag, not
+/// a Qdrant collection, so this is hygiene + namespace protection, not a clobber
+/// guard — but it's the right place to stop both.
+fn validate_library_name(name: &str) -> Result<()> {
+    let n = name.trim();
+    if n.is_empty() {
+        anyhow::bail!("library name must not be empty");
+    }
+    if n.chars().count() > 128 {
+        anyhow::bail!("library name too long (max 128 chars)");
+    }
+    if !n
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        anyhow::bail!("library name may only contain [A-Za-z0-9._-]");
+    }
+    if RESERVED_LIBRARY_NAMES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(n))
+    {
+        anyhow::bail!("'{n}' is a reserved library name");
+    }
+    Ok(())
+}
+
 pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
+    validate_library_name(name)?;
     if is_registered(name) {
         anyhow::bail!(
             "{}",
@@ -3269,6 +3309,39 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_library_name_accepts_sane_and_rejects_bad() {
+        // Good names pass.
+        for ok in ["projects", "my-lib", "lib_2", "a.b.c", "Personal"] {
+            assert!(validate_library_name(ok).is_ok(), "{ok} should be valid");
+        }
+        // Empty / whitespace-only.
+        assert!(validate_library_name("").is_err());
+        assert!(validate_library_name("   ").is_err());
+        // Over-long.
+        assert!(validate_library_name(&"x".repeat(129)).is_err());
+        // Illegal chars (path separators, spaces, control).
+        for bad in ["a/b", "a b", "a\tb", "../etc", "name;drop"] {
+            assert!(
+                validate_library_name(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        // Reserved names (case-insensitive) — the namespace-protection guard.
+        for reserved in [
+            "_procedures",
+            "memories",
+            "_kg_facts",
+            "_mod_procstats",
+            "MEMORIES",
+        ] {
+            assert!(
+                validate_library_name(reserved).is_err(),
+                "{reserved} must be reserved"
+            );
+        }
+    }
 
     #[test]
     fn deterministic_id_is_stable_and_content_addressed() {
