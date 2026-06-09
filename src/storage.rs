@@ -1400,6 +1400,17 @@ pub async fn search(
     limit: usize,
     tier: u8,
 ) -> Result<Vec<SearchResult>> {
+    // Live read pulse for the viewer (one per search, not per result). Cheap
+    // when no viewer is open (broadcast drops to no subscribers).
+    crate::pulse::emit(crate::pulse::PulseEvent::new(
+        crate::pulse::PulseKind::Read,
+        library.map(|l| format!("lib:{l}")).unwrap_or_else(|| "search".into()),
+        {
+            let q: String = query.chars().take(40).collect();
+            format!("search: {q}")
+        },
+    ));
+
     let client = get_client(config).await?;
     if !client
         .collection_exists(MEMORIES_COLLECTION)
