@@ -42,6 +42,10 @@ struct AppState {
     /// tokens the author tag becomes trustworthy. The default single-token mode
     /// maps one generated token to `None` (anonymous) — backward compatible.
     tokens: Arc<std::collections::HashMap<String, Option<String>>>,
+    /// In-memory read counter per agent (reads are too frequent for the
+    /// append-only audit log). Gives the multi-agent graph a "who read how
+    /// much" signal without disk churn; resets when the server restarts.
+    reads: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
 }
 
 /// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
@@ -84,6 +88,7 @@ pub async fn run(
     let state = AppState {
         config: Arc::new(config),
         tokens: Arc::new(tokens),
+        reads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = Router::new()
@@ -97,6 +102,7 @@ pub async fn run(
         .route("/session/start", post(session_start))
         .route("/session/end", post(session_end))
         .route("/session/last", post(session_last))
+        .route("/stats/activity", post(stats_activity))
         .with_state(state);
 
     let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
@@ -154,6 +160,18 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<Option<String>, S
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Count one read for the caller. Cheap in-memory tally; the agent is the
+/// token-derived identity, falling back to the X-Agent header, then "anonymous".
+fn note_read(state: &AppState, derived: &Option<String>, headers: &HeaderMap) {
+    let who = derived
+        .clone()
+        .or_else(|| agent_of(headers))
+        .unwrap_or_else(|| "anonymous".to_string());
+    if let Ok(mut map) = state.reads.lock() {
+        *map.entry(who).or_insert(0) += 1;
+    }
+}
+
 /// The self-asserted caller id from `X-Agent`. Audit hint / author tag only.
 fn agent_of(headers: &HeaderMap) -> Option<String> {
     headers
@@ -209,9 +227,11 @@ async fn memory_search(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    note_read(&state, &derived, &headers);
     call(&state, "mind_search", args).await
 }
 
@@ -220,9 +240,11 @@ async fn memory_recall(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    note_read(&state, &derived, &headers);
     // Unified recall: facts + memories + procedures in one call.
     call(&state, "mind_recall_all", args).await
 }
@@ -276,6 +298,7 @@ async fn memory_by_agent(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
+    note_read(&state, &derived, &headers);
     // For by-agent, the body `agent` (explicit target) wins; fall back to the
     // caller's own derived/header identity ("what did I write").
     let has_explicit = args.get("agent").and_then(|v| v.as_str()).is_some();
@@ -342,4 +365,20 @@ async fn session_last(
         Err(c) => return c.into_response(),
     };
     call(&state, "mind_session", session_call_args(args, "last", &headers, derived)).await
+}
+
+/// Per-agent read activity since the server started. The write side is already
+/// queryable per-agent via /memory/by-agent (author index); this adds the read
+/// side the audit log deliberately does not carry, completing the "who read and
+/// wrote what" picture for a multi-agent graph. In-memory, resets on restart.
+async fn stats_activity(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    let reads: std::collections::HashMap<String, u64> = state
+        .reads
+        .lock()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    Json(json!({ "ok": true, "reads_by_agent": reads })).into_response()
 }
