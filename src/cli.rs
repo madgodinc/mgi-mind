@@ -608,6 +608,10 @@ pub enum QuarantineAction {
     /// usual promotion path is automatic (re-asserting the same content via
     /// ingest); this is the explicit override when you know what you want.
     Promote { id: String },
+    /// Expire (delete) a quarantined entry by id — confirm the gate was right
+    /// to reject it. Only ever touches quarantined points, never live memory,
+    /// and the content + reason stay in the audit log so it's recoverable.
+    Expire { id: String },
 }
 
 #[derive(Subcommand)]
@@ -888,6 +892,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             QuarantineAction::Show { id } => cmd_quarantine_show(&id).await,
             QuarantineAction::Promote { id } => cmd_quarantine_promote(&id).await,
+            QuarantineAction::Expire { id } => cmd_quarantine_expire(&id).await,
         },
         Commands::IngestSession { path, library } => cmd_ingest_session(&path, &library).await,
     }
@@ -929,6 +934,22 @@ async fn cmd_quarantine_promote(id: &str) -> Result<()> {
         println!("Promoted '{id}' from quarantine to ordinary memory.");
     } else {
         println!("Nothing to promote — '{id}' is not in quarantine.");
+    }
+    Ok(())
+}
+
+async fn cmd_quarantine_expire(id: &str) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    if crate::storage::expire_from_quarantine(&config, id).await? {
+        println!(
+            "Expired '{id}' — confirmed the gate was right. Removed from quarantine \
+             (content + reason recorded in the audit log first, when audit is enabled)."
+        );
+    } else {
+        println!(
+            "Nothing to expire — '{id}' is not in quarantine. \
+             (Live memory is never touched here; use `mgimind delete` for that.)"
+        );
     }
     Ok(())
 }
@@ -2138,15 +2159,24 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     }
 
     // Quarantine visibility: if entries are waiting for review, surface the
-    // count so the agent knows to check them. Without this line quarantine is a
-    // black hole — recoverable in theory, never looked at. Zero cost when empty.
-    if let Ok(q) = crate::storage::quarantine_count(config).await
-        && q > 0
+    // count broken down by gate reason, so the agent (and the user) can see WHY
+    // the gate set things aside — a one-sided "too_short" pile reads very
+    // differently from a "blacklist_doc" pile. Without this, quarantine is a
+    // black hole: recoverable in theory, never looked at. Zero cost when empty.
+    if let Ok((breakdown, total)) = crate::storage::quarantine_reason_breakdown(config).await
+        && total > 0
     {
+        let by_reason = breakdown
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "[Quarantine: {q} entries set aside — review with mind_quarantine(action=\"list\")]"
+            "[Quarantine: {total} entries set aside ({by_reason}) — \
+             review with mind_quarantine(action=\"list\"), \
+             keep with action=\"promote\", drop with action=\"expire\"]"
         );
     }
 

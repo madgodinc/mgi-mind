@@ -374,6 +374,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         // `quarantined` (bool) so the `must_not quarantined` filter on every
         // search and the quarantine count don't degrade to a full payload scan.
         ("quarantined", FieldType::Bool),
+        // `quarantine_reason` (keyword) so the per-reason breakdown in the
+        // context digest counts each reason without a payload scan.
+        ("quarantine_reason", FieldType::Keyword),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -1086,6 +1089,67 @@ pub async fn promote_from_quarantine(config: &MindConfig, id: &str) -> Result<bo
     Ok(true)
 }
 
+/// Expire (delete) a quarantined entry — the explicit "yes, the gate was right
+/// to reject this" verb. Guarded: it only deletes a point that is ACTUALLY
+/// quarantined, so this surface can never remove a live memory (that stays the
+/// job of `delete_memory`). The audit entry keeps the original
+/// `quarantine_reason` and a content snapshot, so an accidental expire is
+/// recoverable from the log and the reason becomes a real negative-label
+/// signal about which gate rule fired. Returns false if the id is unknown or
+/// the point is not quarantined.
+pub async fn expire_from_quarantine(config: &MindConfig, id: &str) -> Result<bool> {
+    let client = get_client(config).await?;
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid.clone()])
+                .with_payload(true),
+        )
+        .await
+        .context("Failed to fetch quarantine candidate")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(false);
+    };
+    if !extract_bool(&point.payload, "quarantined").unwrap_or(false) {
+        // Not quarantined — refuse, so this can't be used to delete live memory.
+        return Ok(false);
+    }
+    let library = extract_string(&point.payload, "library").unwrap_or_default();
+    let reason = extract_string(&point.payload, "quarantine_reason").unwrap_or_default();
+    let content = extract_string(&point.payload, "content").unwrap_or_default();
+
+    // Record the audit event (with the content snapshot already in hand) BEFORE
+    // the delete, so a deletion is never left unrecorded — the verb advertises
+    // recoverability, so the record has to land first.
+    let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, library, id)
+        .actor("relevance-gate")
+        .note(format!("expired from quarantine (reason: {reason})"));
+    if !content.is_empty() {
+        ev = ev.before(truncate_for_audit(&content));
+    }
+    crate::audit::record(ev);
+
+    // Delete conditional on (this id AND still quarantined), not a bare id, so a
+    // concurrent promote between the fetch above and here can't make us delete a
+    // now-live point (closes the TOCTOU window at zero extra round-trip).
+    let guarded = Filter {
+        must: vec![
+            Condition::has_id(vec![pid]),
+            Condition::matches("quarantined", true),
+        ],
+        ..Default::default()
+    };
+    client
+        .delete_points(
+            DeletePointsBuilder::new(MEMORIES_COLLECTION)
+                .points(guarded)
+                .wait(true),
+        )
+        .await
+        .context("Failed to expire quarantined entry")?;
+    Ok(true)
+}
+
 /// A quarantined memory entry, surfaced explicitly through the quarantine
 /// commands. Distinct from `SearchResult` because the gate reason matters
 /// here (it's the whole point of inspecting the quarantine).
@@ -1226,6 +1290,51 @@ pub async fn quarantine_count(config: &MindConfig) -> Result<u64> {
         .await
         .context("quarantine count")?;
     Ok(resp.result.map(|r| r.count).unwrap_or(0))
+}
+
+/// Count quarantined entries grouped by gate reason. Returns `(reason, count)`
+/// pairs sorted by count descending, omitting zero-count reasons, plus a final
+/// `("other", n)` pair when some quarantined points carry a reason outside the
+/// canonical `relevance::KNOWN_REASONS` set (so nothing is silently dropped from
+/// the tally). Each reason is an exact Qdrant count — bounded (≈8 cheap queries),
+/// not a full scan. `total` is returned separately so callers don't re-count.
+pub async fn quarantine_reason_breakdown(config: &MindConfig) -> Result<(Vec<(String, u64)>, u64)> {
+    let client = get_client(config).await?;
+    let total = quarantine_count(config).await?;
+    if total == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let mut counts: Vec<(String, u64)> = Vec::new();
+    let mut known_sum = 0u64;
+    for reason in crate::relevance::KNOWN_REASONS {
+        let filter = Filter {
+            must: vec![
+                Condition::matches("quarantined", true),
+                Condition::matches("quarantine_reason", reason.to_string()),
+            ],
+            ..Default::default()
+        };
+        let resp = client
+            .count(
+                qdrant_client::qdrant::CountPointsBuilder::new(MEMORIES_COLLECTION)
+                    .filter(filter)
+                    .exact(true),
+            )
+            .await
+            .with_context(|| format!("quarantine count for reason {reason}"))?;
+        let n = resp.result.map(|r| r.count).unwrap_or(0);
+        if n > 0 {
+            counts.push((reason.to_string(), n));
+            known_sum += n;
+        }
+    }
+    counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    // Anything quarantined with a reason we don't enumerate (or none at all)
+    // lands in "other" so the breakdown always reconciles with `total`.
+    if total > known_sum {
+        counts.push(("other".to_string(), total - known_sum));
+    }
+    Ok((counts, total))
 }
 
 /// Fetch a single quarantined entry with full (untruncated) content. Returns
