@@ -365,6 +365,12 @@ pub enum Commands {
         /// Port to bind on 127.0.0.1. Omit for a random free port.
         #[arg(long)]
         port: Option<u16>,
+        /// Per-agent bearer token as `NAME:TOKEN` (repeatable). When given, a
+        /// caller's identity is DERIVED from its token (the author tag becomes
+        /// trustworthy and the X-Agent header is ignored). Omit for a single
+        /// anonymous token where X-Agent is a self-asserted hint.
+        #[arg(long = "agent-token", value_name = "NAME:TOKEN")]
+        agent_tokens: Vec<String>,
     },
     /// Auto-extract & ingest memory candidates (phase Д2). Routes filtered
     /// candidates through the v0.11 relevance gate: clearly low-signal
@@ -847,10 +853,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, !no_open).await
         }
-        Commands::ServeHttp { port } => {
+        Commands::ServeHttp {
+            port,
+            agent_tokens,
+        } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
-            crate::http_api::run(config, port).await
+            crate::http_api::run(config, port, agent_tokens).await
         }
         Commands::Ingest {
             library,

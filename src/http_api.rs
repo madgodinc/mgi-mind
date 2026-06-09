@@ -36,17 +36,54 @@ use crate::config::MindConfig;
 #[derive(Clone)]
 struct AppState {
     config: Arc<MindConfig>,
-    /// One-shot bearer token, generated per-process, printed once at startup.
-    /// Required in `Authorization: Bearer <token>` on every route.
-    token: Arc<String>,
+    /// token → agent identity. The authn seam for v2.0 multi-tenant (Д7):
+    /// when an agent is named for a token, that identity is DERIVED from the
+    /// presented token, not asserted by the `X-Agent` header. With per-agent
+    /// tokens the author tag becomes trustworthy. The default single-token mode
+    /// maps one generated token to `None` (anonymous) — backward compatible.
+    tokens: Arc<std::collections::HashMap<String, Option<String>>>,
 }
 
-/// Entry point used by `Commands::ServeHttp`.
-pub async fn run(config: MindConfig, port: Option<u16>) -> Result<()> {
-    let token = Uuid::new_v4().to_string();
+/// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
+/// `name:token` pairs; when empty, one anonymous token is generated.
+pub async fn run(
+    config: MindConfig,
+    port: Option<u16>,
+    agent_tokens: Vec<String>,
+) -> Result<()> {
+    let mut tokens: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut generated: Option<String> = None;
+
+    if agent_tokens.is_empty() {
+        // Default: one anonymous bearer token (prior behavior).
+        let token = Uuid::new_v4().to_string();
+        tokens.insert(token.clone(), None);
+        generated = Some(token);
+    } else {
+        // Per-agent tokens: identity is derived from the token, X-Agent ignored.
+        for pair in &agent_tokens {
+            let (name, tok) = pair
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("--agent-token must be NAME:TOKEN, got '{pair}'"))?;
+            if name.is_empty() || tok.is_empty() {
+                anyhow::bail!("--agent-token NAME and TOKEN must both be non-empty: '{pair}'");
+            }
+            tokens.insert(tok.to_string(), Some(name.to_string()));
+        }
+    }
+
+    // Sorted agent names for the startup banner (computed before `state` moves
+    // into the router).
+    let agent_names = {
+        let mut n: Vec<String> = tokens.values().filter_map(|v| v.clone()).collect();
+        n.sort_unstable();
+        n.join(", ")
+    };
+
     let state = AppState {
         config: Arc::new(config),
-        token: Arc::new(token.clone()),
+        tokens: Arc::new(tokens),
     };
 
     let app = Router::new()
@@ -69,9 +106,14 @@ pub async fn run(config: MindConfig, port: Option<u16>) -> Result<()> {
     eprintln!("  mgimind serve-http  •  loopback tool-surface for multi-agent access");
     eprintln!("  ─────────────────────────────────────────────────────────────────");
     eprintln!("  url:    http://{addr}");
-    eprintln!("  token:  {token}");
-    eprintln!("  auth:   Authorization: Bearer {token}");
-    eprintln!("  agent:  X-Agent: <id>   (audit hint + author tag, not auth)");
+    if let Some(token) = &generated {
+        eprintln!("  token:  {token}");
+        eprintln!("  auth:   Authorization: Bearer {token}");
+        eprintln!("  agent:  X-Agent: <id>   (self-asserted author tag, not auth)");
+    } else {
+        eprintln!("  auth:   per-agent tokens — identity DERIVED from the bearer token");
+        eprintln!("  agents: {agent_names}");
+    }
     eprintln!(
         "  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add  GET /health"
     );
@@ -93,14 +135,17 @@ async fn shutdown_signal() {
 // ----- auth + helpers --------------------------------------------------------
 
 /// Bearer-token check. Loopback is not a trust boundary on its own, so every
-/// route requires the per-process token.
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
+/// route requires a valid token. Returns the agent identity DERIVED from the
+/// token (Some when per-agent tokens are configured, None for the anonymous
+/// single-token mode). A derived identity is trustworthy; the `X-Agent` header
+/// is not.
+fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
     if let Some(auth) = headers.get("authorization")
         && let Ok(s) = auth.to_str()
         && let Some(t) = s.strip_prefix("Bearer ")
-        && t == state.token.as_str()
+        && let Some(agent) = state.tokens.get(t)
     {
-        return Ok(());
+        return Ok(agent.clone());
     }
     Err(StatusCode::UNAUTHORIZED)
 }
@@ -134,13 +179,17 @@ async fn call(state: &AppState, tool: &str, args: Value) -> Response {
     }
 }
 
-/// Merge the X-Agent header into the args object under `agent` (author tag),
-/// without clobbering an explicit `agent` already in the body.
-fn with_agent(mut args: Value, headers: &HeaderMap) -> Value {
-    if let Some(agent) = agent_of(headers)
+/// Resolve the author tag and merge it into the args under `agent`. A
+/// token-derived identity (`derived`) is authoritative and OVERRIDES any
+/// `X-Agent` header or body `agent` — you cannot impersonate another agent when
+/// your token names you. In the anonymous single-token mode `derived` is None
+/// and the self-asserted `X-Agent` header is used as before (audit hint only).
+fn with_agent(mut args: Value, headers: &HeaderMap, derived: Option<String>) -> Value {
+    let author = derived.or_else(|| agent_of(headers));
+    if let Some(agent) = author
         && let Value::Object(map) = &mut args
     {
-        map.entry("agent").or_insert(Value::String(agent));
+        map.insert("agent".to_string(), Value::String(agent));
     }
     args
 }
@@ -179,10 +228,11 @@ async fn memory_add(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
-    call(&state, "mind_add", with_agent(args, &headers)).await
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_add", with_agent(args, &headers, derived)).await
 }
 
 async fn memory_ingest(
@@ -190,10 +240,11 @@ async fn memory_ingest(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
-    call(&state, "mind_ingest", with_agent(args, &headers)).await
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_ingest", with_agent(args, &headers, derived)).await
 }
 
 async fn fact_add(
@@ -201,22 +252,33 @@ async fn fact_add(
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
-    call(&state, "mind_fact_add", with_agent(args, &headers)).await
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_fact_add", with_agent(args, &headers, derived)).await
 }
 
-/// "What did agent X write." The agent is taken from the body `agent` field or
-/// the `X-Agent` header (so a coordinator can ask about itself with just the
-/// header, or about another agent by naming it in the body).
+/// "What did agent X write." With per-agent tokens, omitting `agent` in the
+/// body means "what did I write" (the token-derived identity); naming another
+/// agent in the body queries that agent. In anonymous mode the body `agent` or
+/// `X-Agent` header selects the target.
 async fn memory_by_agent(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
-    }
-    call(&state, "mind_by_agent", with_agent(args, &headers)).await
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    // For by-agent, the body `agent` (explicit target) wins; fall back to the
+    // caller's own derived/header identity ("what did I write").
+    let has_explicit = args.get("agent").and_then(|v| v.as_str()).is_some();
+    let merged = if has_explicit {
+        args
+    } else {
+        with_agent(args, &headers, derived)
+    };
+    call(&state, "mind_by_agent", merged).await
 }
