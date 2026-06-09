@@ -1904,8 +1904,8 @@ pub async fn add_procedure(
 
 /// Recall procedures matching an error signature and/or a task context. `norm_error`
 /// (already normalized) drives the sparse/lexical arm; `context` drives the dense/
-/// semantic arm. Returns raw hits with ranking signals; the caller orders them
-/// (verified first, then by success vs fail). Pure retrieval - no mutation.
+/// semantic arm. Returns hits with [0,1]-normalized scores + ranking signals;
+/// the caller orders them by combined relevance + trust. Pure retrieval - no mutation.
 pub async fn recall_procedures(
     config: &MindConfig,
     norm_error: Option<&str>,
@@ -1954,7 +1954,7 @@ pub async fn recall_procedures(
         .await
         .context("Procedure recall failed")?;
 
-    Ok(response
+    let mut hits: Vec<ProcedureHit> = response
         .result
         .into_iter()
         .map(|point| {
@@ -1971,7 +1971,20 @@ pub async fn recall_procedures(
                 score: point.score,
             }
         })
-        .collect())
+        .collect();
+
+    // Normalize the raw RRF scores into [0,1]. RRF fractions are tiny (~0.016
+    // for a rank-0 hit, k=60), so the verified/worked boosts in `rank_score`
+    // (tuned for a [0,1] base) would otherwise dwarf relevance and turn the
+    // weighted rank back into a hard verified-first gate. Min-max within the
+    // returned set keeps relevance and the boosts on the same scale.
+    let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max);
+    if max > 0.0 {
+        for h in &mut hits {
+            h.score /= max;
+        }
+    }
+    Ok(hits)
 }
 
 /// Scroll all procedures (memories with `type=procedure`) for Phase 1.3
@@ -2147,9 +2160,20 @@ pub async fn write_external_signals(
 /// Record the outcome of reusing a procedure: bump success or fail count and
 /// stamp `last_used`. A failure (`worked = false`) raises fail_count so recall
 /// can demote a fix that stopped working - the store self-corrects instead of
-/// ossifying on a bad playbook. Manual success does NOT set `verified` (that
-/// needs a deterministic signal, not a human "seems fine").
-pub async fn procedure_outcome(config: &MindConfig, id: &str, worked: bool) -> Result<()> {
+/// ossifying on a bad playbook.
+///
+/// `verify` promotes the procedure to `verified = true` on a successful
+/// outcome. Pass it ONLY for a deterministic signal (a passing test, a clean
+/// compile) - never for a human "seems fine". This is what closes the
+/// error-learning loop: a green test after a mind_learn fix marks that playbook
+/// trustworthy so recall surfaces it first. Without it, every recorded fix
+/// stayed unverified forever and never ranked above noise.
+pub async fn procedure_outcome(
+    config: &MindConfig,
+    id: &str,
+    worked: bool,
+    verify: bool,
+) -> Result<()> {
     use qdrant_client::qdrant::SetPayloadPointsBuilder;
     let client = get_client(config).await?;
     let (_, succ, fail, _) = existing_procedure(&client, id).await;
@@ -2158,6 +2182,9 @@ pub async fn procedure_outcome(config: &MindConfig, id: &str, worked: bool) -> R
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     if worked {
         payload.insert("success_count".into(), (succ + 1).into());
+        if verify {
+            payload.insert("verified".into(), "true".into());
+        }
     } else {
         payload.insert("fail_count".into(), (fail + 1).into());
     }
