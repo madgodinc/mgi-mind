@@ -103,6 +103,7 @@ pub async fn run(
         .route("/session/end", post(session_end))
         .route("/session/last", post(session_last))
         .route("/stats/activity", post(stats_activity))
+        .route("/should-search", post(should_search))
         .with_state(state);
 
     let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
@@ -381,4 +382,17 @@ async fn stats_activity(State(state): State<AppState>, headers: HeaderMap) -> Re
         .map(|m| m.clone())
         .unwrap_or_default();
     Json(json!({ "ok": true, "reads_by_agent": reads })).into_response()
+}
+
+/// Query-aware "should I search memory before answering?" advice. Lets a client
+/// gate its own answer on the search-before-answer policy.
+async fn should_search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_should_search", args).await
 }
