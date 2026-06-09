@@ -2089,8 +2089,35 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     // 4. Vault status (no plaintext count on disk - audit #26)
     let vault_summary = crate::vault::summary();
 
+    // User-facing libraries to verify against before acting. Drop `_`-prefixed
+    // system namespaces, the `default` catch-all (not a topic the agent can
+    // reason about), and empty ones (advertising a namespace with 0 memories is
+    // noise). Computed up front so the operating rule can name them at the top.
+    let user_libs: Vec<&str> = libraries
+        .iter()
+        .filter(|(n, c)| !n.starts_with('_') && n != "default" && *c > 0)
+        .map(|(n, _)| n.as_str())
+        .collect();
+
     let mut out = String::new();
     let _ = writeln!(out, "=== MGI-Mind Context ===");
+    let _ = writeln!(out);
+    // Operating rule first: this store is the source of truth, verify before
+    // acting. Placed at the top so it anchors the whole injected block instead
+    // of trailing after the data where it gets ignored.
+    let _ = writeln!(out, "[Operating rule]");
+    if user_libs.is_empty() {
+        let _ = writeln!(
+            out,
+            "  This store is your source of truth. Search it (mind_search) before acting on anything about the user's projects, environment, or past decisions. Treat your own recollection as a draft to verify."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  This store is your source of truth. Before acting on anything about [{}], search it first (mind_search) — treat your own recollection as a draft to verify.",
+            user_libs.join(", ")
+        );
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "[Last Session]");
     // Only include the first 10 lines of the session.
@@ -2110,20 +2137,17 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         let _ = writeln!(out, "  {name}: {count} memories");
     }
 
-    // Best-effort retrieval prompt (v0.11). User-facing libraries (those not
-    // prefixed with `_` — system/bench/internal) are the namespaces the agent
-    // should consider searching before answering. Keep this short: it competes
-    // for tokens with the actual conversation, and the MCP `instructions`
-    // already carries the general policy.
-    let user_libs: Vec<&str> = libraries
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .filter(|n| !n.starts_with('_'))
-        .collect();
-    if !user_libs.is_empty() {
+    // Quarantine visibility: if entries are waiting for review, surface the
+    // count so the agent knows to check them. Without this line quarantine is a
+    // black hole — recoverable in theory, never looked at. Zero cost when empty.
+    if let Ok(q) = crate::storage::quarantine_count(config).await
+        && q > 0
+    {
         let _ = writeln!(out);
-        let _ = writeln!(out, "[Before answering, consider mind_search in:]");
-        let _ = writeln!(out, "  {}", user_libs.join(", "));
+        let _ = writeln!(
+            out,
+            "[Quarantine: {q} entries set aside — review with mind_quarantine(action=\"list\")]"
+        );
     }
 
     if crate::vault::is_vault_initialized() {
