@@ -774,8 +774,25 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                         Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
                     }
                 }
+                "expire" => {
+                    let cfg = warm(true)?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=expire requires 'id'"))?;
+                    if crate::storage::expire_from_quarantine(cfg, id).await? {
+                        Ok(format!(
+                            "Expired '{id}' — confirmed the gate was right to reject it. \
+                             Removed from quarantine (content + reason recorded in the audit \
+                             log first, when audit is enabled)."
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Nothing to expire — '{id}' is not in quarantine (live memory is \
+                             never touched by this action; use mind_delete for that)."
+                        ))
+                    }
+                }
                 other => anyhow::bail!(
-                    "mind_quarantine: unknown action '{other}' (expected list|show|promote)"
+                    "mind_quarantine: unknown action '{other}' (expected list|show|promote|expire)"
                 ),
             }
         }
@@ -1332,12 +1349,12 @@ fn tool_definitions() -> Vec<Value> {
     let consolidated = vec![
         json!({
             "name": "mind_quarantine",
-            "description": "Inspect or promote entries that the v0.11 relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (move to ordinary memory by id). Replaces mind_quarantine_list / _show / _promote.",
+            "description": "Inspect, promote, or expire entries that the relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (the gate was too strict — move to ordinary memory by id), expire (the gate was right — delete by id; only ever touches quarantined points, never live memory, and stays recoverable from the audit log). Replaces mind_quarantine_list / _show / _promote.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "show", "promote"], "description": "What to do" },
-                    "id": { "type": "string", "description": "Required for action=show or action=promote" },
+                    "action": { "type": "string", "enum": ["list", "show", "promote", "expire"], "description": "What to do" },
+                    "id": { "type": "string", "description": "Required for action=show, promote, or expire" },
                     "library": { "type": "string", "description": "Scope for action=list (optional)" },
                     "limit": { "type": "number", "default": 20, "description": "Max entries for action=list" }
                 },

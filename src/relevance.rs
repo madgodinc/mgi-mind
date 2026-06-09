@@ -63,6 +63,25 @@ impl Verdict {
     }
 }
 
+/// Every `quarantine_reason` value this gate can emit, plus the bulk-migration
+/// label written outside the gate. The single source of truth for surfaces that
+/// tally quarantine by reason (e.g. the context digest) — keep it in sync with
+/// the `Quarantine { reason: ... }` sites above and `ingest.rs`. A reason not in
+/// this list still gets counted under "other" by such surfaces.
+pub const KNOWN_REASONS: &[&str] = &[
+    "too_short",
+    "too_few_words",
+    "too_long",
+    "low_novelty",
+    "blacklist_path",
+    "blacklist_doc",
+    "blacklist_tool",
+    // Bulk-cleanup label from the 2026-05-29 migration sweep (Step 1), written
+    // outside the gate by the vendored-doc quarantine pass — the bulk of the
+    // current quarantine, so it must be named exactly or it all reads as "other".
+    "migration-vendor-doc",
+];
+
 /// Knobs for the gate. Defaults are conservative — tightening them later is
 /// cheap, loosening them only matters once we have counterfactual numbers.
 #[derive(Debug, Clone)]
@@ -466,5 +485,47 @@ mod tests {
         let v = check_cheap(&cand("ok thanks"), &cfg);
         // 9 chars, 2 words → caught by min_chars OR min_words
         assert!(!v.is_accept());
+    }
+
+    #[test]
+    fn every_emitted_reason_is_in_known_reasons() {
+        // Drift guard: the by-reason quarantine digest tallies KNOWN_REASONS, so
+        // any reason the gate can actually emit must be listed there — else it
+        // silently falls into the "other" bucket. Exercise each cheap branch and
+        // assert its reason is known. (low_novelty comes from the novelty check,
+        // migration-vendor-doc from the bulk sweep — both asserted present below.)
+        let cfg = GateConfig::default();
+        let long = "x ".repeat(cfg.max_chars); // > max_chars
+        let cases = [
+            cand("hi"),        // too_short
+            cand("ok thanks"), // too_short/too_few_words
+            cand(&long),       // too_long
+            Candidate {
+                content: "API_KEY=abcdef1234567890 plus more config text here too",
+                source: Some("proj/.env"),
+                tool_name: None,
+            }, // blacklist_path
+            Candidate {
+                content: "Install: run npm install then npm start to launch the app",
+                source: Some("vendor/README.md"),
+                tool_name: None,
+            }, // blacklist_doc
+            Candidate {
+                content: "the working directory is /home/x right now and nothing else",
+                source: None,
+                tool_name: Some("pwd"),
+            }, // blacklist_tool
+        ];
+        for c in &cases {
+            if let Some(reason) = check_cheap(c, &cfg).reason() {
+                assert!(
+                    KNOWN_REASONS.contains(&reason),
+                    "gate emitted reason {reason:?} not in KNOWN_REASONS",
+                );
+            }
+        }
+        // The two reasons not produced by check_cheap must still be listed.
+        assert!(KNOWN_REASONS.contains(&"low_novelty"));
+        assert!(KNOWN_REASONS.contains(&"migration-vendor-doc"));
     }
 }
