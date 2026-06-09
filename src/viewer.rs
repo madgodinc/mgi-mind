@@ -46,7 +46,20 @@ struct AppState {
 
 /// Entry point used by `Commands::Viewer`.
 pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
-    let token = Uuid::new_v4().to_string();
+    run_on(config, open_browser, None, None).await
+}
+
+/// Run the viewer, optionally on a fixed `port` and with a caller-supplied
+/// `token`. `mind_visualize` uses this so it can spawn the viewer detached and
+/// still know the exact URL to hand back (a random port + internal token would
+/// be invisible to the parent MCP process).
+pub async fn run_on(
+    config: MindConfig,
+    open_browser: bool,
+    port: Option<u16>,
+    token: Option<String>,
+) -> Result<()> {
+    let token = token.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state = AppState {
         config: Arc::new(config),
         token: Arc::new(token.clone()),
@@ -69,10 +82,12 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/node/:id", patch(api_edit_node))
         .with_state(state);
 
-    // Random free port: ask the OS for 0, then read what it gave us.
-    let listener = TcpListener::bind("127.0.0.1:0")
+    // Fixed port when asked (so a detached spawn has a knowable URL), else a
+    // random free port.
+    let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
+    let listener = TcpListener::bind(&bind)
         .await
-        .context("Failed to bind 127.0.0.1 on a free port")?;
+        .with_context(|| format!("Failed to bind {bind}"))?;
     let addr = listener.local_addr().context("Failed to read bound port")?;
     let url = format!("http://{}/?token={}", addr, token);
 
