@@ -98,6 +98,14 @@ relevance gate, dedup, facts, sessions, procedural memory ("error → fix"
 playbooks), and a terminal-only vault — behind one binary you run
 yourself.
 
+A note on evaluating it: one benchmark scores one slice. The conflict
+resolution, the doubt window, the bi-temporal facts, the procedural layer,
+and the multi-agent surface have no single standard test to sit in. MGI-Mind
+is a technical brain that coordinates how an AI works over time, and it sits
+outside the systems today's memory benchmarks were built to rank. Different,
+not superior. [BENCHMARKS.md](BENCHMARKS.md) reports the slices we can measure
+honestly and names the parts no public test reaches yet.
+
 ## Quick start
 
 One command. The installer drops the binary on PATH and runs `init` +
