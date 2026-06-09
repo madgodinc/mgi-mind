@@ -54,6 +54,19 @@ pub enum AuditOp {
     ProcedureOutcome,
     /// Auto-extraction wrote candidates from an ingest call.
     Ingest,
+    /// An ingest candidate was dropped as a near-duplicate of an existing
+    /// memory (cosine ≥ the dedup threshold). `before` = the existing neighbor's
+    /// content is not fetched, but `after` = the dropped candidate's content so
+    /// "where did my write go?" is answerable. This drop is currently
+    /// unrecoverable (unlike quarantine), which is exactly why it must be logged.
+    SkipDup,
+    /// An ingest candidate was routed to quarantine by the relevance gate
+    /// (recoverable). `after` = the candidate; `note` = the gate reason.
+    Quarantine,
+    /// An ingest candidate was refused because it looked like a secret. `after`
+    /// is intentionally omitted (never log the secret); `note` = the detector
+    /// label only.
+    SkipSecret,
     /// Consolidation merged or pruned memories.
     Consolidate,
     /// v1.5 Phase 8: background re-test pass promoted a fact to the
@@ -222,14 +235,18 @@ fn emit_pulse(event: &AuditEvent) {
         AuditOp::LibraryCreate | AuditOp::LibraryDrop => {
             (PulseKind::Write, format!("lib:{}", event.library))
         }
-        // Internal processing — duel/quarantine/consolidate/retest/outcome.
+        // Internal processing — duel/quarantine/consolidate/retest/outcome,
+        // and the write-path drops (near-dup skip, quarantine, secret-skip).
         AuditOp::Update
         | AuditOp::Delete
         | AuditOp::FactInvalidate
         | AuditOp::ProcedureOutcome
         | AuditOp::Consolidate
         | AuditOp::RetestPromote
-        | AuditOp::RetestRecover => {
+        | AuditOp::RetestRecover
+        | AuditOp::SkipDup
+        | AuditOp::Quarantine
+        | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)
             } else {
@@ -393,5 +410,34 @@ mod tests {
         assert!(!json.contains("before"));
         assert!(!json.contains("after"));
         assert!(!json.contains("note"));
+    }
+
+    #[test]
+    fn write_path_ops_have_stable_snake_case_tags() {
+        // The `audit writes` tally and the `--op` filter key on these exact
+        // strings; a rename would silently break the "where did writes go" tool.
+        let tag = |op: AuditOp| {
+            serde_json::to_string(&op)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        };
+        assert_eq!(tag(AuditOp::Ingest), "ingest");
+        assert_eq!(tag(AuditOp::SkipDup), "skip_dup");
+        assert_eq!(tag(AuditOp::Quarantine), "quarantine");
+        assert_eq!(tag(AuditOp::SkipSecret), "skip_secret");
+    }
+
+    #[test]
+    fn skip_secret_event_never_carries_content() {
+        // Defense-in-depth: a secret-skip audit event must not put content in
+        // `after`/`before` — only the static detector label belongs in `note`.
+        let ev = AuditEvent::new(AuditOp::SkipSecret, "lib", "")
+            .actor("ingest")
+            .note("secret-skipped (GitHub token)");
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(!json.contains("\"after\""));
+        assert!(!json.contains("\"before\""));
+        assert!(json.contains("secret-skipped"));
     }
 }
