@@ -300,6 +300,54 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let results = crate::storage::search(cfg, query, library, limit, tier).await?;
             Ok(crate::cli::render_search(&results))
         }
+        "mind_recall_all" => {
+            // Unified recall across all three silos in one call: facts (current
+            // first), memories, and procedures. A lean fusion over the existing
+            // per-silo queries — no cross-silo coordinator/link-layer needed.
+            // This is what /memory/recall over HTTP wants instead of aliasing
+            // plain search.
+            let cfg = warm(true)?;
+            let query = arg_str(args, "query")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
+            let limit = arg_u64(args, "limit", 5) as usize;
+            let mut out = String::new();
+
+            // Facts (current ones first; invalid ones are excluded by the query).
+            if let Ok(facts) = crate::knowledge::query_facts(cfg, query).await {
+                let current: Vec<_> = facts.iter().filter(|f| f.valid).take(limit).collect();
+                if !current.is_empty() {
+                    out.push_str("## Facts (current)\n");
+                    for f in current {
+                        out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+                    }
+                    out.push('\n');
+                }
+            }
+
+            // Memories (semantic).
+            if let Ok(mems) = crate::storage::search(cfg, query, None, limit, 2).await
+                && !mems.is_empty()
+            {
+                out.push_str("## Memories\n");
+                out.push_str(&crate::cli::render_search(&mems));
+                out.push('\n');
+            }
+
+            // Procedures (error->fix lessons matching by context).
+            if let Ok(procs) = crate::procedure::recall(cfg, None, Some(query), limit).await {
+                let trimmed = procs.trim();
+                if !trimmed.is_empty() && !trimmed.to_lowercase().starts_with("no ") {
+                    out.push_str("## Procedures\n");
+                    out.push_str(trimmed);
+                    out.push('\n');
+                }
+            }
+
+            if out.is_empty() {
+                out.push_str("(nothing found across memories, facts, or procedures)");
+            }
+            Ok(out)
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -890,6 +938,18 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_recall_all",
+            "description": "Unified recall across all memory types at once (facts + memories + procedures) for one query. Current facts first, then semantic memories, then matching error->fix procedures. One call instead of three separate searches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to recall" },
+                    "limit": { "type": "number", "default": 5, "description": "Max per silo" }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "mind_add",
             "description": "Add a memory entry",
             "inputSchema": {
@@ -1365,8 +1425,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            37,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) = 37"
+            38,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) = 38"
         );
         let deprecated = tools
             .iter()
@@ -1378,8 +1438,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 22,
-            "non-deprecated surface is 22 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome)"
+            live_surface, 23,
+            "non-deprecated surface is 23 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all)"
         );
     }
 
@@ -1490,11 +1550,11 @@ mod tests {
     async fn tools_list_returns_v1_5_surface() {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
-        // 1 v1.5 (mind_outcome) = 37 total.
+        // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) = 38 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 37);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 38);
     }
 
     #[tokio::test]
