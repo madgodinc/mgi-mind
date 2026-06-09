@@ -20,7 +20,7 @@ use axum::{
         Html, IntoResponse, Response,
         sse::{Event, Sse},
     },
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -66,6 +66,7 @@ pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
         .route("/api/graph", get(api_graph))
         .route("/api/pulse", get(api_pulse))
         .route("/api/node/:id", get(api_node))
+        .route("/api/node/:id", patch(api_edit_node))
         .with_state(state);
 
     // Random free port: ask the OS for 0, then read what it gave us.
@@ -563,6 +564,30 @@ async fn api_node(
     Ok(Json(serde_json::json!({
         "id": id, "kind": "entity", "facts": related,
     })))
+}
+
+/// Edit a memory core's content (viewer edit mode). Body: `{"content": "..."}`.
+/// Only `mem:` cores are editable. Because IDs are content-addressed, the edit
+/// returns the NEW id so the client can re-point its selection.
+async fn api_edit_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    let Some(mem_id) = id.strip_prefix("mem:") else {
+        return Err((StatusCode::BAD_REQUEST, "only mem: cores are editable").into_response());
+    };
+    let content = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing 'content'").into_response())?;
+    let new_id = crate::storage::edit_memory(&state.config, mem_id, content)
+        .await
+        .map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": format!("mem:{new_id}") })))
 }
 
 /// Live pulse feed (SSE). Each `data:` line is a `PulseEvent` JSON: an impulse

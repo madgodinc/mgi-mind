@@ -717,6 +717,26 @@ pub async fn memory_detail(config: &MindConfig, id: &str) -> Result<Option<HashM
     .await)
 }
 
+/// Edit a memory core's content (the viewer's edit mode). Because point IDs are
+/// content-addressed (`deterministic_id`), changing the text changes the ID — so
+/// an edit is "delete the old point, write the new content" while CARRYING OVER
+/// the library/author so the core keeps its place and attribution. Returns the
+/// new id. Errors if the id is not an existing memory.
+pub async fn edit_memory(config: &MindConfig, id: &str, new_content: &str) -> Result<String> {
+    let detail = memory_detail(config, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no memory with id {id}"))?;
+    let library = detail
+        .get("library")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("memory {id} has no library"))?;
+    let author = detail.get("author").cloned();
+    // Write the new content (carries author), then delete the old point.
+    add_memory_authored(config, &library, new_content, None, author.as_deref()).await?;
+    delete_memory(config, &library, id).await?;
+    Ok(deterministic_id(&library, new_content.trim()))
+}
+
 /// v1.6 step 1: batched payload read — one `get_points` call returns
 /// every requested string-shaped payload field for a single point.
 ///
