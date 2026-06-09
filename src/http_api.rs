@@ -55,6 +55,7 @@ pub async fn run(config: MindConfig, port: Option<u16>) -> Result<()> {
         .route("/memory/recall", post(memory_recall))
         .route("/memory/add", post(memory_add))
         .route("/memory/ingest", post(memory_ingest))
+        .route("/memory/by-agent", post(memory_by_agent))
         .route("/fact/add", post(fact_add))
         .with_state(state);
 
@@ -71,7 +72,9 @@ pub async fn run(config: MindConfig, port: Option<u16>) -> Result<()> {
     eprintln!("  token:  {token}");
     eprintln!("  auth:   Authorization: Bearer {token}");
     eprintln!("  agent:  X-Agent: <id>   (audit hint + author tag, not auth)");
-    eprintln!("  routes: POST /memory/{{search,recall,add,ingest}}  POST /fact/add  GET /health");
+    eprintln!(
+        "  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add  GET /health"
+    );
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
 
@@ -202,4 +205,18 @@ async fn fact_add(
         return c.into_response();
     }
     call(&state, "mind_fact_add", with_agent(args, &headers)).await
+}
+
+/// "What did agent X write." The agent is taken from the body `agent` field or
+/// the `X-Agent` header (so a coordinator can ask about itself with just the
+/// header, or about another agent by naming it in the body).
+async fn memory_by_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_by_agent", with_agent(args, &headers)).await
 }
