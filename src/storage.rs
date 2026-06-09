@@ -703,6 +703,20 @@ pub async fn is_procedure(config: &MindConfig, id: &str) -> Result<bool> {
         == Some(TYPE_PROCEDURE))
 }
 
+/// Full payload of one memory core, by id — the lazy "zoom inside the core"
+/// fetch for the graph viewer. Returns the content + metadata fields, or None
+/// if the id is not a memory point.
+pub async fn memory_detail(config: &MindConfig, id: &str) -> Result<Option<HashMap<String, String>>> {
+    let client = get_client(config).await?;
+    Ok(read_point_payload_strings(
+        &client,
+        MEMORIES_COLLECTION,
+        id,
+        &["content", "library", "type", "source", "author", "created_at", "updated_at"],
+    )
+    .await)
+}
+
 /// v1.6 step 1: batched payload read — one `get_points` call returns
 /// every requested string-shaped payload field for a single point.
 ///
