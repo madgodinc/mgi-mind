@@ -119,6 +119,11 @@ impl EntryStatus {
             EntryStatus::Active => "active",
             EntryStatus::Contested => "contested",
             EntryStatus::Stale => "stale",
+            // ⚠ When a real propagation feature WRITES this status (via
+            // set_fact_payload_field(as_str())), restore the round-trip arm in
+            // `parse` below AND ship a clearer — otherwise as_str()→parse()
+            // silently downgrades it to Unknown (visible). See ADR 0006 / the
+            // parse comment.
             EntryStatus::PropagationShadowed => "propagation_shadowed",
             EntryStatus::Unknown => "unknown",
             EntryStatus::QuarantineCandidate => "quarantine_candidate",
@@ -132,8 +137,17 @@ impl EntryStatus {
             "active" => Some(EntryStatus::Active),
             "contested" => Some(EntryStatus::Contested),
             "stale" => Some(EntryStatus::Stale),
+            // `PropagationShadowed` is a hidden status (is_default_visible == false)
+            // with NO writer and NO clearer anywhere in the tree — unfinished v1.4
+            // scaffolding. Parsing an inbound payload string straight to it would
+            // let an imported / legacy / reconciled `status="shadowed"` permanently
+            // hide a fact that no code chose to hide, with no path to surface it
+            // again — the exact "ghost on the read path" ADR 0006 forbids. Until a
+            // real propagation feature SETS this status (and ships a clearer), an
+            // untrusted string maps to the visible `Unknown` (surfaced by doctor),
+            // never to a hidden state. The enum variant stays for that future work.
             "propagation_shadowed" | "propagation-shadowed" | "shadowed" => {
-                Some(EntryStatus::PropagationShadowed)
+                Some(EntryStatus::Unknown)
             }
             "unknown" => Some(EntryStatus::Unknown),
             "quarantine_candidate" | "quarantine-candidate" | "candidate" => {
@@ -148,13 +162,47 @@ impl EntryStatus {
     /// hidden by default and require an explicit `include_stale` filter to
     /// surface — this is what lets the loser of a past duel keep its audit
     /// trail without poisoning future reads.
-    #[allow(dead_code)] // wired by Phase 2 duel-rule read path
     pub fn is_default_visible(self) -> bool {
         matches!(
             self,
             EntryStatus::Active | EntryStatus::Contested | EntryStatus::Unknown
         )
     }
+
+    /// Every variant — the single list the rest of the type derives from.
+    pub const ALL: &'static [EntryStatus] = &[
+        EntryStatus::Active,
+        EntryStatus::Contested,
+        EntryStatus::Stale,
+        EntryStatus::PropagationShadowed,
+        EntryStatus::Unknown,
+        EntryStatus::QuarantineCandidate,
+        EntryStatus::Superseded,
+    ];
+
+    /// The wire strings of every status hidden from default search, derived from
+    /// `is_default_visible`. The read-path `must_not` filter is built from THIS,
+    /// so the Qdrant filter and the Rust visibility intent cannot drift — the
+    /// drift that leaked `stale` (issue #25) and was still leaking
+    /// `quarantine_candidate` (a duel-rejected weak fact, written by add_fact but
+    /// excluded by no filter) into default search.
+    pub fn hidden_wire_strings() -> Vec<&'static str> {
+        Self::ALL
+            .iter()
+            .filter(|s| !s.is_default_visible())
+            .map(|s| s.as_str())
+            .collect()
+    }
+}
+
+/// `must_not` conditions excluding every default-hidden status, for the fact
+/// read path. One source of truth (`is_default_visible`) drives both the in-Rust
+/// gate and the Qdrant filter.
+fn hidden_status_must_not() -> Vec<Condition> {
+    EntryStatus::hidden_wire_strings()
+        .into_iter()
+        .map(|s| Condition::matches("status", s.to_string()))
+        .collect()
 }
 
 /// Pure (no Qdrant) conflict detector for the duel rule.
@@ -405,10 +453,7 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
     // because dampen_loser / mark_superseded only touch `status`.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
-        must_not: vec![
-            Condition::matches("status", "stale".to_string()),
-            Condition::matches("status", "superseded".to_string()),
-        ],
+        must_not: hidden_status_must_not(),
         should: vec![
             Condition::matches_text("subject", query),
             Condition::matches_text("predicate", query),
@@ -629,10 +674,7 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
     // (history) losers so listings reflect the post-duel canonical state.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
-        must_not: vec![
-            Condition::matches("status", "stale".to_string()),
-            Condition::matches("status", "superseded".to_string()),
-        ],
+        must_not: hidden_status_must_not(),
         ..Default::default()
     };
 
@@ -708,11 +750,14 @@ pub async fn list_top_dependants_facts(
         return Ok(Vec::new());
     }
 
-    // Bug fix (issue #25, PR #26): exclude stale (dampened) losers — dependants-
-    // ranking should reflect post-duel canonical facts, not entombed losers.
+    // Bug fix (issue #25, PR #26): exclude dampened losers and every other
+    // default-hidden status — dependants-ranking should reflect post-duel
+    // canonical facts, not entombed losers, superseded chain entries, or
+    // duel-rejected weak candidates. Derived from is_default_visible so it can't
+    // drift from the main query filter.
     let filter = Filter {
         must: vec![Condition::matches("valid", "true".to_string())],
-        must_not: vec![Condition::matches("status", "stale".to_string())],
+        must_not: hidden_status_must_not(),
         ..Default::default()
     };
 
@@ -815,10 +860,7 @@ pub async fn find_facts_by_subject_predicate(
         // Otherwise an entombed loser or history entry would still be
         // considered live by find_*, causing the new fact to duel against
         // a tombstone.
-        must_not: vec![
-            Condition::matches("status", "stale".to_string()),
-            Condition::matches("status", "superseded".to_string()),
-        ],
+        must_not: hidden_status_must_not(),
         ..Default::default()
     };
 
@@ -1075,12 +1117,16 @@ mod tests {
 
     #[test]
     fn entry_status_wire_format_round_trips() {
+        // PropagationShadowed is deliberately excluded: it has no writer, so an
+        // inbound "propagation_shadowed" string parses to Unknown (visible), not
+        // back to the hidden variant — see propagation_shadowed_string_cannot_hide.
         for s in [
             EntryStatus::Active,
             EntryStatus::Contested,
             EntryStatus::Stale,
-            EntryStatus::PropagationShadowed,
             EntryStatus::Unknown,
+            EntryStatus::QuarantineCandidate,
+            EntryStatus::Superseded,
         ] {
             assert_eq!(EntryStatus::parse(s.as_str()), Some(s));
         }
@@ -1088,16 +1134,29 @@ mod tests {
 
     #[test]
     fn entry_status_parse_is_tolerant() {
-        assert_eq!(
-            EntryStatus::parse("propagation-shadowed"),
-            Some(EntryStatus::PropagationShadowed)
-        );
-        assert_eq!(
-            EntryStatus::parse("shadowed"),
-            Some(EntryStatus::PropagationShadowed)
-        );
         assert_eq!(EntryStatus::parse("  ACTIVE  "), Some(EntryStatus::Active));
+        assert_eq!(
+            EntryStatus::parse("quarantine-candidate"),
+            Some(EntryStatus::QuarantineCandidate)
+        );
         assert_eq!(EntryStatus::parse("totally-bogus"), None);
+    }
+
+    #[test]
+    fn propagation_shadowed_string_cannot_hide_a_fact() {
+        // The hidden PropagationShadowed status has no writer and no clearer in
+        // the tree (unfinished v1.4). An inbound/legacy/imported payload string
+        // must NOT be able to parse into it and permanently hide a fact from
+        // default search — that is the ADR 0006 "ghost on the read path". Until a
+        // real feature sets and clears it, the string maps to visible Unknown.
+        for s in ["propagation_shadowed", "propagation-shadowed", "shadowed"] {
+            let parsed = EntryStatus::parse(s).expect("known string parses");
+            assert_eq!(parsed, EntryStatus::Unknown, "{s} must parse to Unknown");
+            assert!(
+                parsed.is_default_visible(),
+                "a status parsed from an untrusted '{s}' must stay default-visible"
+            );
+        }
     }
 
     #[test]
@@ -1111,6 +1170,45 @@ mod tests {
         assert!(EntryStatus::Unknown.is_default_visible());
         assert!(!EntryStatus::Stale.is_default_visible());
         assert!(!EntryStatus::PropagationShadowed.is_default_visible());
+    }
+
+    #[test]
+    fn hidden_wire_strings_exclude_quarantine_candidate() {
+        // Regression for the live leak: a duel-rejected weak fact
+        // (status="quarantine_candidate", written by add_fact) is hidden per
+        // is_default_visible but used to leak into default search because no
+        // read-path filter excluded it. The filter is now derived from
+        // is_default_visible, so the hidden set must contain it (and the other
+        // hidden statuses) and must NOT contain any visible one.
+        let hidden = EntryStatus::hidden_wire_strings();
+        for must in [
+            "stale",
+            "superseded",
+            "quarantine_candidate",
+            "propagation_shadowed",
+        ] {
+            assert!(
+                hidden.contains(&must),
+                "hidden set must exclude {must} from default search"
+            );
+        }
+        for visible in ["active", "contested", "unknown"] {
+            assert!(
+                !hidden.contains(&visible),
+                "{visible} must stay default-visible"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_status_all_is_exhaustive() {
+        // ALL must list every variant so hidden_wire_strings can't miss one.
+        // If you add a variant and this fails, add it to ALL.
+        assert_eq!(EntryStatus::ALL.len(), 7);
+        for s in EntryStatus::ALL {
+            // round-trips through as_str at minimum (parse may remap, e.g. shadowed).
+            assert!(!s.as_str().is_empty());
+        }
     }
 
     #[test]
