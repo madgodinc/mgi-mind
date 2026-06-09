@@ -541,7 +541,25 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 source,
                 ts: chrono::Utc::now().to_rfc3339(),
             };
-            crate::outcome::record(cfg, memory_id, signal).await
+            let mut out = crate::outcome::record(cfg, memory_id, signal).await?;
+            // Bridge: a test_passed/code_compiled signal on a PROCEDURE is the
+            // "the fix actually worked" signal the procedural layer needs — so
+            // also bump its success/fail counters (→ `verified` once it has a
+            // real success). Without this bridge, mind_outcome only logged an
+            // external signal and procedures stayed unverified. This is the
+            // explicit-signal path (critic): no session-window correlation, the
+            // caller names the procedure id directly.
+            let is_proc_signal = matches!(
+                signal_type,
+                crate::outcome::OutcomeSignal::TestPassed
+                    | crate::outcome::OutcomeSignal::CodeCompiled
+            );
+            if is_proc_signal && crate::storage::is_procedure(cfg, memory_id).await? {
+                let note = crate::procedure::outcome(cfg, memory_id, success).await?;
+                out.push('\n');
+                out.push_str(&note);
+            }
+            Ok(out)
         }
 
         // ---- Terminal-only 3 (vault; never touch secrets over MCP) ----
@@ -1058,7 +1076,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_outcome",
-            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail.",
+            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail. When memory_id is a PROCEDURE and signal_type is test_passed or code_compiled, this also bumps the procedure's success/fail counters — so a green test after a mind_learn fix marks that playbook verified without a separate mind_procedure_outcome call. Pass the procedure id returned by mind_learn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
