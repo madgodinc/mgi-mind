@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -34,17 +34,38 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 @dataclass
 class MemoryResult:
-    """One server response. `.text` is the rendered result the model should see;
-    `.raw` is the parsed JSON envelope for callers that want the metadata."""
+    """One server response.
+
+    `.text` is a rendered block the model can read straight from `str(result)`.
+    The structured fields are there when the route returns them:
+
+    * `.results` — search hits, each a dict with `id`, `score`, `content`,
+      `library`, `author`, `created_at`, `source`.
+    * `.facts` / `.memories` / `.procedures` — recall, split by silo
+      (`.memories` shaped like `.results`, `.facts` a list of subject/predicate/
+      object dicts, `.procedures` a text block).
+
+    `.raw` is the full parsed envelope for anything not surfaced above.
+    """
 
     text: str
     raw: dict[str, Any]
+    results: list[dict[str, Any]] = field(default_factory=list)
+    facts: list[dict[str, Any]] = field(default_factory=list)
+    memories: list[dict[str, Any]] = field(default_factory=list)
+    procedures: str = ""
 
     def __str__(self) -> str:  # the common case: drop it into a prompt
         return self.text
 
     def __bool__(self) -> bool:
-        return bool(self.text.strip())
+        return bool(self.text.strip()) or bool(self.results) or bool(self.memories)
+
+    def __iter__(self):  # iterate hits directly: `for hit in mem.search(...)`
+        return iter(self.results or self.memories)
+
+    def __len__(self) -> int:
+        return len(self.results or self.memories)
 
 
 class MgiMindError(RuntimeError):
@@ -99,11 +120,60 @@ def _parse(resp: httpx.Response) -> MemoryResult:
         data = resp.json()
     except ValueError:
         raise MgiMindError(f"{resp.status_code}: non-JSON response: {resp.text[:200]}")
-    # serve-http wraps every tool result as {"ok": true, "result": "<text>"} or
-    # {"ok": false, "error": "..."} (with a 4xx/5xx status).
-    if data.get("ok"):
-        return MemoryResult(text=str(data.get("result", "")), raw=data)
-    raise MgiMindError(str(data.get("error", "unknown server error")))
+    if not data.get("ok"):
+        # {"ok": false, "error": "..."} (with a 4xx/5xx status).
+        raise MgiMindError(str(data.get("error", "unknown server error")))
+
+    # Three success shapes from serve-http:
+    #   * write/text tools: {"ok": true, "result": "<text>"}
+    #   * /memory/search json: {"ok": true, "results": [...]}
+    #   * /memory/recall json: {"ok": true, "facts": [...], "memories": [...],
+    #                           "procedures": "<text>"}
+    # Normalize all three into one MemoryResult so str(result) always works.
+    if "results" in data:
+        results = data.get("results") or []
+        return MemoryResult(text=_render_hits(results), raw=data, results=results)
+    if "memories" in data or "facts" in data:
+        facts = data.get("facts") or []
+        memories = data.get("memories") or []
+        procedures = str(data.get("procedures") or "")
+        return MemoryResult(
+            text=_render_recall(facts, memories, procedures),
+            raw=data,
+            facts=facts,
+            memories=memories,
+            procedures=procedures,
+        )
+    return MemoryResult(text=str(data.get("result", "")), raw=data)
+
+
+def _render_hits(hits: list[dict[str, Any]]) -> str:
+    # A compact text block for prompt insertion, built from structured hits so a
+    # caller that just does str(result) still gets something readable.
+    lines = []
+    for h in hits:
+        who = f" ({h['author']})" if h.get("author") else ""
+        lines.append(f"- {h.get('content', '')}{who}")
+    return "\n".join(lines)
+
+
+def _render_recall(
+    facts: list[dict[str, Any]], memories: list[dict[str, Any]], procedures: str
+) -> str:
+    parts = []
+    if facts:
+        parts.append(
+            "## Facts\n"
+            + "\n".join(
+                f"- {f.get('subject', '')} {f.get('predicate', '')} {f.get('object', '')}"
+                for f in facts
+            )
+        )
+    if memories:
+        parts.append("## Memories\n" + _render_hits(memories))
+    if procedures:
+        parts.append("## Procedures\n" + procedures)
+    return "\n\n".join(parts)
 
 
 def _unreachable(url: str, e: Exception) -> MgiMindError:
@@ -204,13 +274,19 @@ class Memory:
         tier: int = 2,
         limit: int | None = None,
     ) -> MemoryResult:
-        """Hybrid search over memories. Returns rendered recall text (tier 1≈100,
-        2≈500, 3=full chars). Feed `str(result)` straight into a model prompt."""
+        """Hybrid search over memories (tier 1≈100, 2≈500, 3=full chars).
+
+        Feed `str(result)` straight into a model prompt, or read structured hits
+        from `result.results` (each a dict with `id`, `score`, `content`,
+        `author`, ...). You can also iterate the result directly: each item is a
+        hit. `len(result)` is the hit count."""
         return self._post("/memory/search", _search_body(query, library or self.library, tier, limit))
 
     def recall(self, query: str, *, library: str | None = None) -> MemoryResult:
         """Unified recall: memories + facts + procedures in one call. The best
-        single 'give the agent everything it knows on this topic' verb."""
+        single 'give the agent everything it knows on this topic' verb. Read the
+        silos separately via `result.facts`, `result.memories`,
+        `result.procedures`, or `str(result)` for the merged block."""
         return self._post("/memory/recall", _recall_body(query, library or self.library))
 
     def add_fact(

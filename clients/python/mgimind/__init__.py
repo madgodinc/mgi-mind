@@ -16,4 +16,4 @@ the README. This package is the client.
 from ._client import AsyncMemory, Memory, MemoryResult, MgiMindError
 
 __all__ = ["Memory", "AsyncMemory", "MemoryResult", "MgiMindError"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

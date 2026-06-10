@@ -78,6 +78,30 @@ def test_add_search_roundtrip(server):
     assert "launch retrospective" in str(res)
     assert res.raw.get("ok") is True
 
+    # The default format is structured JSON: hits are addressable, not just text.
+    assert res.results, "search should return structured hits by default"
+    assert len(res) == len(res.results)
+    top = res.results[0]
+    for key in ("id", "score", "content", "library"):
+        assert key in top, f"hit missing '{key}'"
+    # The author is the token-derived identity ('alice'), since alice wrote it.
+    assert top.get("author") == "alice"
+    # Iterating the result yields hits.
+    assert list(res)[0] == top
+
+
+def test_recall_splits_silos(server):
+    subprocess.run([BIN, "create", "pytest"], env=dict(os.environ), check=False)
+    mem = Memory(url=server, token=TOKEN, library="pytest")
+    mem.add("The staging database lives at db-staging.internal:5432.")
+    res = mem.recall("staging database address")
+    # Recall returns the three silos as separate, addressable fields.
+    assert isinstance(res.facts, list)
+    assert isinstance(res.memories, list)
+    assert isinstance(res.procedures, str)
+    assert res.memories, "recall should surface the memory we just wrote"
+    assert "staging database" in str(res)
+
 
 def test_bad_args_raise(server):
     # search with no query is a dispatch error → 4xx → MgiMindError, not a crash.

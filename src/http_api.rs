@@ -241,6 +241,106 @@ async fn call(state: &AppState, tool: &str, args: Value) -> Response {
     }
 }
 
+/// Whether the caller wants a structured JSON body for a read route. JSON is the
+/// default — an agent calling over HTTP almost always wants to parse fields, not
+/// a rendered text block. Opt back into the human render with `format: "text"`.
+fn wants_json(args: &Value) -> bool {
+    !matches!(
+        args.get("format").and_then(|v| v.as_str()),
+        Some("text") | Some("render")
+    )
+}
+
+/// A 400 with the standard `{ok:false, error}` body.
+fn bad_request(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
+}
+
+/// Common read args: `query` (required), `library`, `limit`, `tier`. `Err(())`
+/// means the required `query` was missing — the caller turns it into a 400.
+fn read_args(args: &Value) -> Result<(String, Option<String>, usize, u8), ()> {
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or(())?;
+    let library = args
+        .get("library")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let tier = args.get("tier").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
+    Ok((query, library, limit, tier))
+}
+
+/// `/memory/search` with `format=json`: the structured SearchResult list. Goes
+/// straight to `storage::search` (SearchResult is Serialize) rather than through
+/// the text-rendering dispatch path.
+async fn search_json(state: &AppState, args: &Value) -> Response {
+    let (query, library, limit, tier) = match read_args(args) {
+        Ok(t) => t,
+        Err(()) => return bad_request("missing required argument 'query'"),
+    };
+    match crate::storage::search(&state.config, &query, library.as_deref(), limit, tier).await {
+        Ok(results) => Json(json!({ "ok": true, "results": results })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `/memory/recall` with `format=json`: a `{facts, memories, procedures}` object.
+/// Mirrors the silos `mind_recall_all` fuses into text, but keeps them separate
+/// so a coordinator can route each. Facts/procedures stay as rendered lines (no
+/// stable struct yet); memories are the structured SearchResult list.
+async fn recall_json(state: &AppState, args: &Value) -> Response {
+    let (query, _library, limit, _tier) = match read_args(args) {
+        Ok(t) => t,
+        Err(()) => return bad_request("missing required argument 'query'"),
+    };
+    let cfg = &state.config;
+
+    let facts: Vec<Value> = match crate::knowledge::query_facts(cfg, &query).await {
+        Ok(fs) => fs
+            .iter()
+            .filter(|f| f.valid)
+            .take(limit)
+            .map(|f| json!({ "subject": f.subject, "predicate": f.predicate, "object": f.object }))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let memories = crate::storage::search(cfg, &query, None, limit, 2)
+        .await
+        .unwrap_or_default();
+
+    let procedures = match crate::procedure::recall(cfg, None, Some(&query), limit).await {
+        Ok(p) => {
+            let t = p.trim();
+            if t.is_empty() || t.to_lowercase().starts_with("no ") {
+                String::new()
+            } else {
+                t.to_string()
+            }
+        }
+        Err(_) => String::new(),
+    };
+
+    Json(json!({
+        "ok": true,
+        "facts": facts,
+        "memories": memories,
+        "procedures": procedures,
+    }))
+    .into_response()
+}
+
 /// Resolve the author tag and merge it into the args under `agent`. A
 /// token-derived identity (`derived`) is authoritative and OVERRIDES any
 /// `X-Agent` header or body `agent` — you cannot impersonate another agent when
@@ -272,6 +372,13 @@ async fn memory_search(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived, &headers);
+    // `format: "json"` (the default for agents) returns the structured
+    // SearchResult list — id, score, author, library, created_at — instead of
+    // the human-readable text block, so a caller never has to regex-parse the
+    // render. Omitting `format` (or `format: "text"`) keeps the legacy text.
+    if wants_json(&args) {
+        return search_json(&state, &args).await;
+    }
     call(&state, "mind_search", args).await
 }
 
@@ -285,7 +392,12 @@ async fn memory_recall(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived, &headers);
-    // Unified recall: facts + memories + procedures in one call.
+    // Structured recall: a `{facts, memories, procedures}` object so a graph can
+    // route each silo on its own. `format: "text"` falls back to the rendered
+    // block. Unified recall: facts + memories + procedures in one call.
+    if wants_json(&args) {
+        return recall_json(&state, &args).await;
+    }
     call(&state, "mind_recall_all", args).await
 }
 
@@ -481,7 +593,20 @@ fn bind_is_allowed(host: &str, agent_tokens: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::bind_is_allowed;
+    use super::{bind_is_allowed, wants_json};
+    use serde_json::json;
+
+    #[test]
+    fn json_is_the_default_format() {
+        // No `format` field → structured JSON (the agent default).
+        assert!(wants_json(&json!({ "query": "x" })));
+        assert!(wants_json(&json!({ "query": "x", "format": "json" })));
+        // Opt back into the human render.
+        assert!(!wants_json(&json!({ "query": "x", "format": "text" })));
+        assert!(!wants_json(&json!({ "query": "x", "format": "render" })));
+        // Unknown value falls through to JSON, not text.
+        assert!(wants_json(&json!({ "query": "x", "format": "yaml" })));
+    }
 
     #[test]
     fn loopback_allowed_with_or_without_token() {
