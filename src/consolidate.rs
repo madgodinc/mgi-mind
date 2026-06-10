@@ -14,8 +14,11 @@
 //!   1. Exact dedup — identical content within a library (by stored blake3 `hash`).
 //!   2. Near-dup merge — cosine >= threshold via each point's stored vector
 //!      (no re-embedding); keep the richer/older record, drop the other.
-//!   3. Decay report — fold the access journal in: cold = older than `decay_days`
-//!      AND access_count == 0. Reported always; deleted only with `--prune-cold`.
+//!   3. Decay report — fold the access journal in, recency-weighted: cold =
+//!      high `coldness_score` (old AND long-untouched, not just never-accessed).
+//!      Reported always. ARCHIVE (--archive-cold) gets the full recency set
+//!      (reversible); PRUNE (--prune-cold, destructive) gets only the
+//!      conservative binary subset (count==0), so it never deletes more silently.
 
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -95,22 +98,61 @@ fn choose_drop<'a>(a: &'a MemoryMeta, b: &'a MemoryMeta) -> &'a str {
     }
 }
 
-/// Is a memory "cold" (a decay candidate): older than `decay_days` AND never
-/// surfaced (access_count == 0)? Pure, so it is unit-tested without Qdrant.
-pub fn is_cold(created_at: Option<&str>, access_count: u64, now: &str, decay_days: i64) -> bool {
-    if access_count > 0 {
-        return false;
+/// Recency-weighted "coldness" of a memory in days-since-last-relevance.
+///
+/// The old model was BINARY: cold iff `access_count == 0 AND age >= decay_days`.
+/// That misses the common case of a memory accessed a few times long ago and
+/// untouched since — `count > 0` made it permanently warm no matter how stale.
+///
+/// This returns a graduated score: the effective "days since last relevance",
+/// discounted by how often it was used. Higher = colder.
+///   * No access ever → score = age in days (a never-surfaced memory is as cold
+///     as it is old — same signal the binary model used).
+///   * Accessed → score = days since `last_access`, divided by a small
+///     frequency damp `1 + log10(1 + count)` so a heavily-used memory cools
+///     slower. A memory touched once 300 days ago is colder than one touched 50
+///     times last week.
+///
+/// Returns `None` for unknown/unparseable timestamps — never auto-forget what we
+/// can't date. Pure, unit-tested without Qdrant. The damp constant is provisional.
+pub fn coldness_score(
+    created_at: Option<&str>,
+    last_access: Option<&str>,
+    access_count: u64,
+    now: &str,
+) -> Option<f64> {
+    let now = chrono::DateTime::parse_from_rfc3339(now).ok()?;
+    let created = chrono::DateTime::parse_from_rfc3339(created_at?).ok()?;
+    let age_days = (now - created).num_seconds() as f64 / 86_400.0;
+
+    if access_count == 0 {
+        // Never surfaced: as cold as it is old (matches the old binary signal).
+        return Some(age_days.max(0.0));
     }
-    let Some(created) = created_at else {
-        return false; // unknown age -> never auto-prune
-    };
-    let (Ok(created), Ok(now)) = (
-        chrono::DateTime::parse_from_rfc3339(created),
-        chrono::DateTime::parse_from_rfc3339(now),
-    ) else {
-        return false;
-    };
-    (now - created).num_days() >= decay_days
+    // Surfaced at least once: cool from the LAST access, not from creation.
+    // last_access should exist when count>0, but fall back to age if missing.
+    let since_days = match last_access.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+        Some(last) => (now - last).num_seconds() as f64 / 86_400.0,
+        None => age_days,
+    }
+    .max(0.0);
+    // Gentle frequency damp: a few uses shouldn't make a long-stale memory
+    // immortal. log10 keeps the discount mild (count=5 -> ~1.78x, count=100 ->
+    // ~3x), so staleness still dominates — a memory used 5x but untouched ~516
+    // days is colder than the 180-day cutoff, which the binary model never was.
+    // TODO(circle-3-calibration): this damp + cutoff pair is provisional.
+    let damp = 1.0 + (1.0 + access_count as f64).log10();
+    Some(since_days / damp)
+}
+
+/// Threshold check: a coldness score of at least `decay_days` days makes a
+/// memory a decay candidate. Kept separate from `coldness_score` so `run` scores
+/// with `last_access` and reuses one cutoff. `None` (undatable) is never cold.
+pub fn is_cold_scored(score: Option<f64>, decay_days: i64) -> bool {
+    match score {
+        Some(s) => s >= decay_days as f64,
+        None => false, // undatable → never auto-forget
+    }
 }
 
 /// Run a consolidation pass. Dry-run unless `opts.apply`.
@@ -192,24 +234,43 @@ pub async fn run(config: &MindConfig, opts: Options) -> Result<Report> {
         }
     }
 
-    // 3. Decay report: fold the access journal in. Cold = old AND never surfaced.
+    // 3. Decay report: fold the access journal in, recency-weighted. Cold =
+    //    high coldness_score (old + long-untouched), not just never-accessed.
+    //    A memory used a few times long ago and stale since now decays too,
+    //    instead of being permanently warm on a single ancient access.
+    //
+    //    TWO sets, deliberately (critic: don't silently delete MORE than before):
+    //      * `cold` — recency-weighted, for the REVERSIBLE archive path. Full
+    //        power of the new model; a false positive costs a `restore`.
+    //      * `cold_prune` — the OLD BINARY subset (count==0 AND age>=decay_days),
+    //        for the DESTRUCTIVE delete path. `--prune-cold` thus deletes exactly
+    //        what it deleted before the recency change — never more, silently.
+    //    `cold_prune ⊆ cold` always.
     let access = crate::access::snapshot();
     let now = chrono::Utc::now().to_rfc3339();
-    let mut cold: Vec<String> = Vec::new();
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    let mut cold_prune: Vec<String> = Vec::new();
     for id in &order {
         if removed.contains(id) {
             continue;
         }
-        let count = access.get(id).map(|s| s.count).unwrap_or(0);
-        if is_cold(
-            by_id[id].created_at.as_deref(),
-            count,
-            &now,
-            opts.decay_days,
-        ) {
-            cold.push(id.clone());
+        let stat = access.get(id);
+        let count = stat.map(|s| s.count).unwrap_or(0);
+        let last_access = stat.and_then(|s| s.last_access.as_deref());
+        let created = by_id[id].created_at.as_deref();
+        let score = coldness_score(created, last_access, count, &now);
+        if is_cold_scored(score, opts.decay_days) {
+            scored.push((id.clone(), score.unwrap_or(0.0)));
+            // Destructive-eligible only by the conservative binary rule.
+            if count == 0 && is_cold_scored(coldness_score(created, None, 0, &now), opts.decay_days)
+            {
+                cold_prune.push(id.clone());
+            }
         }
     }
+    // Coldest-first, so a report/archive acts on the most-decayed first.
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let cold: Vec<String> = scored.into_iter().map(|(id, _)| id).collect();
     report.cold_candidates = cold.len();
 
     // Apply: delete merged duplicates always; for cold memories, ARCHIVE
@@ -219,10 +280,13 @@ pub async fn run(config: &MindConfig, opts: Options) -> Result<Report> {
         let to_delete: Vec<String> = removed.iter().cloned().collect();
         storage::delete_memories(config, &to_delete).await?;
         if opts.archive_cold {
+            // Archive gets the full recency-weighted set (reversible).
             report.cold_archived = storage::archive_memories(config, &cold).await?;
         } else if opts.prune_cold {
-            report.cold_pruned = cold.len();
-            storage::delete_memories(config, &cold).await?;
+            // Delete only the conservative binary subset — never more than the
+            // pre-recency model would have, with no silent expansion.
+            report.cold_pruned = cold_prune.len();
+            storage::delete_memories(config, &cold_prune).await?;
         }
         // Persist any in-memory access counts before we finish.
         crate::access::flush();
@@ -268,14 +332,88 @@ mod tests {
     #[test]
     fn cold_requires_age_and_zero_access() {
         let now = "2026-06-01T00:00:00+00:00";
-        // Old + unused -> cold.
-        assert!(is_cold(Some("2025-01-01T00:00:00+00:00"), 0, now, 180));
-        // Old but accessed -> not cold.
-        assert!(!is_cold(Some("2025-01-01T00:00:00+00:00"), 3, now, 180));
+        let cold = |created: Option<&str>, count: u64| {
+            is_cold_scored(coldness_score(created, None, count, now), 180)
+        };
+        // Old + never accessed -> cold (score = age, ~516 days >= 180).
+        assert!(cold(Some("2025-01-01T00:00:00+00:00"), 0));
         // Recent + unused -> not cold.
-        assert!(!is_cold(Some("2026-05-20T00:00:00+00:00"), 0, now, 180));
+        assert!(!cold(Some("2026-05-20T00:00:00+00:00"), 0));
         // Unknown age -> never cold.
-        assert!(!is_cold(None, 0, now, 180));
+        assert!(!cold(None, 0));
+    }
+
+    #[test]
+    fn coldness_is_recency_weighted_not_binary() {
+        let now = "2026-06-01T00:00:00+00:00";
+        let old_create = "2025-01-01T00:00:00+00:00"; // ~516 days before now
+
+        // Never accessed -> score is the age (the old binary signal preserved).
+        let never = coldness_score(Some(old_create), None, 0, now).unwrap();
+        assert!(
+            (never - 516.0).abs() < 2.0,
+            "never-accessed score == age, got {never}"
+        );
+
+        // THE DISCRIMINATING CASE the binary model got wrong: a memory accessed
+        // SEVERAL times but long ago and stale since. Old `is_cold` said "count>0
+        // => never cold". Recency-weighted says "last touched ~516 days ago,
+        // lightly damped => cold".
+        let stale_used = coldness_score(Some(old_create), Some(old_create), 5, now).unwrap();
+        assert!(
+            is_cold_scored(Some(stale_used), 180),
+            "a long-stale-but-used memory must be cold (score {stale_used}), \
+             unlike the old binary model"
+        );
+
+        // And a memory used recently is NOT cold even if old, because it cools
+        // from last_access, not creation.
+        let fresh_used =
+            coldness_score(Some(old_create), Some("2026-05-28T00:00:00+00:00"), 5, now).unwrap();
+        assert!(
+            !is_cold_scored(Some(fresh_used), 180),
+            "recently-used memory must stay warm (score {fresh_used})"
+        );
+
+        // Monotonic sanity: same memory, colder the longer since last access.
+        let a =
+            coldness_score(Some(old_create), Some("2026-05-01T00:00:00+00:00"), 2, now).unwrap();
+        let b =
+            coldness_score(Some(old_create), Some("2026-01-01T00:00:00+00:00"), 2, now).unwrap();
+        assert!(b > a, "longer since last access => colder ({b} > {a})");
+
+        // More frequent use cools slower (higher damp => lower score) at the same
+        // staleness.
+        let rare = coldness_score(Some(old_create), Some(old_create), 1, now).unwrap();
+        let frequent = coldness_score(Some(old_create), Some(old_create), 100, now).unwrap();
+        assert!(
+            frequent < rare,
+            "frequent use cools slower ({frequent} < {rare})"
+        );
+    }
+
+    #[test]
+    fn prune_subset_is_conservative_binary() {
+        // The destructive prune set must be the OLD BINARY rule (count==0), a
+        // SUBSET of the recency-weighted archive set — so --prune-cold never
+        // deletes more than before the recency change (critic safety contract).
+        let now = "2026-06-01T00:00:00+00:00";
+        let old = "2025-01-01T00:00:00+00:00"; // >= decay_days
+        let decay = 180;
+        let recency_cold =
+            |count, last| is_cold_scored(coldness_score(Some(old), last, count, now), decay);
+        let prune_eligible = |count: u64| {
+            count == 0 && is_cold_scored(coldness_score(Some(old), None, 0, now), decay)
+        };
+
+        // count==0 old: in BOTH sets.
+        assert!(recency_cold(0, None) && prune_eligible(0));
+        // count>0 long-stale: in the recency (archive) set, NOT prune-eligible.
+        assert!(recency_cold(5, Some(old)), "stale-used is archive-cold");
+        assert!(
+            !prune_eligible(5),
+            "stale-used is NOT prune-eligible (no silent delete)"
+        );
     }
 
     #[test]
