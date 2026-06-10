@@ -288,15 +288,17 @@ fn read_args(args: &Value) -> Result<(String, Option<String>, usize, u8), ()> {
     Ok((query, library, limit, tier))
 }
 
-/// `/memory/search` with `format=json`: the structured SearchResult list. Goes
-/// straight to `storage::search` (SearchResult is Serialize) rather than through
-/// the text-rendering dispatch path.
+/// `/memory/search` with `format=json`: the structured SearchResult list, with
+/// the same optional metadata filters (author, source, date window, multi-library
+/// OR) the MCP `mind_search` accepts. Goes straight to `storage::search_filtered`
+/// (SearchResult is Serialize) rather than through the text-rendering dispatch.
 async fn search_json(state: &AppState, args: &Value) -> Response {
-    let (query, library, limit, tier) = match read_args(args) {
+    let (query, _library, limit, tier) = match read_args(args) {
         Ok(t) => t,
         Err(()) => return bad_request("missing required argument 'query'"),
     };
-    match crate::storage::search(&state.config, &query, library.as_deref(), limit, tier).await {
+    let mfilter = crate::mcp::memory_filter_from_args(args);
+    match crate::storage::search_filtered(&state.config, &query, &mfilter, limit, tier).await {
         Ok(results) => Json(json!({ "ok": true, "results": results })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,

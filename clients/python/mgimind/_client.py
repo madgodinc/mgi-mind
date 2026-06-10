@@ -194,9 +194,28 @@ def _add_body(content: str, library: str | None, agent: str | None) -> dict[str,
 
 
 def _search_body(
-    query: str, library: str | None, tier: int, limit: int | None
+    query: str,
+    library: str | None,
+    tier: int,
+    limit: int | None,
+    *,
+    libraries: list[str] | None = None,
+    author: str | None = None,
+    source: str | None = None,
+    created_since: str | None = None,
+    created_before: str | None = None,
 ) -> dict[str, Any]:
-    return {"query": query, "library": library, "tier": tier, "limit": limit}
+    return {
+        "query": query,
+        "library": library,
+        "libraries": libraries,
+        "author": author,
+        "source": source,
+        "created_since": created_since,
+        "created_before": created_before,
+        "tier": tier,
+        "limit": limit,
+    }
 
 
 def _recall_body(query: str, library: str | None) -> dict[str, Any]:
@@ -273,16 +292,40 @@ class Memory:
         query: str,
         *,
         library: str | None = None,
+        libraries: list[str] | None = None,
+        author: str | None = None,
+        source: str | None = None,
+        created_since: str | None = None,
+        created_before: str | None = None,
         tier: int = 2,
         limit: int | None = None,
     ) -> MemoryResult:
         """Hybrid search over memories (tier 1≈100, 2≈500, 3=full chars).
 
+        Optional metadata filters narrow the result: `author` (who wrote it),
+        `source` (ingest tag), `libraries` (a list, OR-matched), and a date
+        window via `created_since` (inclusive) / `created_before` (exclusive),
+        each RFC3339 or YYYY-MM-DD. Every filter runs in-process against the
+        local store.
+
         Feed `str(result)` straight into a model prompt, or read structured hits
         from `result.results` (each a dict with `id`, `score`, `content`,
         `author`, ...). You can also iterate the result directly: each item is a
         hit. `len(result)` is the hit count."""
-        return self._post("/memory/search", _search_body(query, library or self.library, tier, limit))
+        return self._post(
+            "/memory/search",
+            _search_body(
+                query,
+                library or self.library,
+                tier,
+                limit,
+                libraries=libraries,
+                author=author,
+                source=source,
+                created_since=created_since,
+                created_before=created_before,
+            ),
+        )
 
     def recall(self, query: str, *, library: str | None = None) -> MemoryResult:
         """Unified recall: memories + facts + procedures in one call. The best
@@ -373,11 +416,31 @@ class AsyncMemory:
         query: str,
         *,
         library: str | None = None,
+        libraries: list[str] | None = None,
+        author: str | None = None,
+        source: str | None = None,
+        created_since: str | None = None,
+        created_before: str | None = None,
         tier: int = 2,
         limit: int | None = None,
     ) -> MemoryResult:
-        """Hybrid search. Returns rendered recall text."""
-        return await self._post("/memory/search", _search_body(query, library or self.library, tier, limit))
+        """Hybrid search with optional metadata filters (author, source,
+        libraries OR-list, created_since/created_before). See the sync
+        `Memory.search` for the full description."""
+        return await self._post(
+            "/memory/search",
+            _search_body(
+                query,
+                library or self.library,
+                tier,
+                limit,
+                libraries=libraries,
+                author=author,
+                source=source,
+                created_since=created_since,
+                created_before=created_before,
+            ),
+        )
 
     async def recall(self, query: str, *, library: str | None = None) -> MemoryResult:
         """Unified recall: memories + facts + procedures in one call."""

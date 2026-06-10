@@ -140,6 +140,74 @@ pub struct SearchResult {
     pub score: f32,
 }
 
+/// Optional query-time metadata filters for `search_filtered` (and the
+/// inventory `list` path). Every field is additive: a set field narrows the
+/// result set, an unset field is ignored. Each field maps onto a Qdrant payload
+/// index built in `ensure_payload_indexes` (`library`/`author`/`source`/`type`
+/// keyword, `created_at` datetime), so filtering runs in-process against the
+/// bundled Qdrant with no full scan and no data leaving the box.
+#[derive(Debug, Default, Clone)]
+pub struct MemoryFilter {
+    /// Restrict to these libraries (OR). Empty = all libraries. Folds in the old
+    /// single-`library` scope and the multi-library-OR case in one field.
+    pub libraries: Vec<String>,
+    /// Restrict to memories written by this agent (the `author` payload tag).
+    pub author: Option<String>,
+    /// Restrict by ingest source tag (e.g. `"ingest"`, a session id, a URL).
+    pub source: Option<String>,
+    /// Only memories created at or after this instant (INCLUSIVE, `gte`).
+    /// RFC3339 (`2026-06-09T12:00:00Z`) or a bare `YYYY-MM-DD` date, which means
+    /// midnight UTC that day. A date filter excludes legacy points that predate
+    /// the `created_at` field (unlike author/source, where legacy stays visible).
+    pub created_since: Option<String>,
+    /// Only memories created strictly before this instant (EXCLUSIVE, `lt`).
+    /// Same formats as `created_since`. Note the exclusivity with bare dates:
+    /// `created_before = "2026-06-10"` excludes everything on the 10th, since it
+    /// resolves to `2026-06-10T00:00:00Z` and the bound is `< that`.
+    pub created_before: Option<String>,
+}
+
+impl MemoryFilter {
+    /// A filter scoped to a single optional library — the exact behavior of the
+    /// old `library: Option<&str>` argument, so `search` can delegate to
+    /// `search_filtered` without changing its result for existing callers.
+    pub fn for_library(library: Option<&str>) -> Self {
+        Self {
+            libraries: library.map(|l| vec![l.to_string()]).unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    /// True when no field narrows anything — lets the hot path skip the extra
+    /// condition-building entirely.
+    fn is_empty(&self) -> bool {
+        self.libraries.is_empty()
+            && self.author.is_none()
+            && self.source.is_none()
+            && self.created_since.is_none()
+            && self.created_before.is_none()
+    }
+}
+
+/// Parse an RFC3339 timestamp or a bare `YYYY-MM-DD` date (interpreted as
+/// midnight UTC) into a protobuf Timestamp for a Qdrant datetime range.
+fn parse_datetime_bound(s: &str) -> Result<qdrant_client::qdrant::Timestamp> {
+    use chrono::{DateTime, NaiveDate, Utc};
+    let dt = DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+        })
+        .with_context(|| {
+            format!("invalid date '{s}': expected RFC3339 (2026-06-09T12:00:00Z) or YYYY-MM-DD")
+        })?;
+    Ok(qdrant_client::qdrant::Timestamp {
+        seconds: dt.timestamp(),
+        nanos: dt.timestamp_subsec_nanos() as i32,
+    })
+}
+
 /// Process-global Qdrant client (audit: single-process). Building a client sets
 /// up a gRPC channel; in the old "spawn a CLI per call" model the process died
 /// after one op, so caching was pointless. Now `mgimind mcp` lives for the whole
@@ -206,6 +274,17 @@ fn library_filter(library: &str) -> Filter {
 /// the 12k legacy points that predate the `type` field are still included.
 /// Same for `quarantined`: legacy points have no flag and stay visible.
 fn memory_query_filter(library: Option<&str>) -> Filter {
+    // Existing single-library behavior, kept so the 6 non-filtered callers and
+    // their tests are untouched. Delegates to the general builder.
+    memory_query_filter_ex(&MemoryFilter::for_library(library))
+        .expect("library-only filter never has a date bound to parse")
+}
+
+/// Build the memory-query filter from a full `MemoryFilter`. Always excludes
+/// procedures and quarantined points (the invariant `memory_query_filter`
+/// guaranteed); then layers the optional metadata narrowings on top. Returns an
+/// error only when a date bound fails to parse — every other field is infallible.
+fn memory_query_filter_ex(mf: &MemoryFilter) -> Result<Filter> {
     let mut f = Filter {
         must_not: vec![
             Condition::matches("type", TYPE_PROCEDURE.to_string()),
@@ -213,10 +292,53 @@ fn memory_query_filter(library: Option<&str>) -> Filter {
         ],
         ..Default::default()
     };
-    if let Some(lib) = library {
-        f.must.push(Condition::matches("library", lib.to_string()));
+
+    // Fast path: no metadata narrowing, just the base procedure/quarantine
+    // exclusions — the hot search path for the 6 unfiltered callers.
+    if mf.is_empty() {
+        return Ok(f);
     }
-    f
+
+    // Library scope: one → `must matches`; many → a `should` (OR) sub-filter so
+    // a point in ANY of the named libraries qualifies.
+    match mf.libraries.as_slice() {
+        [] => {}
+        [one] => f.must.push(Condition::matches("library", one.clone())),
+        many => f.must.push(
+            Filter::should(
+                many.iter()
+                    .map(|l| Condition::matches("library", l.clone())),
+            )
+            .into(),
+        ),
+    }
+
+    if let Some(author) = &mf.author {
+        f.must.push(Condition::matches("author", author.clone()));
+    }
+    if let Some(source) = &mf.source {
+        f.must.push(Condition::matches("source", source.clone()));
+    }
+
+    // Date window on the indexed `created_at` datetime field.
+    if mf.created_since.is_some() || mf.created_before.is_some() {
+        let range = qdrant_client::qdrant::DatetimeRange {
+            gte: mf
+                .created_since
+                .as_deref()
+                .map(parse_datetime_bound)
+                .transpose()?,
+            lt: mf
+                .created_before
+                .as_deref()
+                .map(parse_datetime_bound)
+                .transpose()?,
+            ..Default::default()
+        };
+        f.must.push(Condition::datetime_range("created_at", range));
+    }
+
+    Ok(f)
 }
 
 /// Filter for explicitly-quarantined queries (v0.11). Used when looking up
@@ -376,6 +498,10 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         // `author` (keyword) so a multi-agent deployment can scope "what did
         // agent X contribute". Legacy points lack the field and are unaffected.
         ("author", FieldType::Keyword),
+        // `source` (keyword) so a query-time `source=` filter builds its mask
+        // from the index instead of a full payload scan. Legacy points without a
+        // source tag lack the field and are simply not matched by the filter.
+        ("source", FieldType::Keyword),
         // `quarantined` (bool) so the `must_not quarantined` filter on every
         // search and the quarantine count don't degrade to a full payload scan.
         ("quarantined", FieldType::Bool),
@@ -1675,6 +1801,8 @@ fn build_payload_full(
     payload
 }
 
+/// Library-scoped semantic search — the original surface, unchanged for the
+/// existing callers. Thin wrapper over `search_filtered`.
 pub async fn search(
     config: &MindConfig,
     query: &str,
@@ -1682,13 +1810,36 @@ pub async fn search(
     limit: usize,
     tier: u8,
 ) -> Result<Vec<SearchResult>> {
+    search_filtered(
+        config,
+        query,
+        &MemoryFilter::for_library(library),
+        limit,
+        tier,
+    )
+    .await
+}
+
+/// Semantic search with optional query-time metadata filters (author, type,
+/// source, date window, multi-library OR). All filtering runs in-process against
+/// the bundled Qdrant — no data leaves the machine. With an empty filter this is
+/// byte-for-byte the old `search` behavior.
+pub async fn search_filtered(
+    config: &MindConfig,
+    query: &str,
+    mfilter: &MemoryFilter,
+    limit: usize,
+    tier: u8,
+) -> Result<Vec<SearchResult>> {
     // Live read pulse for the viewer (one per search, not per result). Cheap
     // when no viewer is open (broadcast drops to no subscribers).
     crate::pulse::emit(crate::pulse::PulseEvent::new(
         crate::pulse::PulseKind::Read,
-        library
-            .map(|l| format!("lib:{l}"))
-            .unwrap_or_else(|| "search".into()),
+        match mfilter.libraries.as_slice() {
+            [] => "search".into(),
+            [one] => format!("lib:{one}"),
+            many => format!("lib:{}", many.join("+")),
+        },
         {
             let q: String = query.chars().take(40).collect();
             format!("search: {q}")
@@ -1718,7 +1869,7 @@ pub async fn search(
     // Hybrid retrieval (audit #23): dense (semantic) + sparse (BM25) prefetches
     // fused with Reciprocal Rank Fusion. Both arms exclude procedures and apply
     // the optional library scope (phase Д6).
-    let mf = memory_query_filter(library);
+    let mf = memory_query_filter_ex(mfilter)?;
     let dense_pf = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(VectorInput::new_dense(embedding)))
         .using(DENSE_VEC)
@@ -3309,6 +3460,78 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_datetime_bound_accepts_rfc3339_and_bare_date() {
+        // RFC3339 with timezone.
+        let t = parse_datetime_bound("2026-06-09T12:00:00Z").unwrap();
+        assert!(t.seconds > 0);
+        // Bare date → midnight UTC.
+        let d = parse_datetime_bound("2026-06-09").unwrap();
+        assert_eq!(d.nanos, 0);
+        // Garbage is rejected with an actionable message.
+        let err = parse_datetime_bound("not-a-date").unwrap_err();
+        assert!(err.to_string().contains("invalid date"));
+    }
+
+    #[test]
+    fn empty_filter_is_just_the_base_exclusions() {
+        // No metadata narrowing → only the procedure + quarantined must_not, no
+        // must conditions. Proves the fast path keeps the old search behavior.
+        let f = memory_query_filter_ex(&MemoryFilter::default()).unwrap();
+        assert_eq!(f.must_not.len(), 2);
+        assert!(f.must.is_empty());
+        // And matches the single-library legacy helper for the library case.
+        let one = memory_query_filter_ex(&MemoryFilter::for_library(Some("p"))).unwrap();
+        assert_eq!(one.must.len(), 1);
+    }
+
+    #[test]
+    fn date_window_is_since_inclusive_before_exclusive() {
+        use qdrant_client::qdrant::condition::ConditionOneOf;
+        let mf = MemoryFilter {
+            created_since: Some("2026-01-01".into()),
+            created_before: Some("2026-02-01".into()),
+            ..Default::default()
+        };
+        let f = memory_query_filter_ex(&mf).unwrap();
+        // Find the datetime-range condition and assert gte (since) + lt (before)
+        // — the documented half-open [since, before) window.
+        let range = f
+            .must
+            .iter()
+            .find_map(|c| match &c.condition_one_of {
+                Some(ConditionOneOf::Field(fc)) if fc.key == "created_at" => fc.datetime_range,
+                _ => None,
+            })
+            .expect("a created_at datetime_range condition");
+        assert!(range.gte.is_some(), "since must map to gte (inclusive)");
+        assert!(range.lt.is_some(), "before must map to lt (exclusive)");
+        assert!(range.gt.is_none() && range.lte.is_none());
+    }
+
+    #[test]
+    fn filter_layers_each_field_as_a_must_condition() {
+        let mf = MemoryFilter {
+            libraries: vec!["a".into(), "b".into()],
+            author: Some("alice".into()),
+            source: Some("ingest".into()),
+            created_since: Some("2026-01-01".into()),
+            created_before: Some("2026-12-31".into()),
+        };
+        let f = memory_query_filter_ex(&mf).unwrap();
+        // base exclusions stay.
+        assert_eq!(f.must_not.len(), 2);
+        // multi-library OR (1) + author (1) + source (1) + one datetime range (1)
+        // = 4 must conditions (the date window is a single range condition).
+        assert_eq!(f.must.len(), 4);
+        // A bad date bound surfaces as an error, not a silent drop.
+        let bad = MemoryFilter {
+            created_since: Some("yesterday".into()),
+            ..Default::default()
+        };
+        assert!(memory_query_filter_ex(&bad).is_err());
+    }
 
     #[test]
     fn validate_library_name_accepts_sane_and_rejects_bad() {
