@@ -182,6 +182,26 @@ docker run -p 8765:8765 -e MGIMIND_TOKEN=your-token \
   -v mgimind-data:/data madgodinc/mgi-mind
 ```
 
+### Plug it into an agent
+
+Give an agent two tools, recall and remember, and its memory survives the
+process. With the server running and the [Python client](clients/python)
+installed:
+
+```python
+from mgimind import Memory
+
+mem = Memory()                         # MGIMIND_URL / MGIMIND_TOKEN from the env
+mem.add("Prod DB is Postgres 16 on db-prod:5432")
+for hit in mem.search("prod database"):  # structured results: id, score, author
+    print(hit["score"], hit["content"])
+```
+
+That wrapping is the whole integration. Copy-paste examples for LangGraph,
+Pydantic AI, the OpenAI Agents SDK, and raw HTTP (any language) are in
+[`docs/integrations`](docs/integrations). MCP and stdio still work for editor
+clients; the HTTP surface is the door for agent frameworks.
+
 ### Native install
 
 One command. The installer drops the binary on PATH and runs `init` +
