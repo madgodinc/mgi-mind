@@ -239,9 +239,7 @@ fn emit_pulse(event: &AuditEvent) {
         }
     };
     let label = format!("{:?}", event.op).to_lowercase();
-    crate::pulse::emit(
-        PulseEvent::new(kind, target, label).actor(Some(event.actor.clone())),
-    );
+    crate::pulse::emit(PulseEvent::new(kind, target, label).actor(Some(event.actor.clone())));
 }
 
 /// Read all events from the log, oldest first. Skips any trailing line that
