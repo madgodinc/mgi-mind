@@ -52,9 +52,21 @@ pub enum Commands {
     Search {
         /// Search query
         query: String,
-        /// Filter by library
+        /// Filter to one library (repeat or use --library a --library b for OR)
         #[arg(long)]
-        library: Option<String>,
+        library: Vec<String>,
+        /// Filter to memories written by this agent
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by ingest source tag (e.g. a session id or URL)
+        #[arg(long)]
+        source: Option<String>,
+        /// Only memories created at/after this instant, INCLUSIVE (RFC3339 or YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)
+        #[arg(long)]
+        before: Option<String>,
         /// Max results (default: 5)
         #[arg(long, default_value = "5")]
         limit: usize,
@@ -726,9 +738,27 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Search {
             query,
             library,
+            author,
+            source,
+            since,
+            before,
             limit,
             tier,
-        } => cmd_search(&query, library.as_deref(), limit, tier).await,
+        } => {
+            cmd_search(
+                &query,
+                crate::storage::MemoryFilter {
+                    libraries: library,
+                    author,
+                    source,
+                    created_since: since,
+                    created_before: before,
+                },
+                limit,
+                tier,
+            )
+            .await
+        }
         Commands::Delete { library, id } => cmd_delete(&library, &id).await,
         Commands::Context => cmd_context().await,
         Commands::History { limit } => cmd_history(limit).await,
@@ -2395,9 +2425,14 @@ pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String 
     out.trim_end().to_string()
 }
 
-async fn cmd_search(query: &str, library: Option<&str>, limit: usize, tier: u8) -> Result<()> {
+async fn cmd_search(
+    query: &str,
+    mfilter: crate::storage::MemoryFilter,
+    limit: usize,
+    tier: u8,
+) -> Result<()> {
     let config = crate::config::load_cached()?;
-    let results = crate::storage::search(&config, query, library, limit, tier).await?;
+    let results = crate::storage::search_filtered(&config, query, &mfilter, limit, tier).await?;
     println!("{}", render_search(&results));
     Ok(())
 }
