@@ -271,12 +271,20 @@ pub(crate) fn memory_filter_from_args(args: &Value) -> crate::storage::MemoryFil
             .map(|l| vec![l.to_string()])
             .unwrap_or_default(),
     };
+    // `archived`: "only" lists soft-forgotten memories, "include" returns both,
+    // anything else (incl. absent) keeps the default Exclude.
+    let archived = match arg_str(args, "archived") {
+        Some("only") => crate::storage::ArchivedScope::Only,
+        Some("include") => crate::storage::ArchivedScope::Include,
+        _ => crate::storage::ArchivedScope::Exclude,
+    };
     crate::storage::MemoryFilter {
         libraries,
         author: arg_str(args, "author").map(str::to_string),
         source: arg_str(args, "source").map(str::to_string),
         created_since: arg_str(args, "created_since").map(str::to_string),
         created_before: arg_str(args, "created_before").map(str::to_string),
+        archived,
     }
 }
 
@@ -1089,6 +1097,7 @@ fn tool_definitions() -> Vec<Value> {
                     "source": { "type": "string", "description": "Only memories with this ingest source tag" },
                     "created_since": { "type": "string", "description": "Only memories created at/after this instant, INCLUSIVE (RFC3339 or YYYY-MM-DD)" },
                     "created_before": { "type": "string", "description": "Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)" },
+                    "archived": { "type": "string", "enum": ["only", "include"], "description": "'only' lists ARCHIVED (soft-forgotten) memories so they can be restored; 'include' returns both archived and live. Omit to list only live memories." },
                     "limit": { "type": "number", "default": 20, "description": "Max records" }
                 }
             }
