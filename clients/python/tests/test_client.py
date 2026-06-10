@@ -90,6 +90,21 @@ def test_add_search_roundtrip(server):
     assert list(res)[0] == top
 
 
+def test_search_metadata_filters(server):
+    subprocess.run([BIN, "create", "pytest"], env=dict(os.environ), check=False)
+    mem = Memory(url=server, token=TOKEN, library="pytest")
+    mem.add("The metadata-filter canary lives here.")
+    # author=alice is the token-derived identity, so it must include our write.
+    hit = mem.search("metadata filter canary", author="alice")
+    assert hit.results and all(h["author"] == "alice" for h in hit.results)
+    # A future created_since window must exclude everything.
+    empty = mem.search("metadata filter canary", created_since="2099-01-01")
+    assert len(empty) == 0
+    # A bad date is a server-side 400 → MgiMindError, not a silent empty.
+    with pytest.raises(MgiMindError):
+        mem.search("x", created_since="not-a-date")
+
+
 def test_recall_splits_silos(server):
     subprocess.run([BIN, "create", "pytest"], env=dict(os.environ), check=False)
     mem = Memory(url=server, token=TOKEN, library="pytest")

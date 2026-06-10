@@ -255,6 +255,31 @@ fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+/// Build a `MemoryFilter` from the shared query-arg shape used by `mind_search`
+/// (MCP) and `/memory/search` + `/memory/recall` (HTTP). Accepts a single
+/// `library` or a `libraries` array (OR), plus optional `author`, `source`,
+/// `created_since`, `created_before`. Every field is optional; an all-absent
+/// args object yields the empty filter (same as the old library-only path).
+pub(crate) fn memory_filter_from_args(args: &Value) -> crate::storage::MemoryFilter {
+    let libraries = match args.get("libraries").and_then(Value::as_array) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        None => arg_str(args, "library")
+            .map(|l| vec![l.to_string()])
+            .unwrap_or_default(),
+    };
+    crate::storage::MemoryFilter {
+        libraries,
+        author: arg_str(args, "author").map(str::to_string),
+        source: arg_str(args, "source").map(str::to_string),
+        created_since: arg_str(args, "created_since").map(str::to_string),
+        created_before: arg_str(args, "created_before").map(str::to_string),
+    }
+}
+
 /// Dispatch `tools/call`. Always returns a tool-result Value (never a protocol
 /// error) - failures become `isError: true` text.
 async fn call_tool(config: Option<&MindConfig>, params: Value) -> Value {
@@ -308,10 +333,11 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let cfg = warm(true)?;
             let query = arg_str(args, "query")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'query'"))?;
-            let library = arg_str(args, "library");
+            let mfilter = memory_filter_from_args(args);
             let limit = arg_u64(args, "limit", 5) as usize;
             let tier = arg_u64(args, "tier", 2) as u8;
-            let results = crate::storage::search(cfg, query, library, limit, tier).await?;
+            let results =
+                crate::storage::search_filtered(cfg, query, &mfilter, limit, tier).await?;
             Ok(crate::cli::render_search(&results))
         }
         "mind_recall_all" => {
@@ -987,12 +1013,17 @@ fn tool_definitions() -> Vec<Value> {
     let tools = vec![
         json!({
             "name": "mind_search",
-            "description": "Semantic search across memories",
+            "description": "Semantic search across memories, with optional metadata filters (author, source, date window, multiple libraries).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search query" },
-                    "library": { "type": "string", "description": "Filter by library" },
+                    "library": { "type": "string", "description": "Filter to one library" },
+                    "libraries": { "type": "array", "items": { "type": "string" }, "description": "Filter to ANY of these libraries (OR). Use instead of 'library' for cross-library search." },
+                    "author": { "type": "string", "description": "Filter to memories written by this agent" },
+                    "source": { "type": "string", "description": "Filter by ingest source tag (e.g. a session id or URL)" },
+                    "created_since": { "type": "string", "description": "Only memories created at/after this instant, INCLUSIVE (RFC3339 timestamp or YYYY-MM-DD date)" },
+                    "created_before": { "type": "string", "description": "Only memories created before this instant, EXCLUSIVE (RFC3339 timestamp or YYYY-MM-DD date)" },
                     "limit": { "type": "number", "default": 5, "description": "Max results" },
                     "tier": { "type": "number", "default": 2, "description": "Retrieval tier: 1=facts, 2=summaries, 3=full" }
                 },
