@@ -49,8 +49,25 @@ struct AppState {
 }
 
 /// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
-/// `name:token` pairs; when empty, one anonymous token is generated.
-pub async fn run(config: MindConfig, port: Option<u16>, agent_tokens: Vec<String>) -> Result<()> {
+/// `name:token` pairs; when empty, one anonymous token is generated. `host` is
+/// the bind interface (defaults to `127.0.0.1`); binding a non-loopback host
+/// exposes the brain beyond this machine, so it requires explicit `--agent-token`
+/// auth — the loopback-only default was a deliberate security posture, and the
+/// only safe way to relax it is to demand a real token.
+pub async fn run(
+    config: MindConfig,
+    host: &str,
+    port: Option<u16>,
+    agent_tokens: Vec<String>,
+) -> Result<()> {
+    if !bind_is_allowed(host, &agent_tokens) {
+        anyhow::bail!(
+            "refusing to bind {host} (non-loopback) with an anonymous token — that \
+             would expose an open brain. Pass --agent-token NAME:TOKEN to bind a \
+             reachable interface."
+        );
+    }
+
     let mut tokens: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     let mut generated: Option<String> = None;
@@ -103,14 +120,19 @@ pub async fn run(config: MindConfig, port: Option<u16>, agent_tokens: Vec<String
         .route("/should-search", post(should_search))
         .with_state(state);
 
-    let bind = format!("127.0.0.1:{}", port.unwrap_or(0));
+    let bind = format!("{host}:{}", port.unwrap_or(0));
     let listener = TcpListener::bind(&bind)
         .await
         .with_context(|| format!("Failed to bind {bind}"))?;
     let addr = listener.local_addr().context("Failed to read bound port")?;
 
+    let scope = if host == "127.0.0.1" || host == "::1" || host == "localhost" {
+        "loopback"
+    } else {
+        "network-exposed"
+    };
     eprintln!();
-    eprintln!("  mgimind serve-http  •  loopback tool-surface for multi-agent access");
+    eprintln!("  mgimind serve-http  •  {scope} tool-surface for multi-agent access");
     eprintln!("  ─────────────────────────────────────────────────────────────────");
     eprintln!("  url:    http://{addr}");
     if let Some(token) = &generated {
@@ -424,4 +446,35 @@ async fn should_search(
         return c.into_response();
     }
     call(&state, "mind_should_search", args).await
+}
+
+/// Whether the server may bind `host`. Loopback is always allowed (the safe
+/// default). A non-loopback host (e.g. 0.0.0.0 for a Docker `-p` mapping) exposes
+/// the brain beyond this machine, so it is allowed only when explicit per-agent
+/// tokens are set — never with an anonymous token. Pure, so it is unit-tested.
+fn bind_is_allowed(host: &str, agent_tokens: &[String]) -> bool {
+    let is_loopback = matches!(host, "127.0.0.1" | "::1" | "localhost");
+    is_loopback || !agent_tokens.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_is_allowed;
+
+    #[test]
+    fn loopback_allowed_with_or_without_token() {
+        for host in ["127.0.0.1", "::1", "localhost"] {
+            assert!(bind_is_allowed(host, &[]));
+            assert!(bind_is_allowed(host, &["u:tok".to_string()]));
+        }
+    }
+
+    #[test]
+    fn non_loopback_requires_a_token() {
+        // 0.0.0.0 (the Docker case) must refuse an anonymous token...
+        assert!(!bind_is_allowed("0.0.0.0", &[]));
+        assert!(!bind_is_allowed("192.168.1.5", &[]));
+        // ...but is allowed once a real token is set.
+        assert!(bind_is_allowed("0.0.0.0", &["u:tok".to_string()]));
+    }
 }
