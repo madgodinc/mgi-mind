@@ -1103,7 +1103,10 @@ async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Re
     let _ = crate::storage::create_library(&config, library).await;
     let candidates: Vec<crate::ingest::Candidate> = memory
         .into_iter()
-        .map(|content| crate::ingest::Candidate::Memory { content })
+        .map(|content| crate::ingest::Candidate::Memory {
+            content,
+            source: None,
+        })
         .collect();
     let report = crate::ingest::run_ingest(&config, raw, candidates, library).await?;
     println!("{}", report.render());

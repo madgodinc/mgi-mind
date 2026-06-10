@@ -313,6 +313,84 @@ fn http_surface_full_contract() {
         "a bad request must be a clean 4xx, not {code}: {out}"
     );
 
+    // 7) HTTP/MCP parity: the read + non-destructive routes added so an
+    //    HTTP-only agent can do what the MCP agent can. Each must 200 with a
+    //    valid token (a thin wrapper over the same dispatch). POST with an empty
+    //    or minimal body; we assert reachability + auth, not tool internals.
+    for (path, body) in [
+        ("/library/list", "{}"),
+        ("/fact/query", "{\"subject\":\"user\"}"),
+        ("/session/context", "{}"),
+        ("/consolidate", "{}"),
+        ("/quarantine/list", "{}"),
+    ] {
+        let url = format!("{base}{path}");
+        let (code, out) = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            &bearer,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+            &url,
+        ]);
+        assert_eq!(
+            code, 200,
+            "{path} should 200 with a token, got {code}: {out}"
+        );
+        // And it must require auth like every other route.
+        let (code, _) = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Authorization: Bearer WRONG",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+            &url,
+        ]);
+        assert_eq!(code, 401, "{path} must reject a bad token with 401");
+    }
+
+    // 8) procedure learn -> recall roundtrip over HTTP, and the `query`->context
+    //    convenience mapping (an agent uses one `query` field everywhere).
+    let learn = format!("{base}/procedure/learn");
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        "{\"error\":\"DiskFullErr\",\"fix\":\"clear the cache\"}",
+        &learn,
+    ]);
+    assert_eq!(code, 200, "procedure/learn should 200, got {code}: {out}");
+    let recall = format!("{base}/procedure/recall");
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        "{\"query\":\"DiskFullErr\"}",
+        &recall,
+    ]);
+    assert_eq!(
+        code, 200,
+        "procedure/recall(query=) should 200, got {code}: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("clear the cache"),
+        "recall should surface the learned fix, got: {out}"
+    );
+
     // Best-effort cleanup so repeated runs don't accumulate collections in the
     // shared Qdrant. The guard kills the server regardless.
     let _ = Command::new(bin())
