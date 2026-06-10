@@ -155,10 +155,12 @@ answering step, so retrieval recall is the number it actually owns.
 
 The honest gap: the validity model (duel rule, doubt window, supersession)
 is the differentiator, and retrieval recall does not test it. The benchmark
-that does is STALE, a belief-revision suite; its harness is scaffolded in the
-repo but not yet wired to a judge, so there is no published STALE number yet.
-Until there is, treat the validity model as a designed mechanism with no
-head-to-head score, not a proven win.
+that does is STALE, a belief-revision suite. A preliminary partial run exists
+(N=155, ~32%, raw verdicts committed under `benchmark/results/`), but it was
+produced by the harness on a branch rather than the scaffold on `main`, used a
+reduced haystack, and may have run while the duel rule was still broken. See
+[BENCHMARKS.md](BENCHMARKS.md) for the full caveats. Treat the validity model as
+a designed mechanism with a preliminary, not-yet-clean score, not a proven win.
 
 ## Quick start
 
