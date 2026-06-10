@@ -38,10 +38,14 @@
 //!
 //! ## Cost realism (synthesis §11 update from round 4)
 //!
-//! 1200 queries × ~150K token contexts × judge calls ≈ tens to low
-//! hundreds of USD on a flash-tier judge. The CLI accepts `--limit`
-//! for a smoke run and `--judge` to choose a cheaper model for
-//! parameter sweeps before the headline run.
+//! The ~150K-token context per scenario is the LOCAL ingestion load into the
+//! mgi-mind store (free, on the embedding path). The JUDGE only grades query +
+//! system-answer + expected-belief, ~600 tokens in / ~10 out, so 1200 judge
+//! calls is well under $1 on a flash-tier judge. The real constraints are the
+//! judge's rate limit (the 2026-06-08 partial run stopped at N=155 on limits)
+//! and mid-run reliability, not cost. The CLI accepts `--limit` for a smoke run
+//! and `--judge` to point at a local model (no rate limit) for the headline run,
+//! calibrated against a small hosted-judge sample.
 //!
 //! ## Privacy
 //!
