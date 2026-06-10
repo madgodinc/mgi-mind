@@ -122,6 +122,7 @@ pub async fn run(
         .route("/consolidate", post(consolidate_preview))
         .route("/quarantine/list", post(quarantine_list))
         .route("/quarantine/promote", post(quarantine_promote))
+        .route("/memory/restore", post(memory_restore))
         .route("/session/start", post(session_start))
         .route("/session/end", post(session_end))
         .route("/session/last", post(session_last))
@@ -155,7 +156,9 @@ pub async fn run(
     }
     eprintln!("  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}");
     eprintln!("          POST /fact/{{add,query,invalidate}}  /procedure/{{learn,recall}}");
-    eprintln!("          POST /library/{{create,list}}  /quarantine/{{list,promote}}");
+    eprintln!(
+        "          POST /library/{{create,list}}  /quarantine/{{list,promote}}  /memory/restore"
+    );
     eprintln!("          POST /consolidate  /should-search");
     eprintln!("          POST /session/{{start,end,last,context}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
@@ -632,6 +635,18 @@ async fn quarantine_promote(
         return c.into_response();
     }
     call(&state, "mind_quarantine_promote", args).await
+}
+
+/// `mind_restore`: un-archive a soft-forgotten memory by id (non-destructive).
+async fn memory_restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_restore", args).await
 }
 
 /// `mind_library action=list`: list libraries with counts (read). Forces

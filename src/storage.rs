@@ -289,12 +289,18 @@ fn memory_query_filter_ex(mf: &MemoryFilter) -> Result<Filter> {
         must_not: vec![
             Condition::matches("type", TYPE_PROCEDURE.to_string()),
             Condition::matches("quarantined", true),
+            // Archived = soft-forgotten cold memory. Hidden from default search
+            // like quarantine, but reversible (restore flips the flag). Legacy
+            // points lack the field, so `must_not archived=true` keeps them
+            // visible. This is in the base set (before the fast-path return) so
+            // EVERY search excludes archived memories.
+            Condition::matches("archived", true),
         ],
         ..Default::default()
     };
 
-    // Fast path: no metadata narrowing, just the base procedure/quarantine
-    // exclusions — the hot search path for the 6 unfiltered callers.
+    // Fast path: no metadata narrowing, just the base procedure/quarantine/
+    // archived exclusions — the hot search path for the 6 unfiltered callers.
     if mf.is_empty() {
         return Ok(f);
     }
@@ -508,6 +514,9 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         // `quarantine_reason` (keyword) so the per-reason breakdown in the
         // context digest counts each reason without a payload scan.
         ("quarantine_reason", FieldType::Keyword),
+        // `archived` (bool) so the `must_not archived` filter on every search
+        // (soft-forgotten cold memories) doesn't degrade to a full payload scan.
+        ("archived", FieldType::Bool),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -2578,6 +2587,89 @@ pub async fn set_memory_payload_field(
     Ok(())
 }
 
+/// Soft-forget memories by setting `archived = true`: they drop out of default
+/// search (the base `must_not archived` filter) but stay in the store, fully
+/// restorable. The reversible counterpart to `delete_memories` — cold-memory
+/// hygiene without destroying data. Returns the count flagged.
+pub async fn archive_memories(config: &MindConfig, ids: &[String]) -> Result<usize> {
+    use qdrant_client::qdrant::SetPayloadPointsBuilder;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let client = get_client(config).await?;
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("archived".into(), true.into());
+    let point_ids: Vec<qdrant_client::qdrant::PointId> =
+        ids.iter().map(|id| id.to_string().into()).collect();
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
+                .points_selector(PointsIdsList { ids: point_ids })
+                .wait(true),
+        )
+        .await
+        .context("Failed to archive memories")?;
+    // One audit row per archived id — a soft-forget is reversible, so the log is
+    // how you find what was hidden (and its id, to restore it).
+    for id in ids {
+        crate::audit::record(
+            crate::audit::AuditEvent::new(
+                crate::audit::AuditOp::Archive,
+                "_memories".to_string(),
+                id.clone(),
+            )
+            .actor("consolidate")
+            .note("cold: archived (restorable)"),
+        );
+    }
+    Ok(ids.len())
+}
+
+/// Restore an archived memory by id: clear `archived`, returning it to default
+/// search. Returns true if the memory existed and was archived (false if not
+/// found or already live). The inverse of `archive_memories`.
+pub async fn restore_memory(config: &MindConfig, id: &str) -> Result<bool> {
+    use qdrant_client::qdrant::{GetPointsBuilder, SetPayloadPointsBuilder};
+    let client = get_client(config).await?;
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+
+    // Only act on a memory that is actually archived — so a typo'd id or an
+    // already-live memory is reported honestly rather than silently "succeeding".
+    let resp = client
+        .get_points(
+            GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid.clone()]).with_payload(true),
+        )
+        .await
+        .context("Failed to look up memory for restore")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(false);
+    };
+    if !extract_bool(&point.payload, "archived").unwrap_or(false) {
+        return Ok(false);
+    }
+
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("archived".into(), false.into());
+    client
+        .set_payload(
+            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
+                .points_selector(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await
+        .context("Failed to restore memory")?;
+    crate::audit::record(
+        crate::audit::AuditEvent::new(
+            crate::audit::AuditOp::Restore,
+            "_memories".to_string(),
+            id.to_string(),
+        )
+        .actor("cli")
+        .note("restored from archive"),
+    );
+    Ok(true)
+}
+
 /// v1.5 Phase 7: read the `external_signals_v15` payload field on
 /// a memory and decode it as `Vec<ExternalSignal>`. Returns an empty
 /// vec on a fresh memory that has never received an outcome.
@@ -3579,10 +3671,11 @@ mod tests {
 
     #[test]
     fn empty_filter_is_just_the_base_exclusions() {
-        // No metadata narrowing → only the procedure + quarantined must_not, no
-        // must conditions. Proves the fast path keeps the old search behavior.
+        // No metadata narrowing → only the base must_not (procedure, quarantined,
+        // archived), no must conditions. Proves the fast path keeps the old
+        // search behavior aside from also hiding archived (soft-forgotten) points.
         let f = memory_query_filter_ex(&MemoryFilter::default()).unwrap();
-        assert_eq!(f.must_not.len(), 2);
+        assert_eq!(f.must_not.len(), 3);
         assert!(f.must.is_empty());
         // And matches the single-library legacy helper for the library case.
         let one = memory_query_filter_ex(&MemoryFilter::for_library(Some("p"))).unwrap();
@@ -3659,8 +3752,8 @@ mod tests {
             created_before: Some("2026-12-31".into()),
         };
         let f = memory_query_filter_ex(&mf).unwrap();
-        // base exclusions stay.
-        assert_eq!(f.must_not.len(), 2);
+        // base exclusions stay (procedure, quarantined, archived).
+        assert_eq!(f.must_not.len(), 3);
         // multi-library OR (1) + author (1) + source (1) + one datetime range (1)
         // = 4 must conditions (the date window is a single range condition).
         assert_eq!(f.must.len(), 4);
