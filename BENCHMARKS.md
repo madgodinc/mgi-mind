@@ -516,3 +516,92 @@ To compare against a system that publishes QA accuracy (e.g. Mem0), run **their*
 harness (`mem0ai/memory-benchmarks`) with the same answerer/judge model and top-k,
 rather than comparing across metrics. Record the judge model, provider, and date
 (LLM judges drift). This is a separate effort from the zero-API recall above.
+
+## STALE — belief revision (the validity axis)
+
+The numbers above measure retrieval: did the right evidence come back. STALE
+measures something the validity model is actually built for: when a belief
+changes, does the system answer with the *new* belief and stop asserting the old
+one. This is the axis where the duel rule, doubt window, and supersession are
+supposed to matter, and it is a different (and harder) thing than recall.
+
+STALE is an LLM-judged benchmark, so unlike the zero-API recall above it needs an
+answerer and a judge. Scenarios come in two types: **T1 (co-referential)**, where
+the same entity's attribute is updated, and **T2 (propagated)**, where an update
+to one fact should cascade to a dependent one. Each scenario is graded on three
+behaviours: State Resolution (SR), Premise Resistance (PR), Implicit Policy
+Adaptation (IPA). Overall is the macro-average of the per-type scores, per STALE
+§3.1, so it lines up with the published baseline table.
+
+### Two pre-judge layers (deterministic, no LLM)
+
+Before spending anything on a judge, two layers that need no LLM were verified:
+
+- **Duel-rule validity: 6/6 (100%).** A deterministic unit suite drives every
+  duel outcome (flip / contested / quarantine) on hand-built conflicts and
+  checks the resolution. This tests the mechanism directly, with no model in the
+  loop.
+- **Extraction + duel at scale: clean.** Across the full scenario set, the
+  extractor lands both the old and new fact on the seeded axis and the duel
+  marks the old one stale ("duel fired"). This is a retrieval-level check, not
+  the QA number, but it confirms the belief-revision plumbing works before any
+  paid judge call.
+
+### Headline (preliminary, partial run)
+
+A partial run over the **full 400-scenario distribution**, N = 155 completed
+(47 T1, 108 T2), 2026-06-08:
+
+| Type | N | Overall | SR | PR | IPA |
+|---|---|---|---|---|---|
+| T1 (co-referential) | 47 | 38% | 47% | 38% | 53% |
+| T2 (propagated) | 108 | 26% | 39% | 35% | 52% |
+| **Overall** | **155** | **~32% macro / ~30% micro** | — | — | — |
+
+Overall is the macro-average (T1+T2)/2 per STALE §3.1, for comparability with
+the baseline table. The N-weighted micro-average is ~30%; macro is the headline
+only because the baselines are reported as macro, not because it's the higher of
+the two. Both are stated so neither looks picked.
+
+Config: `--llm-extract --backbone gemini-flash-latest --judge gemini-flash-latest
+--haystack reduced --window 2 --focused`, cross-axis adjudicator on. The run was
+stopped at N = 155 (rate limits on the judge), with the remaining ~145 T1 and ~90
+T2 scenarios still to grade. Treat this as **preliminary**.
+
+Note: unlike the zero-API recall numbers above, this run uses gemini-flash for
+extraction, answering, AND judging. It is an LLM-in-the-loop result end to end,
+not a deterministic one. The deterministic 6/6 above tests only the duel
+mechanism, not this QA number.
+
+For context only, not a like-for-like comparison: the published STALE baselines
+are Mem0 8.3%, Zep 6.0%, A-mem 5.1%, LightMem 17.8%, CUPMem 68%. Those are
+full-haystack, full-distribution numbers graded with the paper's own judge. The
+32% above is reduced-haystack, partial-N, and judged by a different model, so it
+**cannot be ranked against them yet**. A like-for-like comparison needs the full
+400-scenario run at full haystack with a pinned judge.
+
+### Honest caveats
+
+- **Partial, so the number can move.** N = 155 of 400. Wilson 95% intervals are
+  wide at this N: T2 26% sits in roughly [18%, 35%] (N=108); T1 38% in roughly
+  [25%, 53%] (N=47). The full run is what the headline will stand on.
+- **Reduced haystack.** `--haystack reduced` shrinks the distractor set, so this
+  is closer to an oracle-retrieval upper bound than a full-haystack number. Do
+  not put it in a table next to a full-haystack result without the caveat.
+- **Judge mismatch and drift.** The STALE paper's baselines were graded with the
+  paper's judge; this run uses `gemini-flash-latest`, a different model and a
+  non-pinned alias that can change under you, which also makes the run
+  non-reproducible by date. A pinned judge is required before any head-to-head
+  claim.
+- **A curated 10-scenario sample scored T2 = 70%**, which would superficially
+  beat CUPMem's 68% — which is precisely why it must not be read as a result. It
+  was an easy subclass and is *not* the headline. On the full distribution T2 is
+  26%. The curated number is recorded here only so it is not mistaken for the
+  real one.
+- **Different metric from recall.** Do not compare STALE Overall with the R@k
+  numbers above; they measure different things.
+
+The STALE harness adapter is still being finished (the grading loop is wired but
+not yet a one-command run). The next step is completing N = 400 and, per the
+recommended plan, moving the judge to a local model to remove the rate-limit
+ceiling, with a small hosted-judge sample to calibrate it.
