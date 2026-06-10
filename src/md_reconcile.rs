@@ -337,6 +337,8 @@ mod tests {
             r#type: "memory".into(),
             created_at: String::new(),
             updated_at: String::new(),
+            library: String::new(),
+            author: None,
             // Reconcile tests predate v1.4 and don't care about scores.
             confidence_score: None,
         }

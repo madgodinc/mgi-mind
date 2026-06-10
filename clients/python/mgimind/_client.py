@@ -222,6 +222,27 @@ def _recall_body(query: str, library: str | None) -> dict[str, Any]:
     return {"query": query, "library": library}
 
 
+def _browse_body(
+    library: str | None,
+    limit: int,
+    *,
+    libraries: list[str] | None = None,
+    author: str | None = None,
+    source: str | None = None,
+    created_since: str | None = None,
+    created_before: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "library": library,
+        "libraries": libraries,
+        "author": author,
+        "source": source,
+        "created_since": created_since,
+        "created_before": created_before,
+        "limit": limit,
+    }
+
+
 def _fact_body(
     subject: str, predicate: str, object: str, agent: str | None
 ) -> dict[str, Any]:
@@ -334,6 +355,34 @@ class Memory:
         `result.procedures`, or `str(result)` for the merged block."""
         return self._post("/memory/recall", _recall_body(query, library or self.library))
 
+    def browse(
+        self,
+        *,
+        library: str | None = None,
+        libraries: list[str] | None = None,
+        author: str | None = None,
+        source: str | None = None,
+        created_since: str | None = None,
+        created_before: str | None = None,
+        limit: int = 20,
+    ) -> MemoryResult:
+        """List memories by metadata, newest first, with NO search query. The
+        inventory verb: "everything agent X wrote", "everything from this source",
+        "everything since a date". Read hits from `result.results` or iterate the
+        result; same filters as `search` minus the query."""
+        return self._post(
+            "/memory/browse",
+            _browse_body(
+                library or self.library,
+                limit,
+                libraries=libraries,
+                author=author,
+                source=source,
+                created_since=created_since,
+                created_before=created_before,
+            ),
+        )
+
     def add_fact(
         self, subject: str, predicate: str, object: str, *, agent: str | None = None
     ) -> MemoryResult:
@@ -445,6 +494,32 @@ class AsyncMemory:
     async def recall(self, query: str, *, library: str | None = None) -> MemoryResult:
         """Unified recall: memories + facts + procedures in one call."""
         return await self._post("/memory/recall", _recall_body(query, library or self.library))
+
+    async def browse(
+        self,
+        *,
+        library: str | None = None,
+        libraries: list[str] | None = None,
+        author: str | None = None,
+        source: str | None = None,
+        created_since: str | None = None,
+        created_before: str | None = None,
+        limit: int = 20,
+    ) -> MemoryResult:
+        """List memories by metadata, newest first, no search query. See the
+        sync `Memory.browse`."""
+        return await self._post(
+            "/memory/browse",
+            _browse_body(
+                library or self.library,
+                limit,
+                libraries=libraries,
+                author=author,
+                source=source,
+                created_since=created_since,
+                created_before=created_before,
+            ),
+        )
 
     async def add_fact(
         self, subject: str, predicate: str, object: str, *, agent: str | None = None

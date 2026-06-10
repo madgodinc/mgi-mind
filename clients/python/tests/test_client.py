@@ -22,7 +22,7 @@ from mgimind import AsyncMemory, Memory, MgiMindError
 def test_sync_async_signatures_match():
     # Mechanically enforce that the two clients can't drift on the five verbs.
     # Needs no server.
-    for verb in ("add", "search", "recall", "add_fact", "health"):
+    for verb in ("add", "search", "browse", "recall", "add_fact", "health"):
         assert inspect.signature(getattr(Memory, verb)) == inspect.signature(
             getattr(AsyncMemory, verb)
         ), f"signature drift on {verb}"
@@ -103,6 +103,22 @@ def test_search_metadata_filters(server):
     # A bad date is a server-side 400 → MgiMindError, not a silent empty.
     with pytest.raises(MgiMindError):
         mem.search("x", created_since="not-a-date")
+
+
+def test_browse_lists_by_metadata_without_query(server):
+    subprocess.run([BIN, "create", "pytest"], env=dict(os.environ), check=False)
+    mem = Memory(url=server, token=TOKEN, library="pytest")
+    mem.add("Browse canary one.")
+    mem.add("Browse canary two.")
+    # No query — pure inventory. author=alice is the token identity.
+    listing = mem.browse(author="alice", limit=50)
+    assert len(listing) >= 2
+    # Records carry inventory metadata (created_at, library), not a score.
+    rec = listing.results[0]
+    assert "created_at" in rec and "library" in rec
+    assert rec.get("author") == "alice"
+    # A future window lists nothing.
+    assert len(mem.browse(created_since="2099-01-01")) == 0
 
 
 def test_recall_splits_silos(server):

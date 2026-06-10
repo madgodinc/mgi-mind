@@ -74,6 +74,27 @@ pub enum Commands {
         #[arg(long, default_value = "2")]
         tier: u8,
     },
+    /// Browse/list memories by metadata, newest first, with NO search query
+    Browse {
+        /// List from one library (repeat for OR across libraries)
+        #[arg(long)]
+        library: Vec<String>,
+        /// Only memories written by this agent
+        #[arg(long)]
+        author: Option<String>,
+        /// Only memories with this ingest source tag
+        #[arg(long)]
+        source: Option<String>,
+        /// Only memories created at/after this instant, INCLUSIVE (RFC3339 or YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)
+        #[arg(long)]
+        before: Option<String>,
+        /// Max records (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 
     /// Delete a specific memory by ID
     Delete {
@@ -756,6 +777,26 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 limit,
                 tier,
+            )
+            .await
+        }
+        Commands::Browse {
+            library,
+            author,
+            source,
+            since,
+            before,
+            limit,
+        } => {
+            cmd_browse(
+                crate::storage::MemoryFilter {
+                    libraries: library,
+                    author,
+                    source,
+                    created_since: since,
+                    created_before: before,
+                },
+                limit,
             )
             .await
         }
@@ -2425,6 +2466,48 @@ pub(crate) fn render_search(results: &[crate::storage::SearchResult]) -> String 
     out.trim_end().to_string()
 }
 
+/// Render inventory records (no score; browse/list path) as text. Shared by the
+/// `browse` CLI command and the `mind_browse` MCP tool. Shows the metadata a
+/// browse is FOR — library, created_at, author, source — that a ranked search
+/// render omits.
+pub(crate) fn render_records(records: &[crate::storage::MemoryRecord], truncated: bool) -> String {
+    use std::fmt::Write;
+    if records.is_empty() {
+        return "No memories match.".to_string();
+    }
+    let mut out = String::new();
+    for (i, r) in records.iter().enumerate() {
+        let lib = if r.library.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", r.library)
+        };
+        // Legacy points predate created_at; show "(undated)" rather than a blank.
+        let when = if r.created_at.is_empty() {
+            "(undated)"
+        } else {
+            &r.created_at
+        };
+        let _ = writeln!(out, "{}. {}{} id: {}", i + 1, lib, when, r.id);
+        let _ = writeln!(out, "   {}", r.content);
+        if let Some(author) = &r.author {
+            let _ = writeln!(out, "   author: {author}");
+        }
+        if let Some(src) = &r.source {
+            let _ = writeln!(out, "   source: {src}");
+        }
+        let _ = writeln!(out);
+    }
+    if truncated {
+        let _ = writeln!(
+            out,
+            "(scan hit the cap; this is a window, not the whole set — narrow with \
+             --since/--before/--library or a tighter filter)"
+        );
+    }
+    out.trim_end().to_string()
+}
+
 async fn cmd_search(
     query: &str,
     mfilter: crate::storage::MemoryFilter,
@@ -2434,6 +2517,13 @@ async fn cmd_search(
     let config = crate::config::load_cached()?;
     let results = crate::storage::search_filtered(&config, query, &mfilter, limit, tier).await?;
     println!("{}", render_search(&results));
+    Ok(())
+}
+
+async fn cmd_browse(mfilter: crate::storage::MemoryFilter, limit: usize) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let (records, truncated) = crate::storage::list_filtered(&config, &mfilter, limit).await?;
+    println!("{}", render_records(&records, truncated));
     Ok(())
 }
 
