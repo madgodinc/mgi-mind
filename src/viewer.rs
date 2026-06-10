@@ -380,8 +380,9 @@ async fn api_consolidate_dry_run(
         apply: false,
         library: q.library,
         near_dup_threshold: 0.0, // with_defaults() will fill to 0.97
-        decay_days: 0,           // with_defaults() will fill to 180
+        decay_days: 180,         // explicit default (an explicit 0 means archive-all-unused)
         prune_cold: false,
+        archive_cold: false,
     }
     .with_defaults();
     let report = crate::consolidate::run(&state.config, opts)

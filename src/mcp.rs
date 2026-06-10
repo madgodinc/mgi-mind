@@ -549,8 +549,9 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 apply: false,
                 library,
                 near_dup_threshold: 0.0, // with_defaults() fills to 0.97
-                decay_days: 0,           // with_defaults() fills to 180
+                decay_days: 180, // explicit default (an explicit 0 means archive-all-unused)
                 prune_cold: false,
+                archive_cold: false,
             }
             .with_defaults();
             let r = crate::consolidate::run(cfg, opts).await?;
@@ -569,6 +570,20 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 ))
             } else {
                 Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
+            }
+        }
+        "mind_restore" => {
+            // Bring an archived (soft-forgotten) memory back into search. The
+            // reversible counterpart to consolidate's archive-cold path.
+            let cfg = warm(true)?;
+            let id = arg_str(args, "id")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
+            if crate::storage::restore_memory(cfg, id).await? {
+                Ok(format!("Restored '{id}' from archive — back in search."))
+            } else {
+                Ok(format!(
+                    "Nothing to restore — '{id}' is not an archived memory."
+                ))
             }
         }
         "mind_stats" => {
@@ -1357,6 +1372,15 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_restore",
+            "description": "Restore an ARCHIVED (soft-forgotten) memory by id, returning it to search. Archiving (consolidate --archive-cold) reversibly hides cold memories instead of deleting them; this is the undo.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "Memory id of an archived entry" } },
+                "required": ["id"]
+            }
+        }),
+        json!({
             "name": "mind_web",
             "description": "Read a webpage as Markdown, optionally save to library",
             "inputSchema": {
@@ -1580,12 +1604,12 @@ mod tests {
         // deprecated singletons are still in the list, but flagged
         // `deprecated: true`. Total v1.1 = 35. v1.4 adds mind_predicate → 36.
         // v1.5 Phase 7 adds mind_outcome → 37. A later add of mind_browse
-        // (inventory list) → 41.
+        // (inventory list) → 41. mind_restore (un-archive) → 42.
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            41,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) = 41"
+            42,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) = 42"
         );
         let deprecated = tools
             .iter()
@@ -1597,8 +1621,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 26,
-            "non-deprecated surface is 26 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse)"
+            live_surface, 27,
+            "non-deprecated surface is 27 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore)"
         );
     }
 
@@ -1711,11 +1735,11 @@ mod tests {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
         // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
-        // + 1 (mind_visualize) + 1 (mind_browse) = 41 total.
+        // + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) = 42 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 41);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 42);
     }
 
     #[tokio::test]

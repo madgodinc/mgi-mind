@@ -1320,3 +1320,142 @@ fn concurrent_writes_to_one_axis_converge_to_single_winner() {
         q.1
     );
 }
+
+// Reversible forgetting (PR-5, circle 1, axis: forgetting): a cold memory can be
+// ARCHIVED (hidden from search) and RESTORED (back in search) — no data lost.
+// Needs the model (search embeds) + Qdrant.
+#[test]
+fn archive_then_restore_round_trips_a_cold_memory() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itarchive_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    run(&["create", &lib]);
+    run(&[
+        "add",
+        &lib,
+        "The archived canary memory about quantum widgets.",
+    ]);
+
+    // Sanity: it's searchable before archiving.
+    let (ok, before) = run(&[
+        "search",
+        "quantum widgets",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    assert!(
+        ok && before.contains("quantum widgets"),
+        "should be searchable pre-archive: {before}"
+    );
+
+    // Archive cold memories (decay-days 0 makes the fresh, never-searched-by-
+    // consolidate memory cold). NOTE: the search above bumped access_count, so
+    // archive by a SEPARATE fresh memory to keep the cold check valid.
+    run(&[
+        "add",
+        &lib,
+        "A second cold note about helium balloons drifting away.",
+    ]);
+    let (ok, _ar) = run(&[
+        "consolidate",
+        "--library",
+        &lib,
+        "--apply",
+        "--archive-cold",
+        "--decay-days",
+        "0",
+    ]);
+    assert!(ok, "consolidate --archive-cold should succeed");
+
+    // The archived note must NOT be in default search.
+    let (ok, hid) = run(&[
+        "search",
+        "helium balloons",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    assert!(ok, "search should run");
+    assert!(
+        !hid.contains("helium balloons"),
+        "an archived memory must be hidden from default search, got:\n{hid}"
+    );
+
+    // Recover its id from the audit log (one Archive row per archived id) and
+    // restore it.
+    let log = std::fs::read_to_string(mind.join("audit.log")).unwrap_or_default();
+    let archived_id = log
+        .lines()
+        .filter(|l| l.contains("\"op\":\"archive\"") || l.contains("Archive"))
+        .filter_map(|l| {
+            l.split("\"target\":\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .map(str::to_string)
+        })
+        .next_back();
+
+    if let Some(id) = archived_id {
+        let (ok, msg) = run(&["restore-memory", &id]);
+        assert!(ok, "restore-memory should succeed: {msg}");
+        // After restore, it is searchable again — nothing was lost.
+        let (ok, back) = run(&[
+            "search",
+            "helium balloons",
+            "--library",
+            &lib,
+            "--tier",
+            "3",
+        ]);
+        assert!(
+            ok && back.contains("helium balloons"),
+            "a restored memory must be searchable again, got:\n{back}"
+        );
+    } else {
+        // If nothing was archived (e.g. cold-detection differences), the data
+        // must still be present, not lost — restore the invariant either way.
+        let (_ok, still) = run(&[
+            "search",
+            "helium balloons",
+            "--library",
+            &lib,
+            "--tier",
+            "3",
+        ]);
+        assert!(
+            still.contains("helium balloons"),
+            "if not archived, the memory must remain searchable (no silent loss)"
+        );
+    }
+
+    let _ = run(&["drop", &lib]);
+}
