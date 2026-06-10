@@ -617,7 +617,9 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let cfg = warm(true)?;
             let subject = arg_str(args, "subject")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'subject'"))?;
-            let facts = if arg_bool(args, "history", false) {
+            let facts = if let Some(at) = arg_str(args, "as_of") {
+                crate::knowledge::query_fact_as_of(cfg, subject, None, at).await?
+            } else if arg_bool(args, "history", false) {
                 crate::knowledge::query_fact_history(cfg, subject, None).await?
             } else {
                 crate::knowledge::query_facts(cfg, subject).await?
@@ -939,11 +941,12 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                     let cfg = warm(true)?;
                     let subject = arg_str(args, "subject")
                         .ok_or_else(|| anyhow::anyhow!("action=query requires 'subject'"))?;
-                    // history=true surfaces the superseded TemporalSingle chain
-                    // (past-but-once-true values, oldest first) instead of the
-                    // current facts — the reader that distinguishes superseded
-                    // from stale.
-                    let facts = if arg_bool(args, "history", false) {
+                    // as_of=<instant> time-travels the superseded chain to that
+                    // moment; history=true surfaces the whole superseded chain;
+                    // otherwise the current facts.
+                    let facts = if let Some(at) = arg_str(args, "as_of") {
+                        crate::knowledge::query_fact_as_of(cfg, subject, None, at).await?
+                    } else if arg_bool(args, "history", false) {
                         crate::knowledge::query_fact_history(cfg, subject, None).await?
                     } else {
                         crate::knowledge::query_facts(cfg, subject).await?
@@ -1509,7 +1512,8 @@ fn tool_definitions() -> Vec<Value> {
                     "predicate": { "type": "string", "description": "Required for add" },
                     "object": { "type": "string", "description": "Required for add" },
                     "id": { "type": "string", "description": "Required for invalidate (from action=query)" },
-                    "history": { "type": "boolean", "description": "With action=query: return the SUPERSEDED history (past TemporalSingle values, oldest first) instead of current facts" }
+                    "history": { "type": "boolean", "description": "With action=query: return the SUPERSEDED history (past TemporalSingle values, oldest first) instead of current facts" },
+                    "as_of": { "type": "string", "description": "With action=query: POINT-IN-TIME — return the facts that were CURRENT at this instant (RFC3339 or YYYY-MM-DD), time-travelling the superseded chain. Answers 'what was X on date Y'." }
                 },
                 "required": ["action"]
             }
