@@ -14,15 +14,19 @@
 //!   Premise Resistance, Implicit Policy Adaptation) + per-conflict-
 //!   type (Type I co-referential, Type II propagated).
 //!
-//! The result is the v1.4 release headline.
+//! STALE measures the validity axis but is a chat-memory belief-revision
+//! benchmark, not the field this dev tool is built for; it is one data point,
+//! not the release headline.
 //!
 //! ## What this module does today
 //!
-//! Scaffold. The actual STALE harness (a Python project under
-//! CC BY 4.0, mentioned in the paper's Appendix G) needs to be
-//! cloned, our adapter written against its protocol, and a judge
-//! configured (Gemini-3.1-flash-lite per the paper, 95.8% human
-//! agreement). The runner here:
+//! Scaffold on `main`. The working harness (cloud-extract → answerer → judge)
+//! lives on the `stale-extraction-optimization` branch; its partial N=155 run,
+//! with raw verdicts and a reproduction script, is committed at
+//! `benchmark/results/2026-06-08-stale-partial-n155/` and reported in
+//! BENCHMARKS.md. The full STALE harness it targets is a Python project under
+//! CC BY 4.0 (paper Appendix G), judged with a flash-tier model. The intended
+//! per-scenario flow:
 //!
 //! 1. Loads a STALE scenario file (jsonl, one scenario per line).
 //! 2. For each scenario: clears the mgi-mind store to a clean
@@ -142,10 +146,13 @@ pub fn aggregate(results: &[ScenarioResult], judge_model: &str) -> StaleReport {
     let pr = count_true(|r| r.premise_resistance);
     let ipa = count_true(|r| r.implicit_policy_adaptation);
 
-    // Overall = mean of 6 cells (3 metrics × 2 conflict types) per
-    // STALE paper §3.1. We approximate as (sr + pr + ipa) / (3n)
-    // when scenarios are equally split; the exact per-cell mean
-    // requires per-conflict-type breakdown.
+    // NOTE: this computes the PER-CELL average (sr + pr + ipa)/(3n). The
+    // published STALE number in BENCHMARKS.md uses the stricter SCENARIO-LEVEL
+    // all-three-pass figure (a scenario counts only if SR AND PR AND IPA), which
+    // is lower. The two do not match by design: the branch harness that produced
+    // the N=155 run scored all-three-pass; this scaffold's aggregate is per-cell.
+    // When the working harness lands on main, switch this to all-three-pass so the
+    // code and the published table compute the same thing.
     let total_correct_cells = sr + pr + ipa;
     let overall_pct = 100.0 * total_correct_cells as f32 / (3.0 * n as f32);
 
@@ -344,11 +351,15 @@ impl CalibrationOverrides {
 
 /// Run the STALE benchmark against the current mgi-mind store.
 ///
-/// **Scaffold note.** The harness adapter (STALE protocol →
-/// mgi-mind tool calls → judge → result) is not implemented yet.
-/// The CLI command exists so the surface is testable and the
-/// downstream tooling (sweep scripts, calibration report writer)
-/// can be developed against the type contracts here.
+/// **Status.** On `main` this is a scaffold: the type contracts,
+/// aggregation, and publish-decision bands are real and tested, but the
+/// adapter (STALE protocol → mgi-mind tool calls → judge → result) is not
+/// wired here. The working harness (cloud-extract → answerer → judge) lives
+/// on the `stale-extraction-optimization` branch; the partial N=155 run it
+/// produced, with raw per-scenario verdicts and a reproduction script, is at
+/// `benchmark/results/2026-06-08-stale-partial-n155/` and reported in
+/// BENCHMARKS.md. Landing that harness on `main` (gated so the cloud extractor
+/// stays bench-only) is the open task.
 pub async fn run(
     _dataset: PathBuf,
     _judge_model: &str,
@@ -356,13 +367,15 @@ pub async fn run(
     overrides: CalibrationOverrides,
     output: PathBuf,
 ) -> Result<StaleReport> {
-    eprintln!("STALE bench: scaffold — harness adapter not implemented yet");
-    eprintln!("            overrides: {}", overrides.tag());
-    eprintln!("            target output path: {}", output.display());
+    eprintln!("STALE bench: scaffold on main — the working harness is on the");
+    eprintln!("            stale-extraction-optimization branch. Its partial N=155 run");
+    eprintln!("            (raw verdicts + reproduction script) is committed at");
+    eprintln!("            benchmark/results/2026-06-08-stale-partial-n155/ and reported");
     eprintln!(
-        "            wire-up requires the STALE public harness (Appendix G of arxiv 2605.06527)"
+        "            in BENCHMARKS.md. overrides: {}",
+        overrides.tag()
     );
-    eprintln!("            and a judge model env (MGIMIND_STALE_JUDGE_KEY)");
+    eprintln!("            target output path: {}", output.display());
 
     // Return an empty report rather than failing — the caller's
     // pretty-printer and sweep harness need to handle this case
