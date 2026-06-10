@@ -80,6 +80,11 @@ pub const KNOWN_REASONS: &[&str] = &[
     // outside the gate by the vendored-doc quarantine pass — the bulk of the
     // current quarantine, so it must be named exactly or it all reads as "other".
     "migration-vendor-doc",
+    // A near-duplicate at ingest, routed to quarantine instead of dropped, so a
+    // wrongly-suppressed correction is recoverable (circle 1, write discipline).
+    // Written outside the gate by the ingest near-dup path, named here so the
+    // quarantine breakdown counts it instead of folding it into "other".
+    "near_dup_drop",
 ];
 
 /// Knobs for the gate. Defaults are conservative — tightening them later is
