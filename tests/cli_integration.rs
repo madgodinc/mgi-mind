@@ -1459,3 +1459,97 @@ fn archive_then_restore_round_trips_a_cold_memory() {
 
     let _ = run(&["drop", &lib]);
 }
+
+// list-archived (PR-B1, circle 2, axis: forgetting): a soft-forgotten memory must
+// be OBSERVABLE without digging the audit log — `browse --archived` lists it with
+// its id, and you can restore from that id. This is what raises forgetting from
+// "you can forget, but can't see what's forgotten" to "forgetting is inspectable".
+#[test]
+fn browse_archived_lists_forgotten_and_restores_from_listing() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itlsarch_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    run(&["create", &lib]);
+    run(&[
+        "add",
+        &lib,
+        "An archivable note about migrating mainframes to the cloud.",
+    ]);
+    // Archive it (fresh + zero-access + decay-days 0 = cold).
+    let (ok, _a) = run(&[
+        "consolidate",
+        "--library",
+        &lib,
+        "--apply",
+        "--archive-cold",
+        "--decay-days",
+        "0",
+    ]);
+    assert!(ok, "archive-cold should succeed");
+
+    // Default browse must NOT show it (it's forgotten).
+    let (ok, live) = run(&["browse", "--library", &lib]);
+    assert!(ok);
+    assert!(
+        !live.contains("mainframes"),
+        "an archived memory must be absent from default browse, got:\n{live}"
+    );
+
+    // `browse --archived` MUST show it — with an id — WITHOUT reading the audit log.
+    let (ok, arch) = run(&["browse", "--library", &lib, "--archived"]);
+    assert!(ok, "browse --archived should run");
+    assert!(
+        arch.contains("mainframes"),
+        "browse --archived must surface the forgotten memory, got:\n{arch}"
+    );
+    let id = arch
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .map(str::to_string)
+        .expect("archived listing should carry an id");
+
+    // Restore using the id FROM THE LISTING (not the audit log) → back in search.
+    let (ok, _r) = run(&["restore-memory", &id]);
+    assert!(ok, "restore from listed id should succeed");
+    let (ok, back) = run(&[
+        "search",
+        "migrating mainframes cloud",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    assert!(
+        ok && back.contains("mainframes"),
+        "restored memory must be searchable, got:\n{back}"
+    );
+
+    let _ = run(&["drop", &lib]);
+}

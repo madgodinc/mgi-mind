@@ -91,6 +91,10 @@ pub enum Commands {
         /// Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
+        /// List ARCHIVED (soft-forgotten) memories instead of live ones — see
+        /// what was forgotten, with ids to `mgimind restore-memory <id>`
+        #[arg(long)]
+        archived: bool,
         /// Max records (default: 20)
         #[arg(long, default_value = "20")]
         limit: usize,
@@ -791,6 +795,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     source,
                     created_since: since,
                     created_before: before,
+                    ..Default::default()
                 },
                 limit,
                 tier,
@@ -803,6 +808,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             source,
             since,
             before,
+            archived,
             limit,
         } => {
             cmd_browse(
@@ -812,6 +818,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                     source,
                     created_since: since,
                     created_before: before,
+                    archived: if archived {
+                        crate::storage::ArchivedScope::Only
+                    } else {
+                        crate::storage::ArchivedScope::Exclude
+                    },
                 },
                 limit,
             )
