@@ -154,11 +154,16 @@ addresses stripped), so the same error matches later regardless of those details
 deterministic check confirmed the fix (a test went green, a command exited 0); without
 that signal you would be teaching superstition.
 
-Before grinding on an error or a recurring task, `mind_recall` it: verified playbooks
-rank first, and fixes that have failed before are demoted. After you reuse a recalled
-fix, tell the store whether it worked with `mind_procedure_outcome` (`worked: true/false`)
-- a failure raises its fail count and demotes it, so the memory self-corrects instead of
-ossifying on a bad fix.
+Before grinding on an error or a recurring task, `mind_recall` it. Ranking blends
+relevance with trust: verified fixes and proven ones get a boost, repeatedly-failing
+ones get demoted, and a strongly-matching fix still surfaces. After you reuse a recalled
+fix, report the outcome:
+- If a test passed or the code compiled after applying it, call
+  `mind_outcome(memory_id=<procedure id>, signal_type=test_passed)`. A deterministic
+  success both counts AND marks the playbook verified, so recall surfaces it first.
+- For a plain worked/failed report with no such signal, `mind_procedure_outcome
+  (worked: true/false)` bumps the counters (a failure demotes the fix) but does not
+  verify. Only a real signal does that.
 
 ## Saving externally-sourced snippets (`mind_provenance_add`)
 

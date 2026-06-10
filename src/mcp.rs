@@ -172,19 +172,33 @@ async fn handle_message(config: Option<&MindConfig>, msg: Value) -> Option<Value
     }
 }
 
-/// Best-effort retrieval policy. The MCP protocol gives a server no way to
-/// gate generation, so this is text the client *may* surface to the model — it
-/// is not enforcement. Phrased as triggers, not rules, so the model can apply
-/// judgment instead of mechanically calling tools on every turn.
+/// Operating policy injected into the client at MCP `initialize`. The protocol
+/// cannot force a tool call, so this is the strongest lever available: a
+/// default-ON posture (verify before acting, capture before moving on) instead
+/// of the old opt-in "consider searching" wording, which gave the model an out
+/// on every turn and left the store unused.
 const RETRIEVAL_INSTRUCTIONS: &str = "\
-mgi-mind is the user's persistent memory across sessions. Before answering, \
-consider calling mind_search when the user: (1) asks about a project, person, \
-preference, or decision by name; (2) uses meta-cues like \"did I tell you\", \
-\"do you remember\", \"have you forgotten\", \"you should know\"; (3) negates \
-something to verify (\"isn't it X?\"); (4) references prior conversations. \
-Use mind_context once at session start to see what libraries exist. This is \
-best-effort guidance, not a hard requirement — the model decides when retrieval \
-is worth the round-trip.";
+mgi-mind is the user's persistent memory and source of truth across sessions. \
+Treat your own recollection as a draft to verify against it.\n\
+\n\
+BEFORE acting or making any factual claim about the user's projects, people, \
+environment, preferences, or past decisions: call mind_search (or \
+mind_recall_all) first. Assume your context is stale. Skip the lookup for \
+general knowledge, arithmetic, and turns that work only on content the user \
+supplied in this conversation (formatting, summarizing their pasted text, \
+explaining a snippet they showed you).\n\
+\n\
+ALWAYS search first on: a named project/person/tool; meta-cues (\"did I tell \
+you\", \"do you remember\", \"you should know\"); a negation to verify (\"isn't \
+it X?\"); a reference to prior work (\"like last time\", \"the file we were \
+editing\"); anything the user states as a fixed preference or decision.\n\
+\n\
+AFTER resolving something worth keeping (a decision, a fact, an error->fix): \
+capture it with mind_add or mind_learn before moving on — uncaptured context is \
+lost next session.\n\
+\n\
+Call mind_context once at session start for recent state and the library list. \
+Unsure whether a turn needs a lookup? call mind_should_search first.";
 
 fn initialize_result() -> Value {
     json!({
@@ -376,8 +390,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             // `agent` is the optional author tag (set by the multi-agent HTTP
             // surface). Absent on the MCP stdio path → unattributed write.
             let author = arg_str(args, "agent");
-            let n = crate::storage::add_memory_authored(cfg, library, content, source, author)
-                .await?;
+            let n =
+                crate::storage::add_memory_authored(cfg, library, content, source, author).await?;
             Ok(format!("Added {n} chunk(s) to '{library}'"))
         }
         "mind_provenance_add" => {
@@ -534,8 +548,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let object = arg_str(args, "object")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'object'"))?;
             let author = arg_str(args, "agent");
-            let id =
-                crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author).await?;
+            let id = crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author)
+                .await?;
             Ok(format!(
                 "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
             ))
@@ -576,7 +590,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let id = arg_str(args, "id")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
             let worked = arg_bool(args, "worked", false);
-            crate::procedure::outcome(cfg, id, worked).await
+            // Manual outcome — no deterministic signal, so don't verify.
+            crate::procedure::outcome(cfg, id, worked, false).await
         }
         "mind_outcome" => {
             // v1.5 Phase 7 step 7.1: generalised external-signal API.
@@ -607,21 +622,27 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 source,
                 ts: chrono::Utc::now().to_rfc3339(),
             };
-            let mut out = crate::outcome::record(cfg, memory_id, signal).await?;
+            let (mut out, signal_was_new) =
+                crate::outcome::record_with_novelty(cfg, memory_id, signal).await?;
             // Bridge: a test_passed/code_compiled signal on a PROCEDURE is the
             // "the fix actually worked" signal the procedural layer needs — so
-            // also bump its success/fail counters (→ `verified` once it has a
-            // real success). Without this bridge, mind_outcome only logged an
-            // external signal and procedures stayed unverified. This is the
-            // explicit-signal path (critic): no session-window correlation, the
-            // caller names the procedure id directly.
+            // also bump its success/fail counters (→ `verified` on a real
+            // success). Without this bridge, mind_outcome only logged an external
+            // signal and procedures stayed unverified. Explicit-signal path (no
+            // session-window correlation, the caller names the procedure id).
+            // Only bump on a NEW signal — re-posting the same (type, source)
+            // dedups the log, so the counter must not inflate on redelivery.
             let is_proc_signal = matches!(
                 signal_type,
                 crate::outcome::OutcomeSignal::TestPassed
                     | crate::outcome::OutcomeSignal::CodeCompiled
             );
-            if is_proc_signal && crate::storage::is_procedure(cfg, memory_id).await? {
-                let note = crate::procedure::outcome(cfg, memory_id, success).await?;
+            if signal_was_new
+                && is_proc_signal
+                && crate::storage::is_procedure(cfg, memory_id).await?
+            {
+                // Deterministic signal → a success both counts and verifies.
+                let note = crate::procedure::outcome(cfg, memory_id, success, success).await?;
                 out.push('\n');
                 out.push_str(&note);
             }
@@ -753,8 +774,25 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                         Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
                     }
                 }
+                "expire" => {
+                    let cfg = warm(true)?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=expire requires 'id'"))?;
+                    if crate::storage::expire_from_quarantine(cfg, id).await? {
+                        Ok(format!(
+                            "Expired '{id}' — confirmed the gate was right to reject it. \
+                             Removed from quarantine (content + reason recorded in the audit \
+                             log first, when audit is enabled)."
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Nothing to expire — '{id}' is not in quarantine (live memory is \
+                             never touched by this action; use mind_delete for that)."
+                        ))
+                    }
+                }
                 other => anyhow::bail!(
-                    "mind_quarantine: unknown action '{other}' (expected list|show|promote)"
+                    "mind_quarantine: unknown action '{other}' (expected list|show|promote|expire)"
                 ),
             }
         }
@@ -1311,12 +1349,12 @@ fn tool_definitions() -> Vec<Value> {
     let consolidated = vec![
         json!({
             "name": "mind_quarantine",
-            "description": "Inspect or promote entries that the v0.11 relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (move to ordinary memory by id). Replaces mind_quarantine_list / _show / _promote.",
+            "description": "Inspect, promote, or expire entries that the relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (the gate was too strict — move to ordinary memory by id), expire (the gate was right — delete by id; only ever touches quarantined points, never live memory, and stays recoverable from the audit log). Replaces mind_quarantine_list / _show / _promote.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "show", "promote"], "description": "What to do" },
-                    "id": { "type": "string", "description": "Required for action=show or action=promote" },
+                    "action": { "type": "string", "enum": ["list", "show", "promote", "expire"], "description": "What to do" },
+                    "id": { "type": "string", "description": "Required for action=show, promote, or expire" },
                     "library": { "type": "string", "description": "Scope for action=list (optional)" },
                     "limit": { "type": "number", "default": 20, "description": "Max entries for action=list" }
                 },
@@ -1562,9 +1600,10 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_carries_retrieval_instructions() {
-        // The MCP `instructions` field is the only programmatic channel for
-        // best-effort "search before answer" policy. If it disappears, clients
-        // lose the only signal we have — guard it.
+        // The MCP `instructions` field is the only programmatic channel for the
+        // "verify before acting" policy. If it disappears, clients lose the only
+        // signal we have — guard it, and guard the opt-out posture (search
+        // before acting, not "consider searching").
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
         let resp = handle_message(None, msg).await.unwrap();
         let instr = resp["result"]["instructions"]
@@ -1575,8 +1614,8 @@ mod tests {
             "instructions must mention mind_search"
         );
         assert!(
-            instr.contains("best-effort"),
-            "instructions must call this best-effort (no MCP enforcement)"
+            instr.contains("source of truth") && instr.contains("BEFORE"),
+            "instructions must carry the default-on 'verify before acting' posture"
         );
     }
 

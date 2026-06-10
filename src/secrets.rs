@@ -177,21 +177,52 @@ fn env_assignment(line: &str) -> Option<&'static str> {
     // Split on the first '=' or ':'.
     let (key, value) = line.split_once('=').or_else(|| line.split_once(':'))?;
 
-    let key_norm = key
-        .trim()
-        .trim_start_matches("export ")
-        .trim()
-        .to_lowercase();
-    if !SECRET_KEY_HINTS
-        .iter()
-        .any(|h| key_norm == *h || key_norm.ends_with(h))
-    {
+    let key_raw = key.trim().trim_start_matches("export ").trim();
+    let key_norm = key_raw.to_lowercase();
+    // A real `.env` key looks like an identifier: one token (no spaces) that is
+    // either an exact hint, or an identifier-shaped name ending in a hint
+    // (DB_PASSWORD, api-key). Plain prose like "password: must be 12 chars" has
+    // key "password" — an exact hint, but the value-side checks below (and the
+    // fact a sentence rarely assigns a long token-only value) keep false hits
+    // low. The guard here is: reject multi-word keys outright (a sentence
+    // fragment before ':' is not an env key).
+    if key_raw.contains(char::is_whitespace) {
+        return None;
+    }
+    let exact = SECRET_KEY_HINTS.iter().any(|h| key_norm == *h);
+    // `ends_with` only for identifier-shaped keys: snake/kebab (DB_PASSWORD,
+    // api-key) OR a single concatenated alphanumeric token (MYTOKEN, dbpassword,
+    // MYAPIKEY). The whitespace guard above already rejected sentence fragments,
+    // so a single bare token ending in a hint is a real env key, not prose.
+    let id_shaped = key_raw.contains('_')
+        || key_raw.contains('-')
+        || key_raw.chars().all(|c| c.is_ascii_alphanumeric());
+    let suffix = id_shaped && SECRET_KEY_HINTS.iter().any(|h| key_norm.ends_with(h));
+    if !exact && !suffix {
         return None;
     }
 
     // Strip surrounding quotes / whitespace from the value.
     let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+    // Drop a trailing inline comment (` # prod`, ` // note`) — a common `.env`
+    // form `KEY=secret # comment`. Only a SPACE-prefixed marker counts, so we
+    // don't chop a `#`/`/` that's part of the token itself (e.g. a URL value).
+    let value = value
+        .split_once(" #")
+        .map(|(v, _)| v.trim_end())
+        .unwrap_or(value);
+    let value = value
+        .split_once(" //")
+        .map(|(v, _)| v.trim_end())
+        .unwrap_or(value);
     if value.len() < 8 {
+        return None;
+    }
+    // A real secret value is a single opaque token. Prose like "must be twelve
+    // chars" or "rotated last week" has spaces — it's a sentence, not a secret.
+    // (The inline comment was already stripped above, so a real `KEY=tok # note`
+    // survives this check.)
+    if value.contains(char::is_whitespace) {
         return None;
     }
     let value_lower = value.to_lowercase();
@@ -272,5 +303,50 @@ mod tests {
     fn ignores_short_values() {
         // Too short to be a real secret.
         assert!(scan("PASSWORD=1234").is_none());
+    }
+
+    #[test]
+    fn ignores_prose_with_secret_word_as_key() {
+        // Prose where a secret-ish word sits before a colon but the value is a
+        // sentence, not a token. These were false-positives that hard-refused
+        // legitimate memory writes.
+        assert!(scan("password: must be twelve chars minimum and rotated monthly").is_none());
+        assert!(scan("token: refresh broke after the 2026 upgrade").is_none());
+        assert!(scan("secret: the real secret is that there is no secret").is_none());
+        // Multi-word key before the colon is a sentence fragment, not an env key.
+        assert!(scan("the password field must accept unicode characters too").is_none());
+    }
+
+    #[test]
+    fn still_flags_real_env_secrets() {
+        // The tightening must not let real token-shaped secrets through.
+        assert!(scan("DB_PASSWORD=Xk29slfjLKJ23oiu").is_some());
+        assert!(scan("password=Xk29slfjLKJ23oiu").is_some());
+    }
+
+    #[test]
+    fn flags_env_secret_with_inline_comment() {
+        // A real `.env` line often has a trailing comment; the token before it is
+        // still a secret and must not slip through the prose whitespace guard.
+        assert!(scan("API_KEY=realbutopaquekey123456 # production").is_some());
+        assert!(scan("PASSWORD=Sup3rS3cr3tValue99 // do not commit").is_some());
+        assert!(scan("DB_PASSWORD=hunter2hunter2  # staging only").is_some());
+    }
+
+    #[test]
+    fn ignores_prose_with_long_first_word() {
+        // No inline-comment marker, so the value stays multi-word and the
+        // whitespace guard rejects it even when the first word is long.
+        assert!(scan("password: rotateThisMonthly please and rotate again").is_none());
+        assert!(scan("secret: authenticateFirstly before touching the cluster").is_none());
+    }
+
+    #[test]
+    fn flags_concatenated_token_keys() {
+        // Single-word env keys (no `_`/`-`) ending in a hint are still real
+        // secrets — the suffix match must accept them, not only snake/kebab.
+        assert!(scan("MYTOKEN=abcdef1234567890abcd").is_some());
+        assert!(scan("userpassword=Xk29slfjLKJ23oiu").is_some());
+        assert!(scan("MYAPIKEY=sk-abcdef1234567890abcd").is_some());
     }
 }

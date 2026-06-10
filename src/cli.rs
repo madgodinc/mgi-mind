@@ -589,6 +589,18 @@ pub enum AuditAction {
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
     Show { id: String },
+    /// "Where did my writes go?" — tally stored vs dropped (near-dup skip,
+    /// quarantine, secret-skip) over the audit log, and show the content of
+    /// the dropped candidates so a "lost memory" is recoverable. The near-dup
+    /// skips are the unrecoverable ones — look there first.
+    Writes {
+        /// Only events newer than this many hours ago (e.g. 168 = last week).
+        #[arg(long, value_name = "HOURS")]
+        since_hours: Option<i64>,
+        /// Show up to this many dropped-candidate snippets (default 20).
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -608,6 +620,10 @@ pub enum QuarantineAction {
     /// usual promotion path is automatic (re-asserting the same content via
     /// ingest); this is the explicit override when you know what you want.
     Promote { id: String },
+    /// Expire (delete) a quarantined entry by id — confirm the gate was right
+    /// to reject it. Only ever touches quarantined points, never live memory,
+    /// and the content + reason stay in the audit log so it's recoverable.
+    Expire { id: String },
 }
 
 #[derive(Subcommand)]
@@ -856,6 +872,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 since_hours,
             } => cmd_audit_list(limit, op.as_deref(), since_hours).await,
             AuditAction::Show { id } => cmd_audit_show(&id).await,
+            AuditAction::Writes { since_hours, limit } => {
+                cmd_audit_writes(since_hours, limit).await
+            }
         },
         Commands::Viewer {
             no_open,
@@ -872,10 +891,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, true).await
         }
-        Commands::ServeHttp {
-            port,
-            agent_tokens,
-        } => {
+        Commands::ServeHttp { port, agent_tokens } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::http_api::run(config, port, agent_tokens).await
@@ -891,6 +907,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             QuarantineAction::Show { id } => cmd_quarantine_show(&id).await,
             QuarantineAction::Promote { id } => cmd_quarantine_promote(&id).await,
+            QuarantineAction::Expire { id } => cmd_quarantine_expire(&id).await,
         },
         Commands::IngestSession { path, library } => cmd_ingest_session(&path, &library).await,
     }
@@ -932,6 +949,22 @@ async fn cmd_quarantine_promote(id: &str) -> Result<()> {
         println!("Promoted '{id}' from quarantine to ordinary memory.");
     } else {
         println!("Nothing to promote — '{id}' is not in quarantine.");
+    }
+    Ok(())
+}
+
+async fn cmd_quarantine_expire(id: &str) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    if crate::storage::expire_from_quarantine(&config, id).await? {
+        println!(
+            "Expired '{id}' — confirmed the gate was right. Removed from quarantine \
+             (content + reason recorded in the audit log first, when audit is enabled)."
+        );
+    } else {
+        println!(
+            "Nothing to expire — '{id}' is not in quarantine. \
+             (Live memory is never touched here; use `mgimind delete` for that.)"
+        );
     }
     Ok(())
 }
@@ -1048,6 +1081,83 @@ async fn cmd_audit_show(id: &str) -> Result<()> {
         print_audit_event(ev);
     }
     println!("\n{} event(s) for '{id}'.", events.len());
+    Ok(())
+}
+
+/// "Where did my writes go?" — read the audit log and tally how ingest
+/// candidates ended up: stored, near-dup-skipped (unrecoverable), quarantined
+/// (recoverable), or secret-skipped. Then print the dropped candidates' content
+/// so a "lost memory" can actually be found. Reads the existing log — works on
+/// the current binary, no restart needed for historical events.
+async fn cmd_audit_writes(since_hours: Option<i64>, limit: usize) -> Result<()> {
+    let cutoff = since_hours.map(|h| chrono::Utc::now() - chrono::Duration::hours(h));
+    let events: Vec<crate::audit::AuditEvent> = crate::audit::load_all()?
+        .into_iter()
+        .filter(|ev| match cutoff {
+            None => true,
+            Some(c) => chrono::DateTime::parse_from_rfc3339(&ev.ts)
+                .map(|dt| dt.with_timezone(&chrono::Utc) >= c)
+                .unwrap_or(false),
+        })
+        .collect();
+
+    use crate::audit::AuditOp;
+    let mut stored = 0usize;
+    let mut dup = 0usize;
+    let mut quar = 0usize;
+    let mut secret = 0usize;
+    // Dropped candidates worth showing, newest last (load_all is append-order).
+    let mut drops: Vec<&crate::audit::AuditEvent> = Vec::new();
+    for ev in &events {
+        match ev.op {
+            // Only the dedicated Ingest op — manual mind_add emits Add and the
+            // quarantine path emits Quarantine, so neither is miscounted as a
+            // genuine ingest store.
+            AuditOp::Ingest => stored += 1,
+            AuditOp::SkipDup => {
+                dup += 1;
+                drops.push(ev);
+            }
+            AuditOp::Quarantine => {
+                quar += 1;
+                drops.push(ev);
+            }
+            AuditOp::SkipSecret => secret += 1,
+            _ => {}
+        }
+    }
+
+    let window = match since_hours {
+        Some(h) => format!("last {h}h"),
+        None => "all time".to_string(),
+    };
+    println!("Write outcomes ({window}):");
+    println!("  stored:          {stored}");
+    println!("  near-dup skip:   {dup}   (UNRECOVERABLE — most likely place a write was lost)");
+    println!("  quarantined:     {quar}   (recoverable: mind_quarantine action=promote)");
+    println!("  secret-skipped:  {secret}   (content intentionally not logged)");
+
+    if drops.is_empty() {
+        println!("\nNo recoverable dropped candidates in this window.");
+        return Ok(());
+    }
+    // Show the most recent `limit` drops with their content.
+    let show_from = drops.len().saturating_sub(limit);
+    println!(
+        "\nDropped candidates (showing {} of {}, newest last):",
+        drops.len() - show_from,
+        drops.len()
+    );
+    for ev in &drops[show_from..] {
+        let op = serde_json::to_string(&ev.op)
+            .unwrap_or_else(|_| "?".into())
+            .trim_matches('"')
+            .to_string();
+        let note = ev.note.as_deref().unwrap_or("");
+        let content = ev.after.as_deref().unwrap_or("(no content recorded)");
+        println!("\n  [{op}] {} — {note}", ev.ts);
+        println!("    {content}");
+    }
     Ok(())
 }
 
@@ -2092,8 +2202,35 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     // 4. Vault status (no plaintext count on disk - audit #26)
     let vault_summary = crate::vault::summary();
 
+    // User-facing libraries to verify against before acting. Drop `_`-prefixed
+    // system namespaces, the `default` catch-all (not a topic the agent can
+    // reason about), and empty ones (advertising a namespace with 0 memories is
+    // noise). Computed up front so the operating rule can name them at the top.
+    let user_libs: Vec<&str> = libraries
+        .iter()
+        .filter(|(n, c)| !n.starts_with('_') && n != "default" && *c > 0)
+        .map(|(n, _)| n.as_str())
+        .collect();
+
     let mut out = String::new();
     let _ = writeln!(out, "=== MGI-Mind Context ===");
+    let _ = writeln!(out);
+    // Operating rule first: this store is the source of truth, verify before
+    // acting. Placed at the top so it anchors the whole injected block instead
+    // of trailing after the data where it gets ignored.
+    let _ = writeln!(out, "[Operating rule]");
+    if user_libs.is_empty() {
+        let _ = writeln!(
+            out,
+            "  This store is your source of truth. Search it (mind_search) before acting on anything about the user's projects, environment, or past decisions. Treat your own recollection as a draft to verify."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  This store is your source of truth. Before acting on anything about [{}], search it first (mind_search) — treat your own recollection as a draft to verify.",
+            user_libs.join(", ")
+        );
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "[Last Session]");
     // Only include the first 10 lines of the session.
@@ -2113,20 +2250,26 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         let _ = writeln!(out, "  {name}: {count} memories");
     }
 
-    // Best-effort retrieval prompt (v0.11). User-facing libraries (those not
-    // prefixed with `_` — system/bench/internal) are the namespaces the agent
-    // should consider searching before answering. Keep this short: it competes
-    // for tokens with the actual conversation, and the MCP `instructions`
-    // already carries the general policy.
-    let user_libs: Vec<&str> = libraries
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .filter(|n| !n.starts_with('_'))
-        .collect();
-    if !user_libs.is_empty() {
+    // Quarantine visibility: if entries are waiting for review, surface the
+    // count broken down by gate reason, so the agent (and the user) can see WHY
+    // the gate set things aside — a one-sided "too_short" pile reads very
+    // differently from a "blacklist_doc" pile. Without this, quarantine is a
+    // black hole: recoverable in theory, never looked at. Zero cost when empty.
+    if let Ok((breakdown, total)) = crate::storage::quarantine_reason_breakdown(config).await
+        && total > 0
+    {
+        let by_reason = breakdown
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(out);
-        let _ = writeln!(out, "[Before answering, consider mind_search in:]");
-        let _ = writeln!(out, "  {}", user_libs.join(", "));
+        let _ = writeln!(
+            out,
+            "[Quarantine: {total} entries set aside ({by_reason}) — \
+             review with mind_quarantine(action=\"list\"), \
+             keep with action=\"promote\", drop with action=\"expire\"]"
+        );
     }
 
     if crate::vault::is_vault_initialized() {
@@ -2844,7 +2987,6 @@ fn spawn_qdrant_detached() -> Result<u32> {
 /// cannot host the page. Idempotent-ish: if the port is already serving, we
 /// just hand back the URL.
 pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
-    use std::os::unix::process::CommandExt;
     const PORT: u16 = 4173; // stable, memorable, unlikely to clash
     let token = uuid::Uuid::new_v4().to_string();
     let url = format!("http://127.0.0.1:{PORT}/?token={token}");
@@ -2868,8 +3010,15 @@ pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
         cmd.arg("--no-open");
     }
     cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0); // detach so it outlives this call
+        .stderr(std::process::Stdio::null());
+    // Detach so the viewer outlives this call. `process_group` is unix-only;
+    // on Windows the child is already independent enough for our purpose, so
+    // we skip it rather than pull in the windows-specific CREATE_NEW_PROCESS_GROUP.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     cmd.spawn().context("Failed to launch the viewer")?;
 
