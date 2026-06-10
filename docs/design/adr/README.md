@@ -15,6 +15,7 @@ Order matters: 0001 is the foundation; 0004 is a reaction to 0003;
 | 0004 | Install-mode profiles with illustrative-only anchors | accepted |
 | 0005 | Superseded distinct from Stale | accepted |
 | 0006 | Derived state lives in droppable side collections | accepted |
+| 0007 | Extractor model choice (Qwen, not Granite or Phi) | accepted |
 
 ## When to write an ADR
 
