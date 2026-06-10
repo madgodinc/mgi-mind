@@ -1224,3 +1224,99 @@ fn relearn_after_delete_does_not_resurrect_stats() {
          stats: {our_block}"
     );
 }
+
+// Concurrency: N writers racing the SAME (subject, predicate) Single axis must
+// converge to exactly ONE visible winner — no two live facts, no torn state.
+//
+// IGNORED because it CURRENTLY FAILS, exposing a real bug: the per-axis write
+// lock (knowledge.rs SUBJECT_PREDICATE_LOCKS) is process-local, so SEPARATE
+// processes racing the same Single axis both read an empty/stale set and both
+// write themselves Active — two live winners on a Single axis. The in-process
+// case (one MCP server, many agents) IS serialized and is covered by the unit
+// tests in knowledge.rs; this cross-process gap needs a data_dir file-lock and
+// is scheduled for circle 2. The test is kept (not deleted) as a live regression
+// marker: when the file-lock lands, remove the `#[ignore]` and it must pass.
+// Facts are vectorless, so this needs only Qdrant, not the model.
+#[ignore = "KNOWN BUG (circle-2): cross-process add_fact races the duel — two Active winners on a Single axis. In-process lock does not span processes; needs a data_dir file-lock."]
+#[test]
+fn concurrent_writes_to_one_axis_converge_to_single_winner() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    let pid = std::process::id();
+    let predicate = format!("conc_pred_{pid}");
+    let subject = format!("conc_subj_{pid}");
+
+    // Register the axis as Single so conflicting objects actually duel.
+    let reg = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_predicate","arguments":{
+                "action":"register","predicate":predicate,"cardinality":"Single"}}}),
+    );
+    let _ = run_mcp(&mind, &ort, &reg);
+
+    // Spawn N concurrent processes, each adding a DISTINCT object to the same axis.
+    let mind = std::sync::Arc::new(mind);
+    let handles: Vec<_> = (0..6)
+        .map(|i| {
+            let mind = std::sync::Arc::clone(&mind);
+            let subject = subject.clone();
+            let predicate = predicate.clone();
+            let ort = ort.clone();
+            std::thread::spawn(move || {
+                Command::new(bin())
+                    .args(["fact", "add", &subject, &predicate, &format!("value_{i}")])
+                    .env("MGIMIND_HOME", &*mind)
+                    .env("ORT_DYLIB_PATH", &ort)
+                    .output()
+                    .expect("spawn mgimind fact add")
+                    .status
+                    .success()
+            })
+        })
+        .collect::<Vec<std::thread::JoinHandle<bool>>>();
+
+    let oks: usize = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok())
+        .filter(|b| *b)
+        .count();
+    assert!(oks >= 1, "at least one concurrent write must succeed");
+
+    // Exactly one visible (Active) fact survives on this axis — the rest are
+    // dampened losers, hidden from default reads.
+    let query = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{"action":"query","subject":subject}}}),
+    );
+    let (stdout, stderr) = run_mcp(&mind, &ort, &query);
+    let results = parse_mcp_results(&stdout);
+    let q = results.get(&2).cloned().unwrap_or((true, String::new()));
+    assert!(!q.0, "query must succeed: {q:?}\n{stderr}");
+
+    // Count how many distinct value_N objects are visible. The Single axis must
+    // show exactly one — concurrent writers did not produce two live winners.
+    let visible = (0..6)
+        .filter(|i| q.1.contains(&format!("value_{i}")))
+        .count();
+    assert_eq!(
+        visible, 1,
+        "exactly one winner must be visible on a Single axis after {oks} concurrent writes, \
+         saw {visible} in:\n{}",
+        q.1
+    );
+}

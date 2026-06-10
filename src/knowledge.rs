@@ -261,6 +261,15 @@ fn fact_id(subject: &str, predicate: &str, object: &str) -> String {
 // existing facts in find_facts_by_subject_predicate, start parallel
 // duels, and write conflicting status flags.
 //
+// SCOPE LIMIT (do not assume more): this lock is PROCESS-LOCAL. It serializes
+// concurrent agents WITHIN ONE process — the primary model (one MCP/serve-http
+// server, many agents). It does NOT serialize SEPARATE processes: two `mgimind`
+// invocations racing the same Single axis can both read an empty/stale set and
+// both write themselves Active (two live winners — an inconsistent Single axis).
+// Closing that needs a data_dir file-lock; it's a known circle-2 gap, pinned by
+// the (ignored) cross-process integration test. See mgi-mind memory note
+// "session-2026-06-10-circle1-pr6-concurrency-bug".
+//
 // Locks are tokio::sync::Mutex<()> so they're hold-across-await safe.
 // The outer map is parking_lot::Mutex (sync; only acquired briefly
 // to look up or insert the per-key Arc); critical section is short.
@@ -1359,5 +1368,65 @@ mod tests {
         let fact_id_b = fact_id("", "primary_language", "");
         assert_ne!(pred_id, fact_id_a);
         assert_ne!(pred_id, fact_id_b);
+    }
+
+    // ---- concurrency: the per-axis write lock (circle 1, axis: concurrency) ----
+    // These pin the invariant that `add_fact` on the SAME (subject, predicate)
+    // serializes — concurrent agents on one in-process server can't race the
+    // duel into two live winners. The end-to-end convergence (across processes,
+    // via deterministic ids) is covered by the integration test.
+
+    #[test]
+    fn same_axis_shares_one_lock_distinct_axes_dont() {
+        // Same (subject, predicate) → the SAME Arc<Mutex>, so two writers on that
+        // axis contend on one lock and serialize. A different subject OR predicate
+        // → a different Arc, so unrelated axes proceed in parallel.
+        let a1 = lock_for_subject_predicate("alice", "lives_in");
+        let a2 = lock_for_subject_predicate("alice", "lives_in");
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "same axis must map to the same lock (serialized)"
+        );
+        let diff_subj = lock_for_subject_predicate("bob", "lives_in");
+        let diff_pred = lock_for_subject_predicate("alice", "works_at");
+        assert!(
+            !Arc::ptr_eq(&a1, &diff_subj),
+            "different subject must map to a different lock (parallel)"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &diff_pred),
+            "different predicate must map to a different lock (parallel)"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_axis_lock_actually_serializes_holders() {
+        // Holding the axis lock must BLOCK a second acquire on the same axis,
+        // while a different axis acquires freely. Proves the Arc is a real
+        // mutual-exclusion gate, not just a shared handle.
+        let key = ("acct", "owner");
+        let lock = lock_for_subject_predicate(key.0, key.1);
+        let held = lock.lock().await;
+
+        // Same axis: a try_lock must fail while we hold it.
+        let same = lock_for_subject_predicate(key.0, key.1);
+        assert!(
+            same.try_lock().is_err(),
+            "second acquire on a held axis must block"
+        );
+
+        // Different axis: acquires immediately, no contention.
+        let other = lock_for_subject_predicate("acct", "balance");
+        assert!(
+            other.try_lock().is_ok(),
+            "a different axis must not be blocked by a held lock"
+        );
+
+        drop(held);
+        // Once released, the same axis is acquirable again.
+        assert!(
+            lock_for_subject_predicate(key.0, key.1).try_lock().is_ok(),
+            "axis lock must be re-acquirable after release"
+        );
     }
 }
