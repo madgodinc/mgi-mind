@@ -33,7 +33,7 @@ impl PulseKind {
         match self {
             PulseKind::Write => "#39d98a",   // green
             PulseKind::Read => "#3aa0ff",    // blue
-            PulseKind::Process => "#ffb020",  // amber
+            PulseKind::Process => "#ffb020", // amber
         }
     }
 }

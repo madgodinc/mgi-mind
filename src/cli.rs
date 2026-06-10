@@ -872,10 +872,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, true).await
         }
-        Commands::ServeHttp {
-            port,
-            agent_tokens,
-        } => {
+        Commands::ServeHttp { port, agent_tokens } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::http_api::run(config, port, agent_tokens).await
@@ -2844,7 +2841,6 @@ fn spawn_qdrant_detached() -> Result<u32> {
 /// cannot host the page. Idempotent-ish: if the port is already serving, we
 /// just hand back the URL.
 pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
-    use std::os::unix::process::CommandExt;
     const PORT: u16 = 4173; // stable, memorable, unlikely to clash
     let token = uuid::Uuid::new_v4().to_string();
     let url = format!("http://127.0.0.1:{PORT}/?token={token}");
@@ -2868,8 +2864,15 @@ pub(crate) async fn run_visualize(open_browser: bool) -> Result<String> {
         cmd.arg("--no-open");
     }
     cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0); // detach so it outlives this call
+        .stderr(std::process::Stdio::null());
+    // Detach so the viewer outlives this call. `process_group` is unix-only;
+    // on Windows the child is already independent enough for our purpose, so
+    // we skip it rather than pull in the windows-specific CREATE_NEW_PROCESS_GROUP.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     cmd.spawn().context("Failed to launch the viewer")?;
 

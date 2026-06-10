@@ -376,8 +376,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             // `agent` is the optional author tag (set by the multi-agent HTTP
             // surface). Absent on the MCP stdio path → unattributed write.
             let author = arg_str(args, "agent");
-            let n = crate::storage::add_memory_authored(cfg, library, content, source, author)
-                .await?;
+            let n =
+                crate::storage::add_memory_authored(cfg, library, content, source, author).await?;
             Ok(format!("Added {n} chunk(s) to '{library}'"))
         }
         "mind_provenance_add" => {
@@ -534,8 +534,8 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let object = arg_str(args, "object")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'object'"))?;
             let author = arg_str(args, "agent");
-            let id =
-                crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author).await?;
+            let id = crate::knowledge::add_fact_authored(cfg, subject, predicate, object, author)
+                .await?;
             Ok(format!(
                 "Fact added: {subject} -> {predicate} -> {object} [id: {id}]"
             ))

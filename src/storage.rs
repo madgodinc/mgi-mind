@@ -699,20 +699,35 @@ pub(crate) async fn existing_payload_string(
 /// procedural success/fail counters.
 pub async fn is_procedure(config: &MindConfig, id: &str) -> Result<bool> {
     let client = get_client(config).await?;
-    Ok(existing_payload_string(&client, MEMORIES_COLLECTION, id, "type").await.as_deref()
-        == Some(TYPE_PROCEDURE))
+    Ok(
+        existing_payload_string(&client, MEMORIES_COLLECTION, id, "type")
+            .await
+            .as_deref()
+            == Some(TYPE_PROCEDURE),
+    )
 }
 
 /// Full payload of one memory core, by id — the lazy "zoom inside the core"
 /// fetch for the graph viewer. Returns the content + metadata fields, or None
 /// if the id is not a memory point.
-pub async fn memory_detail(config: &MindConfig, id: &str) -> Result<Option<HashMap<String, String>>> {
+pub async fn memory_detail(
+    config: &MindConfig,
+    id: &str,
+) -> Result<Option<HashMap<String, String>>> {
     let client = get_client(config).await?;
     Ok(read_point_payload_strings(
         &client,
         MEMORIES_COLLECTION,
         id,
-        &["content", "library", "type", "source", "author", "created_at", "updated_at"],
+        &[
+            "content",
+            "library",
+            "type",
+            "source",
+            "author",
+            "created_at",
+            "updated_at",
+        ],
     )
     .await)
 }
@@ -1438,7 +1453,9 @@ pub async fn search(
     // when no viewer is open (broadcast drops to no subscribers).
     crate::pulse::emit(crate::pulse::PulseEvent::new(
         crate::pulse::PulseKind::Read,
-        library.map(|l| format!("lib:{l}")).unwrap_or_else(|| "search".into()),
+        library
+            .map(|l| format!("lib:{l}"))
+            .unwrap_or_else(|| "search".into()),
         {
             let q: String = query.chars().take(40).collect();
             format!("search: {q}")
@@ -2801,7 +2818,8 @@ pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let key = crate::vault::derive_key_with_salt(passphrase, &salt)
         .context("backup key derivation failed")?;
-    let blob = crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
+    let blob =
+        crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
 
     // magic | salt | nonce+ciphertext
     let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
@@ -2815,8 +2833,8 @@ pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
 
 /// Restore an encrypted backup written by `backup_encrypted`.
 pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
-    let data = std::fs::read(input)
-        .with_context(|| format!("Failed to read encrypted backup {input}"))?;
+    let data =
+        std::fs::read(input).with_context(|| format!("Failed to read encrypted backup {input}"))?;
     if data.len() < BACKUP_MAGIC.len() + 32 {
         anyhow::bail!("Not a valid mgi-mind encrypted backup (too short)");
     }
@@ -2874,7 +2892,14 @@ mod tests {
         );
         // And the payload carries author as a plain field, independent of id.
         let p = build_payload(
-            "shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, Some("agentB"),
+            "shared fact",
+            "h",
+            "t0",
+            "t1",
+            "lib",
+            None,
+            TYPE_MEMORY,
+            Some("agentB"),
         );
         assert_eq!(
             extract_string(&p, "author").as_deref(),
@@ -2882,7 +2907,16 @@ mod tests {
             "author must land in the payload"
         );
         // No author → no key (legacy points stay byte-identical).
-        let p2 = build_payload("shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, None);
+        let p2 = build_payload(
+            "shared fact",
+            "h",
+            "t0",
+            "t1",
+            "lib",
+            None,
+            TYPE_MEMORY,
+            None,
+        );
         assert!(
             extract_string(&p2, "author").is_none(),
             "absent author must not add a payload key"
@@ -2984,10 +3018,8 @@ mod tests {
     fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
         // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
         // (Serial-safe: uses a unique dir; env is set/cleared within the test.)
-        let base = std::env::temp_dir().join(format!(
-            "mgimind-bk-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("mgimind-bk-test-{}", uuid::Uuid::new_v4().simple()));
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let marker = home.join("marker.txt");

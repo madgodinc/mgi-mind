@@ -235,35 +235,53 @@ mod tests {
 
     #[test]
     fn meta_cue_is_p1() {
-        assert_eq!(classify("did I tell you about the plan?", &libs()).priority, Priority::P1);
-        assert_eq!(classify("ты помнишь что мы делали?", &libs()).priority, Priority::P1);
+        assert_eq!(
+            classify("did I tell you about the plan?", &libs()).priority,
+            Priority::P1
+        );
+        assert_eq!(
+            classify("ты помнишь что мы делали?", &libs()).priority,
+            Priority::P1
+        );
     }
 
     #[test]
     fn negation_is_p1() {
-        assert_eq!(classify("isn't it Rust we chose?", &libs()).priority, Priority::P1);
+        assert_eq!(
+            classify("isn't it Rust we chose?", &libs()).priority,
+            Priority::P1
+        );
     }
 
     #[test]
     fn cross_session_is_p1() {
-        assert_eq!(classify("continue like last time", &libs()).priority, Priority::P1);
+        assert_eq!(
+            classify("continue like last time", &libs()).priority,
+            Priority::P1
+        );
     }
 
     #[test]
     fn p2_marker() {
-        assert_eq!(classify("what do you know about my setup", &libs()).priority, Priority::P2);
+        assert_eq!(
+            classify("what do you know about my setup", &libs()).priority,
+            Priority::P2
+        );
     }
 
     #[test]
     fn plain_question_is_p0() {
-        assert_eq!(classify("what is the capital of France?", &libs()).priority, Priority::P0);
+        assert_eq!(
+            classify("what is the capital of France?", &libs()).priority,
+            Priority::P0
+        );
     }
 
     #[test]
     fn word_boundary_avoids_substring_false_positive() {
         // "go" must not match inside "going"; a 2-char lib is below the min anyway,
         // but verify the boundary logic on a real lib name.
-        let a = classify("I am going to the store", &vec!["go".into()]);
+        let a = classify("I am going to the store", &["go".into()]);
         assert_eq!(a.priority, Priority::P0, "substring must not trigger");
     }
 }
