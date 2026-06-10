@@ -146,6 +146,21 @@ pub struct SearchResult {
 /// index built in `ensure_payload_indexes` (`library`/`author`/`source`/`type`
 /// keyword, `created_at` datetime), so filtering runs in-process against the
 /// bundled Qdrant with no full scan and no data leaving the box.
+/// Whether a query sees archived (soft-forgotten) memories. The default
+/// (`Exclude`) is what every search has always done; `Only` is the inventory
+/// path for "show me what was forgotten" (so a memory can be restored without
+/// digging the audit log); `Include` is for completeness tools that want both.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ArchivedScope {
+    /// Hide archived memories (normal search). The default — unchanged behavior.
+    #[default]
+    Exclude,
+    /// Return ONLY archived memories (the "what did I forget" listing).
+    Only,
+    /// Return both archived and live memories.
+    Include,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MemoryFilter {
     /// Restrict to these libraries (OR). Empty = all libraries. Folds in the old
@@ -165,6 +180,9 @@ pub struct MemoryFilter {
     /// `created_before = "2026-06-10"` excludes everything on the 10th, since it
     /// resolves to `2026-06-10T00:00:00Z` and the bound is `< that`.
     pub created_before: Option<String>,
+    /// Whether archived (soft-forgotten) memories are seen. Defaults to `Exclude`
+    /// so every existing caller keeps its behavior unchanged.
+    pub archived: ArchivedScope,
 }
 
 impl MemoryFilter {
@@ -289,18 +307,23 @@ fn memory_query_filter_ex(mf: &MemoryFilter) -> Result<Filter> {
         must_not: vec![
             Condition::matches("type", TYPE_PROCEDURE.to_string()),
             Condition::matches("quarantined", true),
-            // Archived = soft-forgotten cold memory. Hidden from default search
-            // like quarantine, but reversible (restore flips the flag). Legacy
-            // points lack the field, so `must_not archived=true` keeps them
-            // visible. This is in the base set (before the fast-path return) so
-            // EVERY search excludes archived memories.
-            Condition::matches("archived", true),
         ],
         ..Default::default()
     };
 
-    // Fast path: no metadata narrowing, just the base procedure/quarantine/
-    // archived exclusions — the hot search path for the 6 unfiltered callers.
+    // Archived (soft-forgotten) scope. Default `Exclude` hides them like quarantine
+    // (legacy points lack the field, so `must_not archived=true` keeps them
+    // visible). `Only` lists what was forgotten (so it can be restored without
+    // digging the audit log); `Include` returns both.
+    match mf.archived {
+        ArchivedScope::Exclude => f.must_not.push(Condition::matches("archived", true)),
+        ArchivedScope::Only => f.must.push(Condition::matches("archived", true)),
+        ArchivedScope::Include => {}
+    }
+
+    // Fast path: no metadata narrowing beyond the base set — the hot search path
+    // for the 6 unfiltered callers. A non-default archived scope already added a
+    // condition above, so it is NOT empty.
     if mf.is_empty() {
         return Ok(f);
     }
@@ -3750,6 +3773,7 @@ mod tests {
             source: Some("ingest".into()),
             created_since: Some("2026-01-01".into()),
             created_before: Some("2026-12-31".into()),
+            ..Default::default()
         };
         let f = memory_query_filter_ex(&mf).unwrap();
         // base exclusions stay (procedure, quarantined, archived).
@@ -3763,6 +3787,48 @@ mod tests {
             ..Default::default()
         };
         assert!(memory_query_filter_ex(&bad).is_err());
+    }
+
+    #[test]
+    fn archived_scope_flips_the_archived_condition() {
+        // Exclude (default) → archived in must_not (hidden, current behavior).
+        let excl = memory_query_filter_ex(&MemoryFilter::default()).unwrap();
+        assert!(
+            excl.must_not.iter().any(|c| matches!(&c.condition_one_of,
+                    Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(fc))
+                        if fc.key == "archived")),
+            "Exclude must hide archived via must_not"
+        );
+        // Only → archived in must (list ONLY forgotten), NOT in must_not.
+        let only = memory_query_filter_ex(&MemoryFilter {
+            archived: ArchivedScope::Only,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            only.must.iter().any(|c| matches!(&c.condition_one_of,
+                Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(fc))
+                    if fc.key == "archived")),
+            "Only must require archived via must"
+        );
+        assert!(
+            !only.must_not.iter().any(|c| matches!(&c.condition_one_of,
+                Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(fc))
+                    if fc.key == "archived")),
+            "Only must not also exclude archived"
+        );
+        // Include → no archived condition either way (both visible).
+        let incl = memory_query_filter_ex(&MemoryFilter {
+            archived: ArchivedScope::Include,
+            ..Default::default()
+        })
+        .unwrap();
+        let mentions_archived = incl.must.iter().chain(incl.must_not.iter()).any(|c| {
+            matches!(&c.condition_one_of,
+                Some(qdrant_client::qdrant::condition::ConditionOneOf::Field(fc))
+                    if fc.key == "archived")
+        });
+        assert!(!mentions_archived, "Include must not constrain archived");
     }
 
     #[test]
