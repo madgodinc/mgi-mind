@@ -2,6 +2,32 @@
 
 ## Unreleased — v1.7 candidate
 
+### BREAKING (serve-http): structured JSON is the default for read routes
+
+**PR [#45](https://github.com/madgodinc/mgi-mind/pull/45).**
+
+`/memory/search` and `/memory/recall` now return structured JSON by
+default instead of the `{ok, result: "<text>"}` envelope:
+
+- `/memory/search` → `{ok, results: [{id, score, content, library,
+  author, created_at, source}, ...]}`
+- `/memory/recall` → `{ok, facts: [...], memories: [...],
+  procedures_text: "..."}` (silos kept separate; `procedures_text` is a
+  rendered string, the name says so)
+
+The old `result` text field is gone from these two routes under the
+default. A non-Python client that read `.result` must either pass
+`format: "text"` to keep the old rendered envelope, or read the new
+fields. `format` is validated: an unknown value (e.g. `"yaml"`) is a 400,
+not a silent fall-through. The `serve-http` surface is new (landed days
+ago), so the blast radius is near zero; the contract is not frozen while
+the project is pre-1.0, and JSON-by-default is the right shape for the
+agent callers this surface exists for.
+
+The Python client (0.2.0 → 0.3.0) tracks this: `MemoryResult` gains
+`.results` / `.facts` / `.memories` / `.procedures`, is iterable over
+hits, and has `len()`; `str(result)` still yields a prompt-ready block.
+
 ### Fixed: duel rule was silently bypassed at the read path
 
 **Issue [#25](https://github.com/madgodinc/mgi-mind/issues/25) /

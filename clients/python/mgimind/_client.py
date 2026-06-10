@@ -136,7 +136,9 @@ def _parse(resp: httpx.Response) -> MemoryResult:
     if "memories" in data or "facts" in data:
         facts = data.get("facts") or []
         memories = data.get("memories") or []
-        procedures = str(data.get("procedures") or "")
+        # `procedures_text` is a rendered string (procedures have no stable
+        # struct server-side yet); the field name says so.
+        procedures = str(data.get("procedures_text") or "")
         return MemoryResult(
             text=_render_recall(facts, memories, procedures),
             raw=data,

@@ -241,14 +241,25 @@ async fn call(state: &AppState, tool: &str, args: Value) -> Response {
     }
 }
 
-/// Whether the caller wants a structured JSON body for a read route. JSON is the
-/// default — an agent calling over HTTP almost always wants to parse fields, not
-/// a rendered text block. Opt back into the human render with `format: "text"`.
-fn wants_json(args: &Value) -> bool {
-    !matches!(
-        args.get("format").and_then(|v| v.as_str()),
-        Some("text") | Some("render")
-    )
+/// The requested response shape for a read route. `format` is a closed set, so
+/// it is validated with an allow-list: an unknown value (`"yaml"`, a typo like
+/// `"tex"`) is an input error, not a silent fall-through to the default — a
+/// caller asking for text must not get JSON because it misspelled the word.
+#[derive(Debug)]
+enum Format {
+    Json,
+    Text,
+}
+
+/// Resolve the `format` arg. None defaults to JSON (an agent over HTTP wants
+/// fields); `text`/`render` opt into the human block; anything else is rejected.
+/// Returns `Err(unknown_value)` so the caller can 400 with the offending string.
+fn resolve_format(args: &Value) -> Result<Format, String> {
+    match args.get("format").and_then(|v| v.as_str()) {
+        None | Some("json") => Ok(Format::Json),
+        Some("text") | Some("render") => Ok(Format::Text),
+        Some(other) => Err(other.to_string()),
+    }
 }
 
 /// A 400 with the standard `{ok:false, error}` body.
@@ -295,10 +306,13 @@ async fn search_json(state: &AppState, args: &Value) -> Response {
     }
 }
 
-/// `/memory/recall` with `format=json`: a `{facts, memories, procedures}` object.
-/// Mirrors the silos `mind_recall_all` fuses into text, but keeps them separate
-/// so a coordinator can route each. Facts/procedures stay as rendered lines (no
-/// stable struct yet); memories are the structured SearchResult list.
+/// `/memory/recall` with `format=json`: a `{facts, memories, procedures_text}`
+/// object. Mirrors the silos `mind_recall_all` fuses into text, but keeps them
+/// separate so a coordinator can route each. `memories` is the structured
+/// SearchResult list; `facts` is a list of `{subject,predicate,object}`;
+/// `procedures` has no stable struct yet, so it ships as a rendered string under
+/// the deliberately-named `procedures_text` — the name says it is text, not a
+/// structured field, so a parser is never misled about its shape.
 async fn recall_json(state: &AppState, args: &Value) -> Response {
     let (query, _library, limit, _tier) = match read_args(args) {
         Ok(t) => t,
@@ -336,7 +350,7 @@ async fn recall_json(state: &AppState, args: &Value) -> Response {
         "ok": true,
         "facts": facts,
         "memories": memories,
-        "procedures": procedures,
+        "procedures_text": procedures,
     }))
     .into_response()
 }
@@ -375,11 +389,12 @@ async fn memory_search(
     // `format: "json"` (the default for agents) returns the structured
     // SearchResult list — id, score, author, library, created_at — instead of
     // the human-readable text block, so a caller never has to regex-parse the
-    // render. Omitting `format` (or `format: "text"`) keeps the legacy text.
-    if wants_json(&args) {
-        return search_json(&state, &args).await;
+    // render. `format: "text"` keeps the legacy text; an unknown format is a 400.
+    match resolve_format(&args) {
+        Ok(Format::Json) => search_json(&state, &args).await,
+        Ok(Format::Text) => call(&state, "mind_search", args).await,
+        Err(other) => bad_request(&format!("unknown format '{other}' (use 'json' or 'text')")),
     }
-    call(&state, "mind_search", args).await
 }
 
 async fn memory_recall(
@@ -392,13 +407,14 @@ async fn memory_recall(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived, &headers);
-    // Structured recall: a `{facts, memories, procedures}` object so a graph can
-    // route each silo on its own. `format: "text"` falls back to the rendered
-    // block. Unified recall: facts + memories + procedures in one call.
-    if wants_json(&args) {
-        return recall_json(&state, &args).await;
+    // Structured recall: a `{facts, memories, procedures_text}` object so a graph
+    // can route each silo on its own. `format: "text"` falls back to the rendered
+    // block; an unknown format is a 400.
+    match resolve_format(&args) {
+        Ok(Format::Json) => recall_json(&state, &args).await,
+        Ok(Format::Text) => call(&state, "mind_recall_all", args).await,
+        Err(other) => bad_request(&format!("unknown format '{other}' (use 'json' or 'text')")),
     }
-    call(&state, "mind_recall_all", args).await
 }
 
 async fn memory_add(
@@ -593,19 +609,39 @@ fn bind_is_allowed(host: &str, agent_tokens: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_is_allowed, wants_json};
+    use super::{Format, bind_is_allowed, resolve_format};
     use serde_json::json;
 
     #[test]
-    fn json_is_the_default_format() {
-        // No `format` field → structured JSON (the agent default).
-        assert!(wants_json(&json!({ "query": "x" })));
-        assert!(wants_json(&json!({ "query": "x", "format": "json" })));
+    fn format_defaults_to_json_and_rejects_unknown() {
+        // No `format` field, or "json" → structured JSON (the agent default).
+        assert!(matches!(
+            resolve_format(&json!({ "query": "x" })),
+            Ok(Format::Json)
+        ));
+        assert!(matches!(
+            resolve_format(&json!({ "format": "json" })),
+            Ok(Format::Json)
+        ));
         // Opt back into the human render.
-        assert!(!wants_json(&json!({ "query": "x", "format": "text" })));
-        assert!(!wants_json(&json!({ "query": "x", "format": "render" })));
-        // Unknown value falls through to JSON, not text.
-        assert!(wants_json(&json!({ "query": "x", "format": "yaml" })));
+        assert!(matches!(
+            resolve_format(&json!({ "format": "text" })),
+            Ok(Format::Text)
+        ));
+        assert!(matches!(
+            resolve_format(&json!({ "format": "render" })),
+            Ok(Format::Text)
+        ));
+        // Unknown value is an input error, NOT a silent fall-through — a typo
+        // like "tex" must not quietly hand back JSON.
+        assert_eq!(
+            resolve_format(&json!({ "format": "yaml" })).unwrap_err(),
+            "yaml"
+        );
+        assert_eq!(
+            resolve_format(&json!({ "format": "tex" })).unwrap_err(),
+            "tex"
+        );
     }
 
     #[test]
