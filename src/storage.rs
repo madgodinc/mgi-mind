@@ -28,6 +28,11 @@ pub const FACTS_COLLECTION: &str = "_kg_facts";
 /// v1.4: per-predicate cardinality registry (Single / TemporalSingle / Multi).
 /// Lazily created on first cardinality registration; absent predicate = Multi.
 pub const PREDICATES_COLLECTION: &str = "_kg_predicates";
+/// Derived-state side collection (ADR 0006) for procedure outcome stats:
+/// success/fail counts, verified flag, last_used. Vectorless, keyed by the core
+/// procedure point's id. Droppable — recall degrades to "no trust boost" when it
+/// is absent, never errors, never hides a procedure.
+pub const PROCSTATS_COLLECTION: &str = "_mod_procstats";
 
 /// Legacy per-library collection prefix (`mem_<library>`), kept only so
 /// `migrate` can find and import old-layout data.
@@ -435,6 +440,18 @@ async fn create_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
 /// a session, so once we've ensured a collection + its indexes, we skip all of it.
 static MEMORIES_READY: AtomicBool = AtomicBool::new(false);
 static FACTS_READY: AtomicBool = AtomicBool::new(false);
+static PROCSTATS_READY: AtomicBool = AtomicBool::new(false);
+
+/// Idempotently ensure `_mod_procstats` exists, cached per-process so the hot
+/// outcome/learn paths don't pay a Qdrant round-trip on every call.
+async fn ensure_procstats_collection(client: &Qdrant) -> Result<()> {
+    if PROCSTATS_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    create_vectorless_collection(client, PROCSTATS_COLLECTION).await?;
+    PROCSTATS_READY.store(true, Ordering::Release);
+    Ok(())
+}
 
 pub async fn ensure_memories_collection(client: &Qdrant, dim: u64) -> Result<()> {
     if MEMORIES_READY.load(Ordering::Acquire) {
@@ -578,7 +595,47 @@ pub async fn init(config: &MindConfig) -> Result<()> {
 
 // --- Library management -----------------------------------------------------
 
+/// Reserved library names a caller may not create: the internal procedure
+/// namespace, and the collection-name strings (so a `library` tag can't be
+/// confused with an internal collection). Untrusted callers reach this via the
+/// HTTP `/library/create` route, so the guard lives here, not at the CLI.
+const RESERVED_LIBRARY_NAMES: &[&str] = &[
+    PROCEDURE_LIBRARY,
+    MEMORIES_COLLECTION,
+    FACTS_COLLECTION,
+    PREDICATES_COLLECTION,
+    PROCSTATS_COLLECTION,
+];
+
+/// Validate an untrusted library name. Keeps the registry sane (bounded length,
+/// safe charset) and blocks reserved names. A library name is a payload tag, not
+/// a Qdrant collection, so this is hygiene + namespace protection, not a clobber
+/// guard — but it's the right place to stop both.
+fn validate_library_name(name: &str) -> Result<()> {
+    let n = name.trim();
+    if n.is_empty() {
+        anyhow::bail!("library name must not be empty");
+    }
+    if n.chars().count() > 128 {
+        anyhow::bail!("library name too long (max 128 chars)");
+    }
+    if !n
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        anyhow::bail!("library name may only contain [A-Za-z0-9._-]");
+    }
+    if RESERVED_LIBRARY_NAMES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(n))
+    {
+        anyhow::bail!("'{n}' is a reserved library name");
+    }
+    Ok(())
+}
+
 pub async fn create_library(config: &MindConfig, name: &str) -> Result<()> {
+    validate_library_name(name)?;
     if is_registered(name) {
         anyhow::bail!(
             "{}",
@@ -738,6 +795,41 @@ pub async fn memory_detail(
     .await)
 }
 
+/// True if `content` already exists in `library` as a LIVE (non-quarantined)
+/// memory. Because ids are content-addressed, a re-asserted memory lands on the
+/// same id; this lets ingest tell "already kept" apart from "new" so it never
+/// demotes a kept memory into quarantine on a low-novelty re-write. Best-effort:
+/// a fetch failure returns false (treat as "not known live"), never an error
+/// that would abort the write path.
+///
+/// Single-chunk assumption: this checks `deterministic_id(library, trimmed)`,
+/// which only equals a stored point when the content fits in ONE chunk (the
+/// common case for facts/notes). Content longer than `CHUNK_CHARS` is stored as
+/// N per-chunk points with no whole-content id, so this returns false for it —
+/// a long re-assertion is not recognized here (it falls through to the normal
+/// quarantine path). Acceptable: low_novelty rarely fires on long content.
+pub async fn live_memory_exists(config: &MindConfig, library: &str, content: &str) -> bool {
+    let id = deterministic_id(library, content.trim());
+    let Ok(client) = get_client(config).await else {
+        return false;
+    };
+    let pid: qdrant_client::qdrant::PointId = id.into();
+    let Ok(resp) = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid])
+                .with_payload(true),
+        )
+        .await
+    else {
+        return false;
+    };
+    match resp.result.into_iter().next() {
+        // Present and NOT quarantined → it's a live memory we already keep.
+        Some(point) => !extract_bool(&point.payload, "quarantined").unwrap_or(false),
+        None => false,
+    }
+}
+
 /// Edit a memory core's content (the viewer's edit mode). Because point IDs are
 /// content-addressed (`deterministic_id`), changing the text changes the ID — so
 /// an edit is "delete the old point, write the new content" while CARRYING OVER
@@ -880,10 +972,16 @@ pub async fn add_memory_authored(
     ensure_memories_collection(&client, config.vector_size).await?;
     tracing::debug!(library, "add_memory: ensure_memories_collection done");
 
-    // Chunk, dropping trivially short fragments.
+    // Chunk, trimming each fragment and dropping trivially short ones. Trimming
+    // the STORED chunk (not just testing the trimmed length) is what keeps the
+    // content-addressed id trim-stable: `deterministic_id` of a stored chunk then
+    // matches `quarantine_id_for` and `live_memory_exists`, which both trim. Skip
+    // it and a whitespace-padded re-assertion lands on a different id and dodges
+    // the dedup/re-assertion guards entirely.
     let chunks: Vec<String> = chunk_text(content, CHUNK_CHARS)
         .into_iter()
-        .filter(|c| c.trim().chars().count() >= 3)
+        .map(|c| c.trim().to_string())
+        .filter(|c| c.chars().count() >= 3)
         .collect();
     if chunks.is_empty() {
         return Ok(0);
@@ -1926,25 +2024,41 @@ pub struct ProcedureHit {
     pub score: f32,
 }
 
-/// Fetch an existing procedure's preserved fields (counts, created_at, verified)
-/// so a re-learn keeps history instead of resetting it.
+/// Fetch an existing procedure's preserved fields (created_at from the core
+/// point; counts + verified from the derived `_mod_procstats` collection per
+/// ADR 0006) so a re-learn keeps history instead of resetting it. Returns
+/// `(created_at, success_count, fail_count, verified)`.
+///
+/// Upgrade safety: a pre-Step-10 procedure carries its counts on the CORE point
+/// and has no `_mod_procstats` row. Seed from the core fields, then override with
+/// the side row when present — so a re-learn of a legacy procedure preserves its
+/// real history instead of resetting it to zero (then `add_procedure` writes it
+/// back into the side collection, healing it forward).
 async fn existing_procedure(client: &Qdrant, id: &str) -> (Option<String>, i64, i64, bool) {
     let pid: qdrant_client::qdrant::PointId = id.to_string().into();
-    let Ok(resp) = client
+    let (created_at, mut succ, mut fail, mut verified) = match client
         .get_points(GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid]).with_payload(true))
         .await
-    else {
-        return (None, 0, 0, false);
+    {
+        Ok(resp) => match resp.result.into_iter().next() {
+            Some(p) => (
+                extract_string(&p.payload, "created_at"),
+                extract_int(&p.payload, "success_count").unwrap_or(0),
+                extract_int(&p.payload, "fail_count").unwrap_or(0),
+                extract_string(&p.payload, "verified").as_deref() == Some("true"),
+            ),
+            None => (None, 0, 0, false),
+        },
+        Err(_) => (None, 0, 0, false),
     };
-    let Some(point) = resp.result.into_iter().next() else {
-        return (None, 0, 0, false);
-    };
-    (
-        extract_string(&point.payload, "created_at"),
-        extract_int(&point.payload, "success_count").unwrap_or(0),
-        extract_int(&point.payload, "fail_count").unwrap_or(0),
-        extract_string(&point.payload, "verified").as_deref() == Some("true"),
-    )
+    let stats = procstats_one(client, id).await;
+    // The side row, when present, is the live source — it overrides the legacy seed.
+    if stats.success_count != 0 || stats.fail_count != 0 || stats.verified {
+        succ = stats.success_count;
+        fail = stats.fail_count;
+        verified = stats.verified;
+    }
+    (created_at, succ, fail, verified)
 }
 
 /// Store (or update) a procedure. `norm_error` is the already-normalized error
@@ -1963,7 +2077,18 @@ pub async fn add_procedure(
     ensure_memories_collection(&client, config.vector_size).await?;
 
     let id = procedure_id(norm_error, fix);
-    let (existing_created, succ, fail, was_verified) = existing_procedure(&client, &id).await;
+    let (existing_created, mut succ, mut fail, mut was_verified) =
+        existing_procedure(&client, &id).await;
+    // Genuinely-new procedure (no core point at this id): any _mod_procstats row
+    // is a stale orphan from a procedure that was deleted then re-learned with the
+    // same (error, fix). The delete was an explicit "drop this history" signal, so
+    // do not resurrect it — clear the orphan and start fresh.
+    if existing_created.is_none() {
+        delete_procstats(&client, &id).await;
+        succ = 0;
+        fail = 0;
+        was_verified = false;
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let created_at = existing_created.unwrap_or_else(|| now.clone());
 
@@ -1990,16 +2115,10 @@ pub async fn add_procedure(
     if let Some(p) = provenance {
         payload.insert("provenance".into(), p.into());
     }
-    // verified latches: once true (a real signal), a manual re-learn won't unset it.
-    let verified = verified || was_verified;
-    payload.insert(
-        "verified".into(),
-        if verified { "true" } else { "false" }.into(),
-    );
-    payload.insert("success_count".into(), succ.into());
-    payload.insert("fail_count".into(), fail.into());
+    // Derived stats (counts, verified) live in _mod_procstats (ADR 0006), NOT on
+    // this core point. created_at/updated_at are raw lifecycle fields and stay.
     payload.insert("created_at".into(), created_at.into());
-    payload.insert("updated_at".into(), now.into());
+    payload.insert("updated_at".into(), now.clone().into());
 
     client
         .upsert_points(
@@ -2011,6 +2130,31 @@ pub async fn add_procedure(
         )
         .await
         .context("Failed to store procedure")?;
+
+    // verified latches: once a real signal set it true, a manual re-learn won't
+    // unset it. Persist counts + verified to the side collection so a re-learn
+    // preserves history. Only write when there's history to preserve or this
+    // learn carries the verified signal, so a plain manual learn doesn't create
+    // an all-zero stats row.
+    let verified = verified || was_verified;
+    if verified || succ != 0 || fail != 0 {
+        ensure_procstats_collection(&client)
+            .await
+            .context("ensure _mod_procstats")?;
+        let mut stats: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+        stats.insert("success_count".into(), succ.into());
+        stats.insert("fail_count".into(), fail.into());
+        stats.insert(
+            "verified".into(),
+            if verified { "true" } else { "false" }.into(),
+        );
+        stats.insert("last_used".into(), now.into());
+        let spoint = PointStruct::new(id.clone(), NamedVectors::default(), stats);
+        client
+            .upsert_points(UpsertPointsBuilder::new(PROCSTATS_COLLECTION, vec![spoint]).wait(true))
+            .await
+            .context("Failed to persist procedure stats")?;
+    }
     Ok(id)
 }
 
@@ -2077,6 +2221,13 @@ pub async fn recall_procedures(
                 trigger_context: extract_string(p, "trigger_context").unwrap_or_default(),
                 fix: extract_string(p, "fix").unwrap_or_default(),
                 provenance: extract_string(p, "provenance"),
+                // Seed trust signals from LEGACY core-point fields. Post-upgrade
+                // procedures have none here (zeros) and get them from
+                // _mod_procstats below; PRE-upgrade procedures still carry them on
+                // the core point and would otherwise reset to unverified on the
+                // first recall after this change. The side-collection read below
+                // overrides when a row exists, so this is a no-data-loss fallback,
+                // not a second source of truth.
                 verified: extract_string(p, "verified").as_deref() == Some("true"),
                 success_count: extract_int(p, "success_count").unwrap_or(0),
                 fail_count: extract_int(p, "fail_count").unwrap_or(0),
@@ -2084,6 +2235,23 @@ pub async fn recall_procedures(
             }
         })
         .collect();
+
+    // Batch-fetch derived stats for the candidate ids from _mod_procstats. O(k)
+    // by id-set, not a scan. Existence-guarded + default-on-miss. When a row
+    // exists it OVERRIDES the legacy seed (the side collection is the live source
+    // for any procedure touched since the upgrade); when absent, the legacy seed
+    // stands. Dropping the collection leaves post-upgrade procedures at zeros
+    // (degrade, never error) while pre-upgrade ones keep their real historical
+    // counts — neither is a ghost.
+    let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+    let stats = procstats_for(&client, &ids).await;
+    for h in &mut hits {
+        if let Some(s) = stats.get(&h.id) {
+            h.verified = s.verified;
+            h.success_count = s.success_count;
+            h.fail_count = s.fail_count;
+        }
+    }
 
     // Normalize the raw RRF scores into [0,1]. RRF fractions are tiny (~0.016
     // for a rank-0 hit, k=60), so the verified/worked boosts in `rank_score`
@@ -2132,12 +2300,24 @@ pub async fn list_procedures_for_backfill(config: &MindConfig) -> Result<Vec<(St
         let response = client.scroll(builder).await?;
         for point in &response.result {
             let id = point.id.as_ref().map(format_point_id).unwrap_or_default();
+            // Legacy seed from the core point (pre-Step-10 procedures); overridden
+            // below by _mod_procstats for any procedure with stats since.
             let succ = extract_int(&point.payload, "success_count").unwrap_or(0);
             out.push((id, succ));
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
             None => break,
+        }
+    }
+    // Post-Step-10 (ADR 0006) counts live in _mod_procstats; override the legacy
+    // core-point seed so this backfill isn't half-blind to procedures touched
+    // since the move. Existence-guarded — absent collection leaves the seed.
+    let ids: Vec<String> = out.iter().map(|(id, _)| id.clone()).collect();
+    let stats = procstats_for(&client, &ids).await;
+    for (id, succ) in &mut out {
+        if let Some(s) = stats.get(id) {
+            *succ = s.success_count;
         }
     }
     Ok(out)
@@ -2280,35 +2460,133 @@ pub async fn write_external_signals(
 /// error-learning loop: a green test after a mind_learn fix marks that playbook
 /// trustworthy so recall surfaces it first. Without it, every recorded fix
 /// stayed unverified forever and never ranked above noise.
+/// Derived outcome stats for one procedure (ADR 0006). Lives in
+/// `_mod_procstats`, not on the core procedure point. `Default` is the
+/// degrade-on-miss value: zero counts, unverified — so a dropped collection
+/// ranks every procedure by relevance alone, never errors.
+#[derive(Debug, Clone, Default)]
+pub struct ProcStats {
+    pub success_count: i64,
+    pub fail_count: i64,
+    pub verified: bool,
+}
+
+/// Read stats for a set of procedure ids from `_mod_procstats`. Existence-guarded
+/// and default-on-miss: if the collection was dropped, or an id has no row, that
+/// id maps to `ProcStats::default()`. This is the read pattern ADR 0006's
+/// toggle-test depends on — a bare get_points on a missing collection would error.
+pub async fn procstats_for(
+    client: &Qdrant,
+    ids: &[String],
+) -> std::collections::HashMap<String, ProcStats> {
+    let mut out = std::collections::HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    // Dropped/never-created collection → everything defaults. Never an error.
+    if !client
+        .collection_exists(PROCSTATS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return out;
+    }
+    let pids: Vec<qdrant_client::qdrant::PointId> =
+        ids.iter().map(|i| i.to_string().into()).collect();
+    let Ok(resp) = client
+        .get_points(GetPointsBuilder::new(PROCSTATS_COLLECTION, pids).with_payload(true))
+        .await
+    else {
+        return out;
+    };
+    for point in resp.result {
+        let Some(id) = point.id.as_ref().map(format_point_id) else {
+            continue;
+        };
+        out.insert(
+            id,
+            ProcStats {
+                success_count: extract_int(&point.payload, "success_count").unwrap_or(0),
+                fail_count: extract_int(&point.payload, "fail_count").unwrap_or(0),
+                verified: extract_string(&point.payload, "verified").as_deref() == Some("true"),
+            },
+        );
+    }
+    out
+}
+
+/// Read stats for a single procedure id (convenience over `procstats_for`).
+async fn procstats_one(client: &Qdrant, id: &str) -> ProcStats {
+    procstats_for(client, std::slice::from_ref(&id.to_string()))
+        .await
+        .remove(id)
+        .unwrap_or_default()
+}
+
+/// Best-effort delete of a procedure's derived stats row (ADR 0006 orphan
+/// cleanup). Silent on a missing collection or a failed delete — an orphan stats
+/// row for a deleted procedure is never read, so this must never fail a delete.
+async fn delete_procstats(client: &Qdrant, id: &str) {
+    if !client
+        .collection_exists(PROCSTATS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let _ = client
+        .delete_points(
+            DeletePointsBuilder::new(PROCSTATS_COLLECTION)
+                .points(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await;
+}
+
 pub async fn procedure_outcome(
     config: &MindConfig,
     id: &str,
     worked: bool,
     verify: bool,
 ) -> Result<()> {
-    use qdrant_client::qdrant::SetPayloadPointsBuilder;
     let client = get_client(config).await?;
-    let (_, succ, fail, _) = existing_procedure(&client, id).await;
+    // Stats are derived state: they live in _mod_procstats, not on the core
+    // procedure point (ADR 0006). Read the current counts from there, bump, and
+    // upsert back — so dropping the side collection drops the trust signal
+    // cleanly without touching the procedure itself.
+    ensure_procstats_collection(&client)
+        .await
+        .context("ensure _mod_procstats")?;
+    let cur = procstats_one(&client, id).await;
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
-    if worked {
-        payload.insert("success_count".into(), (succ + 1).into());
-        if verify {
-            payload.insert("verified".into(), "true".into());
-        }
+    // Carry both counts every time so the row is self-contained (a later read
+    // of a single field doesn't depend on a prior partial upsert).
+    let succ = if worked {
+        cur.success_count + 1
     } else {
-        payload.insert("fail_count".into(), (fail + 1).into());
-    }
+        cur.success_count
+    };
+    let fail = if worked {
+        cur.fail_count
+    } else {
+        cur.fail_count + 1
+    };
+    payload.insert("success_count".into(), succ.into());
+    payload.insert("fail_count".into(), fail.into());
+    // verified latches true once a real signal sets it.
+    let verified = cur.verified || (worked && verify);
+    payload.insert(
+        "verified".into(),
+        if verified { "true" } else { "false" }.into(),
+    );
     payload.insert("last_used".into(), now.into());
 
-    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let point = PointStruct::new(id.to_string(), NamedVectors::default(), payload);
     client
-        .set_payload(
-            SetPayloadPointsBuilder::new(MEMORIES_COLLECTION, payload)
-                .points_selector(PointsIdsList { ids: vec![pid] })
-                .wait(true),
-        )
+        .upsert_points(UpsertPointsBuilder::new(PROCSTATS_COLLECTION, vec![point]).wait(true))
         .await
         .context("Failed to record procedure outcome")?;
     Ok(())
@@ -2337,6 +2615,12 @@ pub async fn delete_memory(config: &MindConfig, _library: &str, id: &str) -> Res
         )
         .await
         .context("Failed to delete memory")?;
+
+    // Best-effort: drop any derived stats row for this id (ADR 0006 orphan
+    // cleanup). A procedure carries one; a plain memory carries none, so this is
+    // a no-op there. Non-fatal — an orphaned stats row is never read for a
+    // missing procedure, so a failure here must not fail the delete.
+    delete_procstats(&client, id).await;
 
     let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, _library, id);
     if let Some(content) = before {
@@ -3025,6 +3309,39 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_library_name_accepts_sane_and_rejects_bad() {
+        // Good names pass.
+        for ok in ["projects", "my-lib", "lib_2", "a.b.c", "Personal"] {
+            assert!(validate_library_name(ok).is_ok(), "{ok} should be valid");
+        }
+        // Empty / whitespace-only.
+        assert!(validate_library_name("").is_err());
+        assert!(validate_library_name("   ").is_err());
+        // Over-long.
+        assert!(validate_library_name(&"x".repeat(129)).is_err());
+        // Illegal chars (path separators, spaces, control).
+        for bad in ["a/b", "a b", "a\tb", "../etc", "name;drop"] {
+            assert!(
+                validate_library_name(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        // Reserved names (case-insensitive) — the namespace-protection guard.
+        for reserved in [
+            "_procedures",
+            "memories",
+            "_kg_facts",
+            "_mod_procstats",
+            "MEMORIES",
+        ] {
+            assert!(
+                validate_library_name(reserved).is_err(),
+                "{reserved} must be reserved"
+            );
+        }
+    }
 
     #[test]
     fn deterministic_id_is_stable_and_content_addressed() {

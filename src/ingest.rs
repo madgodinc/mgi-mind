@@ -71,6 +71,10 @@ pub struct IngestReport {
     /// Existing quarantined point promoted to normal memory because the user
     /// re-asserted it (the loop-breaker the critic flagged).
     pub promoted: usize,
+    /// Candidate that is already stored as a LIVE memory (same content, same id).
+    /// Re-asserting it is a no-op — counted here, NOT as a store, so the tally
+    /// stays honest about what was actually written.
+    pub reasserted: usize,
 }
 
 impl IngestReport {
@@ -107,6 +111,12 @@ impl IngestReport {
             s.push_str(&format!(
                 "\nPromoted {} quarantined entry/entries on re-assertion.",
                 self.promoted
+            ));
+        }
+        if self.reasserted > 0 {
+            s.push_str(&format!(
+                "\nRe-asserted {} already-stored memory/memories (kept live, no new write).",
+                self.reasserted
             ));
         }
         s
@@ -294,6 +304,27 @@ pub async fn run_ingest_authored(
                         .unwrap_or(false)
                     {
                         report.promoted += 1;
+                        continue;
+                    }
+                    // Re-assertion of an ALREADY-LIVE memory: same content, same
+                    // id, already kept. Quarantining here would CLOBBER the live
+                    // point (quarantine_id == deterministic_id) and demote a
+                    // memory the user clearly wants — the "re-write loses my
+                    // memory" bug. Treat it as the no-op it is: it's already
+                    // stored, leave it live. Counted as `reasserted` (not a store)
+                    // and audited so Step 6's "where did writes go" stays truthful.
+                    if crate::storage::live_memory_exists(config, library, &content).await {
+                        report.reasserted += 1;
+                        let id = crate::storage::quarantine_id_for(library, content.trim());
+                        crate::audit::record(
+                            crate::audit::AuditEvent::new(
+                                crate::audit::AuditOp::Update,
+                                library.to_string(),
+                                id,
+                            )
+                            .actor("ingest")
+                            .note("re-assertion of live memory (no-op, kept live)"),
+                        );
                         continue;
                     }
                     // Otherwise, quarantine the candidate (write with the flag,
