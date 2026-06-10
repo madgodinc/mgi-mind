@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mgi-mind"
+dynamic = ["version"]
+description = "Python client for mgi-mind, a local long-term memory server for AI assistants and agents."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "Mad God Inc" }]
+keywords = ["memory", "llm", "agents", "rag", "mcp", "long-term-memory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["httpx>=0.24"]
+
+[project.urls]
+Homepage = "https://github.com/madgodinc/mgi-mind"
+Repository = "https://github.com/madgodinc/mgi-mind"
+Issues = "https://github.com/madgodinc/mgi-mind/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["mgimind"]
+
+[tool.setuptools.package-data]
+mgimind = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mgimind.__version__" }
