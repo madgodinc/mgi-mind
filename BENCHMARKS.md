@@ -530,8 +530,10 @@ answerer and a judge. Scenarios come in two types: **T1 (co-referential)**, wher
 the same entity's attribute is updated, and **T2 (propagated)**, where an update
 to one fact should cascade to a dependent one. Each scenario is graded on three
 behaviours: State Resolution (SR), Premise Resistance (PR), Implicit Policy
-Adaptation (IPA). Overall is the macro-average of the per-type scores, per STALE
-§3.1, so it lines up with the published baseline table.
+Adaptation (IPA). A scenario passes only when all three are true (scenario-level,
+not the per-cell average). Per-type score = the fraction of that type's scenarios
+that pass all three; Overall is the macro-average of the two per-type scores, per
+STALE §3.1, so it lines up with the published baseline table.
 
 ### Two pre-judge layers (deterministic, no LLM)
 
@@ -558,10 +560,22 @@ A partial run over the **full 400-scenario distribution**, N = 155 completed
 | T2 (propagated) | 108 | 26% | 39% | 35% | 52% |
 | **Overall** | **155** | **~32% macro / ~30% micro** | — | — | — |
 
-Overall is the macro-average (T1+T2)/2 per STALE §3.1, for comparability with
-the baseline table. The N-weighted micro-average is ~30%; macro is the headline
-only because the baselines are reported as macro, not because it's the higher of
-the two. Both are stated so neither looks picked.
+Overall is the macro-average (T1+T2)/2 per STALE §3.1, for comparability with the
+baseline table. The N-weighted micro-average is ~30%; macro is the headline only
+because the baselines are reported as macro, not because it's the higher of the
+two. Both are stated so neither looks picked. The per-type cells (SR/PR/IPA) are
+shown for detail, but the per-type Overall is the stricter all-three-pass figure,
+which is why it can be lower than the individual cells.
+
+The raw per-scenario verdicts are committed at
+`benchmark/results/2026-06-08-stale-partial-n155/` with a script that reproduces
+this table from them, so the number is checkable, not hand-typed.
+
+**Reproducibility caveat:** this run was produced by `bench_stale::run` on the
+`stale-extraction-optimization` branch (the working cloud-extract → answerer →
+judge pipeline). On `main`, `bench_stale::run` is still a scaffold. So the number
+is real and reproduces from the saved data, but it was **not** produced by the
+code currently on `main`. Landing the working harness on main is the open task.
 
 Config: `--llm-extract --backbone gemini-flash-latest --judge gemini-flash-latest
 --haystack reduced --window 2 --focused`, cross-axis adjudicator on. The run was
@@ -600,6 +614,13 @@ full-haystack, full-distribution numbers graded with the paper's own judge. The
   real one.
 - **Different metric from recall.** Do not compare STALE Overall with the R@k
   numbers above; they measure different things.
+- **The mechanism under test may have been broken during this run.** The duel
+  rule (the thing STALE exercises) was silently broken from v1.4 to v1.6 (two
+  contradicting facts both stayed Active, no audit event) and fixed close to this
+  run's date. So 32% may have been measured before supersession worked end to end
+  on every scenario. A re-run through the fixed mechanism could move the number;
+  until then, read this as a floor taken on a partially-working mechanism, not the
+  mechanism's ceiling.
 
 The STALE harness adapter is still being finished (the grading loop is wired but
 not yet a one-command run). The next step is completing N = 400 and, per the
