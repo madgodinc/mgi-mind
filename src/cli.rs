@@ -902,6 +902,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             port,
             agent_tokens,
         } => {
+            // serve-http needs Qdrant up to answer any memory call. The MCP loop
+            // starts it on warm-up; do the same here so `serve-http` works on its
+            // own (and inside a container, where nothing else launches Qdrant).
+            ensure_qdrant_running().await?;
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::http_api::run(config, &host, port, agent_tokens).await
