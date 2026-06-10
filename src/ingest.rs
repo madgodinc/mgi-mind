@@ -38,8 +38,14 @@ const NOVELTY_NEIGHBORS: u64 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Candidate {
-    /// An ordinary note to store in `library`.
-    Memory { content: String },
+    /// An ordinary note to store in `library`. An optional `source` tags where
+    /// it came from (a URL, a session id); it falls back to "ingest" when
+    /// absent, so a later `source=` browse/search filter can find it.
+    Memory {
+        content: String,
+        #[serde(default)]
+        source: Option<String>,
+    },
     /// A knowledge-graph triple.
     Fact {
         subject: String,
@@ -178,7 +184,10 @@ pub fn extract_heuristic(raw: &str) -> Vec<Candidate> {
         if let Some(content) = memory
             && content.len() >= 4
         {
-            out.push(Candidate::Memory { content });
+            out.push(Candidate::Memory {
+                content,
+                source: None,
+            });
         }
     }
     out
@@ -224,7 +233,10 @@ pub async fn run_ingest_authored(
 
     for cand in candidates {
         match cand {
-            Candidate::Memory { content } => {
+            Candidate::Memory { content, source } => {
+                // Per-candidate source tag, falling back to "ingest" so existing
+                // behavior is unchanged when none is given.
+                let src: &str = source.as_deref().unwrap_or("ingest");
                 if let Some(hit) = crate::secrets::scan(&content) {
                     report.skipped_secret += 1;
                     let label = hit.reason;
@@ -250,7 +262,10 @@ pub async fn run_ingest_authored(
                 // user-loop the critic flagged.
                 let rcand = crate::relevance::Candidate {
                     content: &content,
-                    source: Some("ingest"),
+                    // Use the candidate's real source (not a hardcoded "ingest")
+                    // so the relevance gate judges it by where it actually came
+                    // from, consistent with how it's stored.
+                    source: Some(src),
                     tool_name: None,
                 };
                 let cheap_verdict = crate::relevance::check_cheap(&rcand, &gate_cfg);
@@ -335,7 +350,7 @@ pub async fn run_ingest_authored(
                         config,
                         library,
                         &content,
-                        Some("ingest"),
+                        Some(src),
                         &reason,
                     )
                     .await?;
@@ -375,7 +390,7 @@ pub async fn run_ingest_authored(
                     config,
                     library,
                     &content,
-                    Some("ingest"),
+                    Some(src),
                     author,
                 )
                 .await?;
@@ -461,7 +476,8 @@ mod tests {
         assert_eq!(
             c,
             vec![Candidate::Memory {
-                content: "the staging DB is Postgres 16.".into()
+                content: "the staging DB is Postgres 16.".into(),
+                source: None,
             }]
         );
     }
@@ -472,7 +488,8 @@ mod tests {
         assert_eq!(
             c,
             vec![Candidate::Memory {
-                content: "Always run tests before pushing.".into()
+                content: "Always run tests before pushing.".into(),
+                source: None,
             }]
         );
     }
@@ -489,7 +506,19 @@ mod tests {
         assert_eq!(
             m,
             Candidate::Memory {
-                content: "hi".into()
+                content: "hi".into(),
+                source: None,
+            }
+        );
+        // A per-candidate source tag round-trips and is carried to the store.
+        let s: Candidate =
+            serde_json::from_str(r#"{"type":"memory","content":"hi","source":"docs.example.com"}"#)
+                .unwrap();
+        assert_eq!(
+            s,
+            Candidate::Memory {
+                content: "hi".into(),
+                source: Some("docs.example.com".into()),
             }
         );
         let f: Candidate = serde_json::from_str(
