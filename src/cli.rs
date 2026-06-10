@@ -695,6 +695,10 @@ pub enum FactAction {
         /// instead of the current facts.
         #[arg(long)]
         history: bool,
+        /// Point-in-time: show the facts that were CURRENT at this instant
+        /// (RFC3339 or YYYY-MM-DD), time-travelling the superseded chain.
+        #[arg(long)]
+        as_of: Option<String>,
     },
     /// Invalidate a fact
     Invalidate {
@@ -839,7 +843,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 predicate,
                 object,
             } => cmd_fact_add(&subject, &predicate, &object).await,
-            FactAction::Query { subject, history } => cmd_fact_query(&subject, history).await,
+            FactAction::Query {
+                subject,
+                history,
+                as_of,
+            } => cmd_fact_query(&subject, history, as_of.as_deref()).await,
             FactAction::Invalidate { id } => cmd_fact_invalidate(&id).await,
         },
         Commands::Session { action } => match action {
@@ -2597,16 +2605,29 @@ pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> S
     let mut out = String::new();
     for f in facts {
         let _ = writeln!(out, "  {} -> {} -> {}", f.subject, f.predicate, f.object);
-        if let Some(ts) = &f.created_at {
-            let _ = writeln!(out, "    added: {ts}");
+        // Show the validity interval so `valid_until` is visible (a superseded
+        // fact reads as [created .. valid_until), an active one as [created ..]).
+        match (&f.created_at, &f.valid_until) {
+            (Some(from), Some(until)) => {
+                let _ = writeln!(out, "    valid: {from} .. {until}");
+            }
+            (Some(from), None) => {
+                let _ = writeln!(out, "    valid: {from} .. (current)");
+            }
+            (None, Some(until)) => {
+                let _ = writeln!(out, "    valid: until {until}");
+            }
+            (None, None) => {}
         }
     }
     out.trim_end().to_string()
 }
 
-async fn cmd_fact_query(subject: &str, history: bool) -> Result<()> {
+async fn cmd_fact_query(subject: &str, history: bool, as_of: Option<&str>) -> Result<()> {
     let config = crate::config::load_cached()?;
-    let facts = if history {
+    let facts = if let Some(at) = as_of {
+        crate::knowledge::query_fact_as_of(&config, subject, None, at).await?
+    } else if history {
         crate::knowledge::query_fact_history(&config, subject, None).await?
     } else {
         crate::knowledge::query_facts(&config, subject).await?

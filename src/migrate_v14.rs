@@ -591,6 +591,7 @@ mod tests {
                 predicate: "primary_language".into(),
                 object: "Rust".into(),
                 created_at: None,
+                valid_until: None,
                 valid: true,
             },
             Fact {
@@ -599,6 +600,7 @@ mod tests {
                 predicate: "primary_language".into(),
                 object: "Python".into(),
                 created_at: None,
+                valid_until: None,
                 valid: true,
             },
             Fact {
@@ -607,6 +609,7 @@ mod tests {
                 predicate: "uses_language".into(),
                 object: "Rust".into(),
                 created_at: None,
+                valid_until: None,
                 valid: true,
             },
             Fact {
@@ -615,6 +618,7 @@ mod tests {
                 predicate: "uses_language".into(),
                 object: "Go".into(),
                 created_at: None,
+                valid_until: None,
                 valid: true,
             },
         ];
