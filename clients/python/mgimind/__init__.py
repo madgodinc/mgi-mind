@@ -13,7 +13,7 @@ The server (the Rust binary + Qdrant + local models) is installed separately; se
 the README. This package is the client.
 """
 
-from ._client import Memory, MemoryResult, MgiMindError
+from ._client import AsyncMemory, Memory, MemoryResult, MgiMindError
 
-__all__ = ["Memory", "MemoryResult", "MgiMindError"]
-__version__ = "0.1.0"
+__all__ = ["Memory", "AsyncMemory", "MemoryResult", "MgiMindError"]
+__version__ = "0.2.0"
