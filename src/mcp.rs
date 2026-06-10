@@ -594,7 +594,11 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let cfg = warm(true)?;
             let subject = arg_str(args, "subject")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'subject'"))?;
-            let facts = crate::knowledge::query_facts(cfg, subject).await?;
+            let facts = if arg_bool(args, "history", false) {
+                crate::knowledge::query_fact_history(cfg, subject, None).await?
+            } else {
+                crate::knowledge::query_facts(cfg, subject).await?
+            };
             Ok(crate::cli::render_facts(subject, &facts))
         }
 
@@ -912,7 +916,15 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                     let cfg = warm(true)?;
                     let subject = arg_str(args, "subject")
                         .ok_or_else(|| anyhow::anyhow!("action=query requires 'subject'"))?;
-                    let facts = crate::knowledge::query_facts(cfg, subject).await?;
+                    // history=true surfaces the superseded TemporalSingle chain
+                    // (past-but-once-true values, oldest first) instead of the
+                    // current facts — the reader that distinguishes superseded
+                    // from stale.
+                    let facts = if arg_bool(args, "history", false) {
+                        crate::knowledge::query_fact_history(cfg, subject, None).await?
+                    } else {
+                        crate::knowledge::query_facts(cfg, subject).await?
+                    };
                     Ok(crate::cli::render_facts(subject, &facts))
                 }
                 "invalidate" => {
@@ -1463,7 +1475,8 @@ fn tool_definitions() -> Vec<Value> {
                     "subject": { "type": "string", "description": "Required for add/query" },
                     "predicate": { "type": "string", "description": "Required for add" },
                     "object": { "type": "string", "description": "Required for add" },
-                    "id": { "type": "string", "description": "Required for invalidate (from action=query)" }
+                    "id": { "type": "string", "description": "Required for invalidate (from action=query)" },
+                    "history": { "type": "boolean", "description": "With action=query: return the SUPERSEDED history (past TemporalSingle values, oldest first) instead of current facts" }
                 },
                 "required": ["action"]
             }

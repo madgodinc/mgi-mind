@@ -352,7 +352,7 @@ pub async fn add_fact_authored(
     // Run the duel scaffold only when there's an actual contradiction.
     // detect_conflict already filters re-assertions of the same object
     // and Multi predicates.
-    let (status, loser_to_dampen) =
+    let (status, loser_to_retire) =
         if cardinality.admits_conflict() && detect_conflict(&existing, object, cardinality) {
             // Phase 2 v0: a brand-new fact has no diversity history yet, so
             // we treat it as a single live observation with no external
@@ -374,6 +374,17 @@ pub async fn add_fact_authored(
                 crate::duel::resolve_against_existing(config, &existing, new_inputs, cardinality)
                     .await?;
             match outcome {
+                // A Flip unseats the old value. HOW the loser is retired depends
+                // on cardinality:
+                //   * TemporalSingle — the old value was correct AT ITS TIME and
+                //     is part of a historical sequence, so it is SUPERSEDED
+                //     (kept as queryable history, hidden from default reads).
+                //   * Single — there is no temporal history; the old value is
+                //     simply stale (dampened). Same hidden-from-default effect.
+                // This is the write-path half of audit #13: a plain `fact_add`
+                // of a new TemporalSingle value now records the prior value as
+                // `superseded`, instead of leaving it `stale` with no history
+                // distinction.
                 crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
                 crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
                 // Quarantine: the duel says the fresh fact is too weak to
@@ -416,14 +427,18 @@ pub async fn add_fact_authored(
     // speeds up after a burst of additions.
     crate::doubt::record_edit();
 
-    // Phase 2 step 2.3: if the duel produced a Flip, dampen the loser
-    // *after* the winner is in the store. Doing it after the upsert
+    // Phase 2 step 2.3: if the duel produced a Flip, retire the loser
+    // *after* the winner is in the store (dampen → stale for Single,
+    // supersede → history for TemporalSingle). Doing it after the upsert
     // means the read of `find_facts_by_subject_predicate` always sees
-    // either the new winner alone (after dampening) or both temporarily
-    // (between upsert and dampen) — never a state where the loser is
-    // dampened but the winner isn't yet recorded.
-    if let Some(loser_id) = loser_to_dampen {
-        crate::duel::dampen_loser(config, &loser_id).await?;
+    // either the new winner alone (after retiring) or both temporarily
+    // (between upsert and retire) — never a state where the loser is
+    // retired but the winner isn't yet recorded.
+    // Retire the loser by cardinality: TemporalSingle -> superseded (history),
+    // Single -> stale. One shared helper, also used by the consolidate batch, so
+    // the mapping isn't re-derived per call site.
+    if let Some(loser_id) = loser_to_retire {
+        crate::duel::retire_loser(config, cardinality, &loser_id).await?;
     }
 
     Ok(id)
@@ -505,6 +520,81 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         }
     }
 
+    Ok(facts)
+}
+
+/// The TEMPORAL HISTORY of a subject: its `superseded` facts — values that were
+/// once current and were displaced by a newer TemporalSingle value — oldest
+/// first. This is the reader that gives `superseded` a meaning distinct from
+/// `stale`: a stale fact lost a contradiction and is gone; a superseded fact is
+/// a past-but-once-true entry in a timeline, surfaced here and only here.
+/// Default `query_facts` still hides both. Optionally narrow to one predicate.
+pub async fn query_fact_history(
+    config: &MindConfig,
+    subject: &str,
+    predicate: Option<&str>,
+) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut must = vec![
+        Condition::matches("subject", subject.to_string()),
+        Condition::matches("status", EntryStatus::Superseded.as_str().to_string()),
+    ];
+    if let Some(p) = predicate {
+        must.push(Condition::matches("predicate", p.to_string()));
+    }
+    let filter = Filter {
+        must,
+        ..Default::default()
+    };
+
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            facts.push(Fact {
+                id: point
+                    .id
+                    .as_ref()
+                    .map(storage::format_point_id)
+                    .unwrap_or_default(),
+                subject: extract_string(p, "subject").unwrap_or_default(),
+                predicate: extract_string(p, "predicate").unwrap_or_default(),
+                object: extract_string(p, "object").unwrap_or_default(),
+                created_at: extract_string(p, "created_at"),
+                valid: true,
+            });
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    // Oldest first: a timeline reads forward in time. Missing created_at sorts
+    // last (legacy facts predate the field).
+    facts.sort_by(|a, b| match (&a.created_at, &b.created_at) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
     Ok(facts)
 }
 

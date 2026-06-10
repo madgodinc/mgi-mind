@@ -887,6 +887,87 @@ fn duel_rule_dampens_loser_on_single_cardinality() {
     );
 }
 
+// TemporalSingle: a new value flips the old one out of default reads, AND the
+// old value is retired as `superseded` history (a real reader distinguishes it
+// from `stale`). PR-3, circle 1, write-path half of audit #13. The behavioural
+// difference is asserted: the prior value is HIDDEN in a default query but
+// VISIBLE in a `history` query — something a plain `dampen_loser` (stale) would
+// NOT give, since the history reader filters on status=superseded.
+#[test]
+fn temporal_single_supersedes_prior_value() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    let pid = std::process::id();
+    let predicate = format!("tsingle_test_pred_{pid}");
+    let subject = format!("tsingle_test_subj_{pid}");
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_predicate","arguments":{
+                "action":"register","predicate":predicate,"cardinality":"TemporalSingle"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"Berlin"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"Munich"}}}),
+        // id 5: default query — Munich visible, Berlin hidden.
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject}}}),
+        // id 6: history query — Berlin (the superseded prior value) visible.
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject,"history":true}}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+    let results = parse_mcp_results(&stdout);
+    let query = results
+        .get(&5)
+        .cloned()
+        .unwrap_or_else(|| (true, String::new()));
+    let history = results
+        .get(&6)
+        .cloned()
+        .unwrap_or_else(|| (true, String::new()));
+    let chain = format!("default: {query:?}\nhistory: {history:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!query.0, "default query must succeed: {chain}");
+    assert!(
+        query.1.contains("Munich"),
+        "the new TemporalSingle value must be visible in default query: {chain}"
+    );
+    assert!(
+        !query.1.contains("Berlin"),
+        "the prior value must be hidden from default reads: {chain}"
+    );
+    // The behavioural payoff of superseded-vs-stale: the prior value IS
+    // retrievable via history (a stale/dampened loser would NOT be — the history
+    // reader filters status=superseded).
+    assert!(!history.0, "history query must succeed: {chain}");
+    assert!(
+        history.1.contains("Berlin"),
+        "the superseded prior value must be visible in history query: {chain}"
+    );
+    assert!(
+        !history.1.contains("Munich"),
+        "the current value must NOT appear in history (only superseded entries): {chain}"
+    );
+}
+
 #[test]
 fn multi_cardinality_allows_coexistence() {
     let Some(port) = qdrant_port() else {

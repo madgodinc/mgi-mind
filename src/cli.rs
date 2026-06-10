@@ -674,7 +674,13 @@ pub enum FactAction {
         object: String,
     },
     /// Query facts about a subject
-    Query { subject: String },
+    Query {
+        subject: String,
+        /// Show the SUPERSEDED history (past TemporalSingle values, oldest first)
+        /// instead of the current facts.
+        #[arg(long)]
+        history: bool,
+    },
     /// Invalidate a fact
     Invalidate {
         /// Fact ID
@@ -810,7 +816,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 predicate,
                 object,
             } => cmd_fact_add(&subject, &predicate, &object).await,
-            FactAction::Query { subject } => cmd_fact_query(&subject).await,
+            FactAction::Query { subject, history } => cmd_fact_query(&subject, history).await,
             FactAction::Invalidate { id } => cmd_fact_invalidate(&id).await,
         },
         Commands::Session { action } => match action {
@@ -1676,13 +1682,8 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
 
         if apply {
             for l in losers {
-                match card {
-                    Cardinality::Single => crate::duel::dampen_loser(&config, &l.id).await?,
-                    Cardinality::TemporalSingle => {
-                        crate::duel::mark_superseded(&config, &l.id).await?
-                    }
-                    Cardinality::Multi => unreachable!(),
-                }
+                // Shared with the write path (add_fact): one card->status mapping.
+                crate::duel::retire_loser(&config, *card, &l.id).await?;
             }
         }
     }
@@ -2553,9 +2554,13 @@ pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> S
     out.trim_end().to_string()
 }
 
-async fn cmd_fact_query(subject: &str) -> Result<()> {
+async fn cmd_fact_query(subject: &str, history: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
-    let facts = crate::knowledge::query_facts(&config, subject).await?;
+    let facts = if history {
+        crate::knowledge::query_fact_history(&config, subject, None).await?
+    } else {
+        crate::knowledge::query_facts(&config, subject).await?
+    };
     println!("{}", render_facts(subject, &facts));
     Ok(())
 }
