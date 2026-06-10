@@ -1190,7 +1190,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_recall",
-            "description": "Recall error->fix playbooks for an error and/or a task context. Verified procedures rank first; fixes that have failed before are demoted.",
+            "description": "Recall error->fix playbooks for an error and/or a task context. Ranking blends relevance with trust: a verified or proven fix gets a boost, a repeatedly-failing one is demoted, but a strongly-matching unverified fix still surfaces.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
