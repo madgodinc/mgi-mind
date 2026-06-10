@@ -371,6 +371,12 @@ async fn ensure_payload_indexes(client: &Qdrant, collection: &str) {
         // `author` (keyword) so a multi-agent deployment can scope "what did
         // agent X contribute". Legacy points lack the field and are unaffected.
         ("author", FieldType::Keyword),
+        // `quarantined` (bool) so the `must_not quarantined` filter on every
+        // search and the quarantine count don't degrade to a full payload scan.
+        ("quarantined", FieldType::Bool),
+        // `quarantine_reason` (keyword) so the per-reason breakdown in the
+        // context digest counts each reason without a payload scan.
+        ("quarantine_reason", FieldType::Keyword),
     ] {
         tracing::debug!(collection, field, "ensure_payload_index: start");
         match client
@@ -699,20 +705,35 @@ pub(crate) async fn existing_payload_string(
 /// procedural success/fail counters.
 pub async fn is_procedure(config: &MindConfig, id: &str) -> Result<bool> {
     let client = get_client(config).await?;
-    Ok(existing_payload_string(&client, MEMORIES_COLLECTION, id, "type").await.as_deref()
-        == Some(TYPE_PROCEDURE))
+    Ok(
+        existing_payload_string(&client, MEMORIES_COLLECTION, id, "type")
+            .await
+            .as_deref()
+            == Some(TYPE_PROCEDURE),
+    )
 }
 
 /// Full payload of one memory core, by id — the lazy "zoom inside the core"
 /// fetch for the graph viewer. Returns the content + metadata fields, or None
 /// if the id is not a memory point.
-pub async fn memory_detail(config: &MindConfig, id: &str) -> Result<Option<HashMap<String, String>>> {
+pub async fn memory_detail(
+    config: &MindConfig,
+    id: &str,
+) -> Result<Option<HashMap<String, String>>> {
     let client = get_client(config).await?;
     Ok(read_point_payload_strings(
         &client,
         MEMORIES_COLLECTION,
         id,
-        &["content", "library", "type", "source", "author", "created_at", "updated_at"],
+        &[
+            "content",
+            "library",
+            "type",
+            "source",
+            "author",
+            "created_at",
+            "updated_at",
+        ],
     )
     .await)
 }
@@ -1011,8 +1032,11 @@ pub async fn add_quarantined(
         .await
         .context("Failed to quarantine candidate")?;
 
+    // Use the dedicated Quarantine op (not Add) so the "where did writes go"
+    // tally can tell a quarantined candidate apart from a real store — this is
+    // the only audit event for a quarantine, content + reason included.
     crate::audit::record(
-        crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, &id)
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::Quarantine, library, &id)
             .actor("relevance-gate")
             .after(truncate_for_audit(trimmed))
             .note(format!("quarantined: {reason}")),
@@ -1065,6 +1089,67 @@ pub async fn promote_from_quarantine(config: &MindConfig, id: &str) -> Result<bo
             .actor("relevance-gate")
             .note("promoted from quarantine (re-asserted)"),
     );
+    Ok(true)
+}
+
+/// Expire (delete) a quarantined entry — the explicit "yes, the gate was right
+/// to reject this" verb. Guarded: it only deletes a point that is ACTUALLY
+/// quarantined, so this surface can never remove a live memory (that stays the
+/// job of `delete_memory`). The audit entry keeps the original
+/// `quarantine_reason` and a content snapshot, so an accidental expire is
+/// recoverable from the log and the reason becomes a real negative-label
+/// signal about which gate rule fired. Returns false if the id is unknown or
+/// the point is not quarantined.
+pub async fn expire_from_quarantine(config: &MindConfig, id: &str) -> Result<bool> {
+    let client = get_client(config).await?;
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(
+            qdrant_client::qdrant::GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid.clone()])
+                .with_payload(true),
+        )
+        .await
+        .context("Failed to fetch quarantine candidate")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(false);
+    };
+    if !extract_bool(&point.payload, "quarantined").unwrap_or(false) {
+        // Not quarantined — refuse, so this can't be used to delete live memory.
+        return Ok(false);
+    }
+    let library = extract_string(&point.payload, "library").unwrap_or_default();
+    let reason = extract_string(&point.payload, "quarantine_reason").unwrap_or_default();
+    let content = extract_string(&point.payload, "content").unwrap_or_default();
+
+    // Record the audit event (with the content snapshot already in hand) BEFORE
+    // the delete, so a deletion is never left unrecorded — the verb advertises
+    // recoverability, so the record has to land first.
+    let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::Delete, library, id)
+        .actor("relevance-gate")
+        .note(format!("expired from quarantine (reason: {reason})"));
+    if !content.is_empty() {
+        ev = ev.before(truncate_for_audit(&content));
+    }
+    crate::audit::record(ev);
+
+    // Delete conditional on (this id AND still quarantined), not a bare id, so a
+    // concurrent promote between the fetch above and here can't make us delete a
+    // now-live point (closes the TOCTOU window at zero extra round-trip).
+    let guarded = Filter {
+        must: vec![
+            Condition::has_id(vec![pid]),
+            Condition::matches("quarantined", true),
+        ],
+        ..Default::default()
+    };
+    client
+        .delete_points(
+            DeletePointsBuilder::new(MEMORIES_COLLECTION)
+                .points(guarded)
+                .wait(true),
+        )
+        .await
+        .context("Failed to expire quarantined entry")?;
     Ok(true)
 }
 
@@ -1188,6 +1273,71 @@ pub async fn quarantine_list(
 ) -> Result<Vec<QuarantineEntry>> {
     let page = quarantine_list_page(config, library, limit, None).await?;
     Ok(page.entries)
+}
+
+/// How many memories are quarantined right now. Used by `mind_context` to make
+/// the quarantine surface visible (otherwise it is a black hole no agent ever
+/// checks). Best-effort: 0 on any error so context-building never fails.
+pub async fn quarantine_count(config: &MindConfig) -> Result<u64> {
+    let client = get_client(config).await?;
+    let filter = Filter {
+        must: vec![Condition::matches("quarantined", true)],
+        ..Default::default()
+    };
+    let resp = client
+        .count(
+            qdrant_client::qdrant::CountPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(filter)
+                .exact(true),
+        )
+        .await
+        .context("quarantine count")?;
+    Ok(resp.result.map(|r| r.count).unwrap_or(0))
+}
+
+/// Count quarantined entries grouped by gate reason. Returns `(reason, count)`
+/// pairs sorted by count descending, omitting zero-count reasons, plus a final
+/// `("other", n)` pair when some quarantined points carry a reason outside the
+/// canonical `relevance::KNOWN_REASONS` set (so nothing is silently dropped from
+/// the tally). Each reason is an exact Qdrant count — bounded (≈8 cheap queries),
+/// not a full scan. `total` is returned separately so callers don't re-count.
+pub async fn quarantine_reason_breakdown(config: &MindConfig) -> Result<(Vec<(String, u64)>, u64)> {
+    let client = get_client(config).await?;
+    let total = quarantine_count(config).await?;
+    if total == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let mut counts: Vec<(String, u64)> = Vec::new();
+    let mut known_sum = 0u64;
+    for reason in crate::relevance::KNOWN_REASONS {
+        let filter = Filter {
+            must: vec![
+                Condition::matches("quarantined", true),
+                Condition::matches("quarantine_reason", reason.to_string()),
+            ],
+            ..Default::default()
+        };
+        let resp = client
+            .count(
+                qdrant_client::qdrant::CountPointsBuilder::new(MEMORIES_COLLECTION)
+                    .filter(filter)
+                    .exact(true),
+            )
+            .await
+            .with_context(|| format!("quarantine count for reason {reason}"))?;
+        let n = resp.result.map(|r| r.count).unwrap_or(0);
+        if n > 0 {
+            counts.push((reason.to_string(), n));
+            known_sum += n;
+        }
+    }
+    counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    // Anything quarantined with a reason we don't enumerate (or none at all)
+    // lands in "other" so the breakdown always reconciles with `total`.
+    if total > known_sum {
+        counts.push(("other".to_string(), total - known_sum));
+    }
+    Ok((counts, total))
 }
 
 /// Fetch a single quarantined entry with full (untruncated) content. Returns
@@ -1438,7 +1588,9 @@ pub async fn search(
     // when no viewer is open (broadcast drops to no subscribers).
     crate::pulse::emit(crate::pulse::PulseEvent::new(
         crate::pulse::PulseKind::Read,
-        library.map(|l| format!("lib:{l}")).unwrap_or_else(|| "search".into()),
+        library
+            .map(|l| format!("lib:{l}"))
+            .unwrap_or_else(|| "search".into()),
         {
             let q: String = query.chars().take(40).collect();
             format!("search: {q}")
@@ -1864,8 +2016,8 @@ pub async fn add_procedure(
 
 /// Recall procedures matching an error signature and/or a task context. `norm_error`
 /// (already normalized) drives the sparse/lexical arm; `context` drives the dense/
-/// semantic arm. Returns raw hits with ranking signals; the caller orders them
-/// (verified first, then by success vs fail). Pure retrieval - no mutation.
+/// semantic arm. Returns hits with [0,1]-normalized scores + ranking signals;
+/// the caller orders them by combined relevance + trust. Pure retrieval - no mutation.
 pub async fn recall_procedures(
     config: &MindConfig,
     norm_error: Option<&str>,
@@ -1914,7 +2066,7 @@ pub async fn recall_procedures(
         .await
         .context("Procedure recall failed")?;
 
-    Ok(response
+    let mut hits: Vec<ProcedureHit> = response
         .result
         .into_iter()
         .map(|point| {
@@ -1931,7 +2083,20 @@ pub async fn recall_procedures(
                 score: point.score,
             }
         })
-        .collect())
+        .collect();
+
+    // Normalize the raw RRF scores into [0,1]. RRF fractions are tiny (~0.016
+    // for a rank-0 hit, k=60), so the verified/worked boosts in `rank_score`
+    // (tuned for a [0,1] base) would otherwise dwarf relevance and turn the
+    // weighted rank back into a hard verified-first gate. Min-max within the
+    // returned set keeps relevance and the boosts on the same scale.
+    let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max);
+    if max > 0.0 {
+        for h in &mut hits {
+            h.score /= max;
+        }
+    }
+    Ok(hits)
 }
 
 /// Scroll all procedures (memories with `type=procedure`) for Phase 1.3
@@ -2107,9 +2272,20 @@ pub async fn write_external_signals(
 /// Record the outcome of reusing a procedure: bump success or fail count and
 /// stamp `last_used`. A failure (`worked = false`) raises fail_count so recall
 /// can demote a fix that stopped working - the store self-corrects instead of
-/// ossifying on a bad playbook. Manual success does NOT set `verified` (that
-/// needs a deterministic signal, not a human "seems fine").
-pub async fn procedure_outcome(config: &MindConfig, id: &str, worked: bool) -> Result<()> {
+/// ossifying on a bad playbook.
+///
+/// `verify` promotes the procedure to `verified = true` on a successful
+/// outcome. Pass it ONLY for a deterministic signal (a passing test, a clean
+/// compile) - never for a human "seems fine". This is what closes the
+/// error-learning loop: a green test after a mind_learn fix marks that playbook
+/// trustworthy so recall surfaces it first. Without it, every recorded fix
+/// stayed unverified forever and never ranked above noise.
+pub async fn procedure_outcome(
+    config: &MindConfig,
+    id: &str,
+    worked: bool,
+    verify: bool,
+) -> Result<()> {
     use qdrant_client::qdrant::SetPayloadPointsBuilder;
     let client = get_client(config).await?;
     let (_, succ, fail, _) = existing_procedure(&client, id).await;
@@ -2118,6 +2294,9 @@ pub async fn procedure_outcome(config: &MindConfig, id: &str, worked: bool) -> R
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     if worked {
         payload.insert("success_count".into(), (succ + 1).into());
+        if verify {
+            payload.insert("verified".into(), "true".into());
+        }
     } else {
         payload.insert("fail_count".into(), (fail + 1).into());
     }
@@ -2801,7 +2980,8 @@ pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let key = crate::vault::derive_key_with_salt(passphrase, &salt)
         .context("backup key derivation failed")?;
-    let blob = crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
+    let blob =
+        crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
 
     // magic | salt | nonce+ciphertext
     let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
@@ -2815,8 +2995,8 @@ pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
 
 /// Restore an encrypted backup written by `backup_encrypted`.
 pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
-    let data = std::fs::read(input)
-        .with_context(|| format!("Failed to read encrypted backup {input}"))?;
+    let data =
+        std::fs::read(input).with_context(|| format!("Failed to read encrypted backup {input}"))?;
     if data.len() < BACKUP_MAGIC.len() + 32 {
         anyhow::bail!("Not a valid mgi-mind encrypted backup (too short)");
     }
@@ -2874,7 +3054,14 @@ mod tests {
         );
         // And the payload carries author as a plain field, independent of id.
         let p = build_payload(
-            "shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, Some("agentB"),
+            "shared fact",
+            "h",
+            "t0",
+            "t1",
+            "lib",
+            None,
+            TYPE_MEMORY,
+            Some("agentB"),
         );
         assert_eq!(
             extract_string(&p, "author").as_deref(),
@@ -2882,7 +3069,16 @@ mod tests {
             "author must land in the payload"
         );
         // No author → no key (legacy points stay byte-identical).
-        let p2 = build_payload("shared fact", "h", "t0", "t1", "lib", None, TYPE_MEMORY, None);
+        let p2 = build_payload(
+            "shared fact",
+            "h",
+            "t0",
+            "t1",
+            "lib",
+            None,
+            TYPE_MEMORY,
+            None,
+        );
         assert!(
             extract_string(&p2, "author").is_none(),
             "absent author must not add a payload key"
@@ -2984,10 +3180,8 @@ mod tests {
     fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
         // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
         // (Serial-safe: uses a unique dir; env is set/cleared within the test.)
-        let base = std::env::temp_dir().join(format!(
-            "mgimind-bk-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("mgimind-bk-test-{}", uuid::Uuid::new_v4().simple()));
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let marker = home.join("marker.txt");

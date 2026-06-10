@@ -50,11 +50,7 @@ struct AppState {
 
 /// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
 /// `name:token` pairs; when empty, one anonymous token is generated.
-pub async fn run(
-    config: MindConfig,
-    port: Option<u16>,
-    agent_tokens: Vec<String>,
-) -> Result<()> {
+pub async fn run(config: MindConfig, port: Option<u16>, agent_tokens: Vec<String>) -> Result<()> {
     let mut tokens: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     let mut generated: Option<String> = None;
@@ -124,9 +120,7 @@ pub async fn run(
         eprintln!("  auth:   per-agent tokens — identity DERIVED from the bearer token");
         eprintln!("  agents: {agent_names}");
     }
-    eprintln!(
-        "  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add"
-    );
+    eprintln!("  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add");
     eprintln!("          POST /session/{{start,end,last}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
@@ -319,7 +313,12 @@ async fn memory_by_agent(
 
 /// Inject `action` and resolve the agent (body > token/header) into the args,
 /// then dispatch `mind_session`.
-fn session_call_args(mut args: Value, action: &str, headers: &HeaderMap, derived: Option<String>) -> Value {
+fn session_call_args(
+    mut args: Value,
+    action: &str,
+    headers: &HeaderMap,
+    derived: Option<String>,
+) -> Value {
     if let Value::Object(map) = &mut args {
         map.insert("action".to_string(), Value::String(action.to_string()));
         // Explicit body `agent` wins (coordinator resuming a named agent);
@@ -341,7 +340,12 @@ async fn session_start(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    call(&state, "mind_session", session_call_args(args, "start", &headers, derived)).await
+    call(
+        &state,
+        "mind_session",
+        session_call_args(args, "start", &headers, derived),
+    )
+    .await
 }
 
 async fn session_end(
@@ -353,7 +357,12 @@ async fn session_end(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    call(&state, "mind_session", session_call_args(args, "end", &headers, derived)).await
+    call(
+        &state,
+        "mind_session",
+        session_call_args(args, "end", &headers, derived),
+    )
+    .await
 }
 
 async fn session_last(
@@ -365,7 +374,12 @@ async fn session_last(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    call(&state, "mind_session", session_call_args(args, "last", &headers, derived)).await
+    call(
+        &state,
+        "mind_session",
+        session_call_args(args, "last", &headers, derived),
+    )
+    .await
 }
 
 /// Per-agent read activity since the server started. The write side is already
@@ -376,11 +390,8 @@ async fn stats_activity(State(state): State<AppState>, headers: HeaderMap) -> Re
     if let Err(c) = check_auth(&state, &headers) {
         return c.into_response();
     }
-    let reads: std::collections::HashMap<String, u64> = state
-        .reads
-        .lock()
-        .map(|m| m.clone())
-        .unwrap_or_default();
+    let reads: std::collections::HashMap<String, u64> =
+        state.reads.lock().map(|m| m.clone()).unwrap_or_default();
     Json(json!({ "ok": true, "reads_by_agent": reads })).into_response()
 }
 

@@ -450,7 +450,9 @@ async fn api_graph(
     let mut edges: Vec<serde_json::Value> = Vec::new();
 
     // --- entity cores + fact neurons ---
-    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let facts = crate::knowledge::list_all_facts(cfg)
+        .await
+        .map_err(internal)?;
     let mut entities: Vec<String> = Vec::new();
     for f in &facts {
         if !f.valid {
@@ -469,15 +471,17 @@ async fn api_graph(
     }
 
     // --- library + memory cores, holds + mention neurons ---
-    let libs = crate::storage::list_libraries(cfg).await.map_err(internal)?;
+    let libs = crate::storage::list_libraries(cfg)
+        .await
+        .map_err(internal)?;
     for lib in &libs {
         if lib.starts_with('_') {
             continue;
         }
         let lib_id = format!("lib:{lib}");
-        nodes.entry(lib_id.clone()).or_insert_with(|| {
-            serde_json::json!({ "id": lib_id, "label": lib, "kind": "library" })
-        });
+        nodes.entry(lib_id.clone()).or_insert_with(
+            || serde_json::json!({ "id": lib_id, "label": lib, "kind": "library" }),
+        );
         let mems = crate::storage::list_memories(cfg, lib, per_lib)
             .await
             .unwrap_or_default();
@@ -566,7 +570,9 @@ async fn api_node(
     }
 
     // Otherwise treat it as an entity: the facts it participates in.
-    let facts = crate::knowledge::list_all_facts(cfg).await.map_err(internal)?;
+    let facts = crate::knowledge::list_all_facts(cfg)
+        .await
+        .map_err(internal)?;
     let related: Vec<serde_json::Value> = facts
         .iter()
         .filter(|f| f.valid && (f.subject == id || f.object == id))
@@ -602,7 +608,9 @@ async fn api_edit_node(
     let new_id = crate::storage::edit_memory(&state.config, mem_id, content)
         .await
         .map_err(internal)?;
-    Ok(Json(serde_json::json!({ "ok": true, "id": format!("mem:{new_id}") })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "id": format!("mem:{new_id}") }),
+    ))
 }
 
 /// Live pulse feed (SSE). Each `data:` line is a `PulseEvent` JSON: an impulse
