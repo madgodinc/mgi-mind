@@ -41,6 +41,12 @@ pub struct Options {
     /// Also DELETE cold memories (requires `apply`). Off by default - pruning real
     /// data is opt-in.
     pub prune_cold: bool,
+    /// ARCHIVE cold memories instead of deleting (requires `apply`): hide them
+    /// from default search but keep them restorable. Off by default. The safe,
+    /// reversible forgetting path — prefer this over `prune_cold` when you want
+    /// to forget without destroying. If both are set, archive wins (the
+    /// non-destructive choice takes precedence).
+    pub archive_cold: bool,
 }
 
 impl Options {
@@ -48,7 +54,11 @@ impl Options {
         if self.near_dup_threshold <= 0.0 {
             self.near_dup_threshold = 0.97;
         }
-        if self.decay_days <= 0 {
+        // Only a NEGATIVE decay_days is "unset"; an explicit 0 means "everything
+        // with zero accesses is cold" (a real intent, e.g. archive-all-unused).
+        // Callers that want the default pass it explicitly; the CLI default is
+        // 180 via clap, the preview callers (MCP/viewer) pass 180 directly.
+        if self.decay_days < 0 {
             self.decay_days = 180;
         }
         self
@@ -62,6 +72,7 @@ pub struct Report {
     pub near_dups_removed: usize,
     pub cold_candidates: usize,
     pub cold_pruned: usize,
+    pub cold_archived: usize,
     pub applied: bool,
 }
 
@@ -201,14 +212,18 @@ pub async fn run(config: &MindConfig, opts: Options) -> Result<Report> {
     }
     report.cold_candidates = cold.len();
 
-    // Apply: delete merged duplicates, and cold memories only if explicitly asked.
+    // Apply: delete merged duplicates always; for cold memories, ARCHIVE
+    // (reversible) takes precedence over PRUNE (destructive) when both are set,
+    // so a flag mix never silently deletes what the user meant to archive.
     if opts.apply {
-        let mut to_delete: Vec<String> = removed.iter().cloned().collect();
-        if opts.prune_cold {
-            report.cold_pruned = cold.len();
-            to_delete.extend(cold);
-        }
+        let to_delete: Vec<String> = removed.iter().cloned().collect();
         storage::delete_memories(config, &to_delete).await?;
+        if opts.archive_cold {
+            report.cold_archived = storage::archive_memories(config, &cold).await?;
+        } else if opts.prune_cold {
+            report.cold_pruned = cold.len();
+            storage::delete_memories(config, &cold).await?;
+        }
         // Persist any in-memory access counts before we finish.
         crate::access::flush();
     }
@@ -267,6 +282,16 @@ mod tests {
     fn defaults_fill_in() {
         let o = Options::default().with_defaults();
         assert_eq!(o.near_dup_threshold, 0.97);
-        assert_eq!(o.decay_days, 180);
+        // decay_days: only a NEGATIVE value is "unset" and filled to 180. An
+        // explicit 0 (and Options::default()'s 0) is honored as "0 days = all
+        // zero-access memories are cold" — so callers wanting the 180 default
+        // pass it explicitly (CLI clap default, MCP/viewer literals).
+        assert_eq!(o.decay_days, 0, "an explicit/zero decay_days is kept as 0");
+        let filled = Options {
+            decay_days: -1,
+            ..Default::default()
+        }
+        .with_defaults();
+        assert_eq!(filled.decay_days, 180, "a negative decay_days fills to 180");
     }
 }

@@ -77,6 +77,13 @@ pub enum AuditOp {
     /// doubt window. `before` = old confidence_score, `after` = new.
     /// `note` = "recover_from_doubt".
     RetestRecover,
+    /// A cold memory was soft-forgotten (archived): hidden from search but
+    /// retained and restorable. `note` = why (e.g. "cold: consolidate"). The
+    /// reversible counterpart to Delete — kept for traceability so a restore is
+    /// answerable from the log.
+    Archive,
+    /// An archived memory was restored to search. `target` = the memory id.
+    Restore,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
@@ -246,6 +253,8 @@ fn emit_pulse(event: &AuditEvent) {
         | AuditOp::RetestRecover
         | AuditOp::SkipDup
         | AuditOp::Quarantine
+        | AuditOp::Archive
+        | AuditOp::Restore
         | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)

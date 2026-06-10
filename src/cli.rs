@@ -104,6 +104,12 @@ pub enum Commands {
         id: String,
     },
 
+    /// Restore an archived (soft-forgotten) memory by id, returning it to search
+    RestoreMemory {
+        /// Memory ID (from `consolidate --archive-cold` output or the audit log)
+        id: String,
+    },
+
     /// Generate compact context briefing for AI session start
     Context,
 
@@ -374,6 +380,11 @@ pub enum Commands {
         /// Also DELETE cold memories (requires --apply; off by default)
         #[arg(long)]
         prune_cold: bool,
+        /// ARCHIVE cold memories instead of deleting (requires --apply): hide
+        /// them from search but keep them restorable with `mgimind restore <id>`.
+        /// The reversible forgetting path; wins over --prune-cold if both given.
+        #[arg(long)]
+        archive_cold: bool,
     },
     /// Inspect the audit log of mutations (add/update/delete/library/etc).
     /// Read-only — the log itself is append-only and never edited by hand.
@@ -807,6 +818,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Commands::Delete { library, id } => cmd_delete(&library, &id).await,
+        Commands::RestoreMemory { id } => cmd_restore_memory(&id).await,
         Commands::Context => cmd_context().await,
         Commands::History { limit } => cmd_history(limit).await,
         Commands::Web { url, save } => cmd_web(&url, save.as_deref()).await,
@@ -938,6 +950,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             near_dup_threshold,
             decay_days,
             prune_cold,
+            archive_cold,
         } => {
             cmd_consolidate(crate::consolidate::Options {
                 apply,
@@ -945,6 +958,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 near_dup_threshold,
                 decay_days,
                 prune_cold,
+                archive_cold,
             })
             .await
         }
@@ -1407,6 +1421,16 @@ async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
     let config = crate::config::load_cached()?;
     let apply = opts.apply;
     let prune_cold = opts.prune_cold;
+    let archive_cold = opts.archive_cold;
+    // Make the non-destructive precedence LOUD: a user who passes both expects
+    // deletion but gets a (reversible) archive — say so, don't let them find out
+    // only by reading the report's cold_pruned=0 line.
+    if prune_cold && archive_cold {
+        eprintln!(
+            "note: both --prune-cold and --archive-cold given; archiving (reversible) wins — \
+             nothing is deleted. Drop --archive-cold to actually delete.\n"
+        );
+    }
     if !apply {
         println!("Consolidation DRY-RUN (no changes). Re-run with --apply to act.\n");
     }
@@ -1418,9 +1442,14 @@ async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
     if apply {
         let removed = r.exact_dups_removed + r.near_dups_removed + r.cold_pruned;
         println!("\nApplied: removed {removed} memories.");
-        if r.cold_candidates > 0 && !prune_cold {
+        if r.cold_archived > 0 {
             println!(
-                "Kept {} cold entries (pass --prune-cold to delete them too).",
+                "Archived {} cold entries (hidden from search, restore with `mgimind restore <id>`).",
+                r.cold_archived
+            );
+        } else if r.cold_candidates > 0 && !prune_cold && !archive_cold {
+            println!(
+                "Kept {} cold entries (pass --archive-cold to hide reversibly, or --prune-cold to delete).",
                 r.cold_candidates
             );
         }
@@ -1429,6 +1458,16 @@ async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
             "\nWould remove {} duplicate(s) with --apply.",
             r.exact_dups_removed + r.near_dups_removed
         );
+    }
+    Ok(())
+}
+
+async fn cmd_restore_memory(id: &str) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    if crate::storage::restore_memory(&config, id).await? {
+        println!("Restored '{id}' from archive — it is back in search.");
+    } else {
+        println!("Nothing to restore — '{id}' is not an archived memory.");
     }
     Ok(())
 }
