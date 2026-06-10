@@ -61,6 +61,33 @@ Every example targets the live HTTP server above; it assumes `MGIMIND_URL` and
 `OPENAI_API_KEY`) is present. They are illustrations, not a maintained package.
 Copy the dozen lines you need.
 
+## The HTTP surface
+
+An HTTP-only agent reaches the same memory an MCP agent does. Every route takes
+a bearer token; reads and non-destructive writes are exposed, destructive/bulk
+tools (delete, export, import-apply, vault, `consolidate --apply`) stay CLI-only.
+
+| Route | Does |
+|-------|------|
+| `POST /memory/search` | semantic search, with metadata filters |
+| `POST /memory/browse` | list by metadata, no query (inventory) |
+| `POST /memory/recall` | facts + memories + procedures in one call |
+| `POST /memory/add` `/memory/ingest` | write |
+| `POST /memory/by-agent` | what one agent wrote |
+| `POST /fact/add` `/fact/query` `/fact/invalidate` | knowledge-graph triples |
+| `POST /procedure/learn` `/procedure/recall` | error→fix playbooks |
+| `POST /library/create` `/library/list` | library namespaces |
+| `POST /quarantine/list` `/quarantine/promote` | relevance-gate recovery |
+| `POST /consolidate` | dedup/decay preview (dry-run) |
+| `POST /session/start` `/end` `/last` `/context` | continuity |
+
+Search and browse return structured JSON by default; pass `format: "text"` for a
+rendered block. See [`raw_http.py`](./raw_http.py) for the request shape.
+
+Outbound fetch (`mind_web`) and destructive ops (delete, export, vault,
+`consolidate --apply`) stay CLI/MCP-only by design: a token-gated loopback fetch
+would make the server an SSRF deputy, and an HTTP agent has its own network.
+
 ## Why no per-framework package
 
 The brain is universal on purpose. A framework adapter would be a thin shim over

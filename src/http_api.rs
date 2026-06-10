@@ -113,10 +113,19 @@ pub async fn run(
         .route("/memory/ingest", post(memory_ingest))
         .route("/memory/by-agent", post(memory_by_agent))
         .route("/library/create", post(library_create))
+        .route("/library/list", post(library_list))
         .route("/fact/add", post(fact_add))
+        .route("/fact/query", post(fact_query))
+        .route("/fact/invalidate", post(fact_invalidate))
+        .route("/procedure/learn", post(procedure_learn))
+        .route("/procedure/recall", post(procedure_recall))
+        .route("/consolidate", post(consolidate_preview))
+        .route("/quarantine/list", post(quarantine_list))
+        .route("/quarantine/promote", post(quarantine_promote))
         .route("/session/start", post(session_start))
         .route("/session/end", post(session_end))
         .route("/session/last", post(session_last))
+        .route("/session/context", post(session_context))
         .route("/stats/activity", post(stats_activity))
         .route("/should-search", post(should_search))
         .with_state(state);
@@ -144,10 +153,11 @@ pub async fn run(
         eprintln!("  auth:   per-agent tokens — identity DERIVED from the bearer token");
         eprintln!("  agents: {agent_names}");
     }
-    eprintln!(
-        "  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}  POST /fact/add"
-    );
-    eprintln!("          POST /session/{{start,end,last}}  GET /health");
+    eprintln!("  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}");
+    eprintln!("          POST /fact/{{add,query,invalidate}}  /procedure/{{learn,recall}}");
+    eprintln!("          POST /library/{{create,list}}  /quarantine/{{list,promote}}");
+    eprintln!("          POST /consolidate  /should-search");
+    eprintln!("          POST /session/{{start,end,last,context}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
 
@@ -495,6 +505,164 @@ async fn fact_add(
     };
     call(&state, "mind_fact_add", with_agent(args, &headers, derived)).await
 }
+
+// ----- HTTP/MCP parity (read + non-destructive) ------------------------------
+// These routes expose MCP tools that were already implemented and locality-safe
+// but reachable only over stdio, so an HTTP-only runtime (OpenAI Agents SDK,
+// Node, CI) could not query facts, persist a procedure, preview consolidation,
+// or list the quarantine. Each is a thin wrapper over the SAME dispatch the MCP
+// loop uses. Destructive/bulk tools (delete, export, import-apply, vault,
+// consolidate --apply) stay off this surface by design — `mind_consolidate`
+// dispatch is dry-run-only, `mind_fact_invalidate` flips the validity flag (it
+// does not delete), and `mind_quarantine` here is list/promote only.
+
+/// `mind_fact_query`: structured facts for a subject (read).
+async fn fact_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_fact_query", args).await
+}
+
+/// `mind_fact_invalidate`: mark a fact invalid by id. Non-destructive — the row
+/// and its history stay; this flips the validity flag the duel model reads.
+async fn fact_invalidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_fact_invalidate", args).await
+}
+
+/// `mind_learn`: persist an error->fix procedure (write, like add). Carries the
+/// token-derived author so a multi-agent graph records who learned the lesson.
+async fn procedure_learn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_learn", with_agent(args, &headers, derived)).await
+}
+
+/// `mind_recall`: recall matching error->fix procedures (read). Accepts the
+/// `query` field used by the other read routes and maps it to the tool's
+/// `context` arg, so an agent can use one convention across search/browse/recall.
+async fn procedure_recall(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    // Map `query` → `context` when `context`/`error` aren't already given.
+    if let Value::Object(m) = &mut args
+        && !m.contains_key("context")
+        && !m.contains_key("error")
+        && let Some(q) = m.get("query").cloned()
+    {
+        m.insert("context".into(), q);
+    }
+    call(&state, "mind_recall", args).await
+}
+
+/// `mind_consolidate`: DRY-RUN preview of dedup/decay/cold-prune. The dispatch
+/// arm hardcodes apply=false; acting on it stays a CLI command. Preview only.
+async fn consolidate_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_consolidate", args).await
+}
+
+/// `mind_quarantine action=list`: list relevance-gate-filtered entries (read).
+/// The route forces `action=list` so the write actions of the consolidated tool
+/// (promote/etc) aren't reachable here; that requires the body be a JSON object.
+async fn quarantine_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    match &mut args {
+        Value::Object(m) => {
+            m.insert("action".into(), Value::String("list".into()));
+        }
+        _ => return bad_request("body must be a JSON object"),
+    }
+    call(&state, "mind_quarantine", args).await
+}
+
+/// `mind_quarantine_promote`: promote one quarantined entry to ordinary memory
+/// by id. Non-destructive (it surfaces an already-stored entry).
+async fn quarantine_promote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_quarantine_promote", args).await
+}
+
+/// `mind_library action=list`: list libraries with counts (read). Forces
+/// `action=list` so the consolidated tool's create/delete actions aren't
+/// reachable here; requires the body be a JSON object.
+async fn library_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    match &mut args {
+        Value::Object(m) => {
+            m.insert("action".into(), Value::String("list".into()));
+        }
+        _ => return bad_request("body must be a JSON object"),
+    }
+    call(&state, "mind_library", args).await
+}
+
+/// `mind_context`: the session-start context digest (recent facts + libraries).
+async fn session_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    call(&state, "mind_context", args).await
+}
+
+// NOTE: `mind_web` is deliberately NOT exposed over HTTP. It performs an
+// arbitrary OUTBOUND fetch, which on the MCP channel comes from the trusted
+// frontier model but on the loopback HTTP channel comes from any process that
+// reached the port with a token — that makes the server a confused deputy / SSRF
+// vector (an attacker can drive it to internal URLs like the cloud metadata
+// endpoint or the bundled Qdrant). An HTTP agent that needs to fetch has its own
+// network; it does not need the brain to fetch on its behalf. `mind_web` stays
+// on the CLI/MCP surface only.
 
 /// Create a library by name. The only mutating-structure verb on the surface,
 /// and a non-destructive one: `mind_create` -> `run_create` only adds a library

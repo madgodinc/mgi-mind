@@ -211,7 +211,10 @@ fn push_block_candidate(
     // whether this came from the user or the model. The tag costs ~10 tokens
     // and is much cheaper than an extra payload field for a one-bit fact.
     let content = format!("[{role}] {trimmed}");
-    candidates.push(ingest::Candidate::Memory { content });
+    candidates.push(ingest::Candidate::Memory {
+        content,
+        source: None,
+    });
 }
 
 #[cfg(test)]
@@ -274,7 +277,7 @@ mod tests {
         let mut n = 0;
         push_block_candidate(&mut c, &mut n, "user", "  hi there  ");
         assert_eq!(n, 1);
-        let ingest::Candidate::Memory { content } = &c[0] else {
+        let ingest::Candidate::Memory { content, .. } = &c[0] else {
             panic!("expected Memory candidate");
         };
         assert_eq!(content, "[user] hi there");
