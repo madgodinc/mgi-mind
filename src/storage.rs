@@ -883,6 +883,28 @@ pub(crate) async fn existing_payload_string(
     extract_string(&point.payload, key)
 }
 
+/// Read SEVERAL payload fields of one point in a SINGLE round-trip — for callers
+/// that need a few fields of the same point (e.g. the s/p/o triple of a fact),
+/// instead of one `get_points` per field. Returns one `Option<String>` per key,
+/// in order; an absent point yields all `None`.
+pub(crate) async fn existing_payload_strings(
+    client: &Qdrant,
+    collection: &str,
+    id: &str,
+    keys: &[&str],
+) -> Vec<Option<String>> {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let payload = client
+        .get_points(GetPointsBuilder::new(collection, vec![pid]).with_payload(true))
+        .await
+        .ok()
+        .and_then(|resp| resp.result.into_iter().next())
+        .map(|p| p.payload);
+    keys.iter()
+        .map(|k| payload.as_ref().and_then(|pl| extract_string(pl, k)))
+        .collect()
+}
+
 /// True if the given id is a stored procedure (`type = procedure`). Used by
 /// `mind_outcome` to decide whether a test/compile signal should also bump the
 /// procedural success/fail counters.

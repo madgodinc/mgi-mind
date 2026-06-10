@@ -2566,8 +2566,18 @@ async fn cmd_fact_invalidate(id: &str) -> Result<()> {
 }
 
 pub(crate) async fn run_fact_invalidate(id: &str) -> Result<String> {
+    // The bare terminal path: attribute to "cli" explicitly (not a None that a
+    // lower layer would have to guess at).
+    run_fact_invalidate_authored(id, Some("cli")).await
+}
+
+/// Invalidate a fact, attributing the action to `actor` in the audit log. Each
+/// surface resolves its own actor before calling: CLI -> "cli", an MCP/HTTP call
+/// passes the caller identity (or its own "mcp"/"http" fallback when anonymous).
+/// A `None` here lands as "unknown" — no surface should rely on that.
+pub(crate) async fn run_fact_invalidate_authored(id: &str, actor: Option<&str>) -> Result<String> {
     let config = crate::config::load_cached()?;
-    crate::knowledge::invalidate_fact(&config, id).await?;
+    crate::knowledge::invalidate_fact_authored(&config, id, actor).await?;
     Ok(format!("Fact '{id}' invalidated."))
 }
 

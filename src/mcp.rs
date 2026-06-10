@@ -770,7 +770,13 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
         "mind_fact_invalidate" => {
             let id = arg_str(args, "id")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
-            crate::cli::run_fact_invalidate(id).await
+            // The `agent` arg names the caller; anonymous MCP is attributed to
+            // "mcp" (the channel), never conflated with the terminal.
+            crate::cli::run_fact_invalidate_authored(
+                id,
+                Some(arg_str(args, "agent").unwrap_or("mcp")),
+            )
+            .await
         }
 
         // ---- v1.1.0 consolidated tools (alias-phase, deprecated siblings
@@ -912,7 +918,11 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 "invalidate" => {
                     let id = arg_str(args, "id")
                         .ok_or_else(|| anyhow::anyhow!("action=invalidate requires 'id'"))?;
-                    crate::cli::run_fact_invalidate(id).await
+                    crate::cli::run_fact_invalidate_authored(
+                        id,
+                        Some(arg_str(args, "agent").unwrap_or("mcp")),
+                    )
+                    .await
                 }
                 other => anyhow::bail!(
                     "mind_fact: unknown action '{other}' (expected add|query|invalidate)"

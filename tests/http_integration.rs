@@ -391,6 +391,54 @@ fn http_surface_full_contract() {
         "recall should surface the learned fix, got: {out}"
     );
 
+    // 9) A fact-invalidate over HTTP must be attributed in the audit log to the
+    //    TOKEN-DERIVED identity (this server runs as `alice:<token>`), NOT to the
+    //    terminal/MCP default. (PR-1, circle 1: the actor is resolved per surface
+    //    from the bearer token; a network call can't masquerade as "cli", and a
+    //    named token is even stronger than the anonymous "http" fallback.)
+    let add_fact = Command::new(bin())
+        .args(["fact", "add", "bob", "works_at", "Acme"])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .output()
+        .expect("fact add");
+    let add_stdout = String::from_utf8_lossy(&add_fact.stdout);
+    let fid = add_stdout
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .map(str::trim)
+        .expect("fact add prints an id")
+        .to_string();
+    let invalidate = format!("{base}/fact/invalidate");
+    let body = format!("{{\"id\":\"{fid}\"}}");
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer, // valid named token (alice), no X-Agent → identity from token
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &body,
+        &invalidate,
+    ]);
+    assert_eq!(code, 200, "fact/invalidate should 200, got {code}: {out}");
+    let log = std::fs::read_to_string(mind.join("audit.log")).expect("audit.log exists");
+    // The op serializes as the snake_case wire form `fact_invalidate`.
+    let row = log
+        .lines()
+        .rfind(|l| l.contains("fact_invalidate") && l.contains(&fid))
+        .unwrap_or_else(|| panic!("no fact_invalidate row for {fid}; log:\n{log}"));
+    assert!(
+        row.contains("\"actor\":\"alice\""),
+        "HTTP invalidate must be attributed to the token identity 'alice', not cli/mcp; got: {row}"
+    );
+    assert!(
+        row.contains("works_at") || row.contains("bob") || row.contains("Acme"),
+        "invalidate audit must record the hidden triple in `before`; got: {row}"
+    );
+
     // Best-effort cleanup so repeated runs don't accumulate collections in the
     // shared Qdrant. The guard kills the server regardless.
     let _ = Command::new(bin())
