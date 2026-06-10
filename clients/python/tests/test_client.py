@@ -11,9 +11,21 @@ import os
 import subprocess
 import time
 
+import asyncio
+import inspect
+
 import pytest
 
-from mgimind import Memory, MgiMindError
+from mgimind import AsyncMemory, Memory, MgiMindError
+
+
+def test_sync_async_signatures_match():
+    # Mechanically enforce that the two clients can't drift on the five verbs.
+    # Needs no server.
+    for verb in ("add", "search", "recall", "add_fact", "health"):
+        assert inspect.signature(getattr(Memory, verb)) == inspect.signature(
+            getattr(AsyncMemory, verb)
+        ), f"signature drift on {verb}"
 
 BIN = os.environ.get("MGIMIND_BIN")
 PORT = 47291
@@ -72,3 +84,22 @@ def test_bad_args_raise(server):
     mem = Memory(url=server, token=TOKEN)
     with pytest.raises(MgiMindError):
         mem._post("/memory/search", {})
+
+
+def test_async_add_search_roundtrip(server):
+    # Reuse the `pytest` library created by the sync roundtrip test (which runs
+    # first); avoids racing the library registry on a fresh name.
+    subprocess.run([BIN, "create", "pytest"], env=dict(os.environ), check=False)
+
+    async def run():
+        async with AsyncMemory(url=server, token=TOKEN, library="pytest") as mem:
+            assert await mem.health()
+            await mem.add("The async standup is at 09:30 on weekdays.")
+            res = await mem.search("when is the async standup")
+            assert "async standup" in str(res)
+            with pytest.raises(MgiMindError):
+                await AsyncMemory(url=server, token="WRONG")._post(
+                    "/memory/search", {"query": "x"}
+                )
+
+    asyncio.run(run())
