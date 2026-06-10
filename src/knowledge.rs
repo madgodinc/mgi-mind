@@ -508,10 +508,34 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
     Ok(facts)
 }
 
-/// Soft-delete: mark a fact `valid = false` instead of physically removing it,
-/// so the temporal-validity flag is actually honored (audit #13).
-pub async fn invalidate_fact(config: &MindConfig, id: &str) -> Result<()> {
+/// Soft-delete a fact, recording WHO did it and WHAT triple was hidden. Until
+/// now invalidation wrote no audit event at all, so a sweep of `invalidate`
+/// calls (e.g. an agent over HTTP hiding facts by id) left no trace of who did
+/// it or what disappeared. This makes invalidation answerable from the audit
+/// log like every other write. `actor` is the caller identity (token-derived on
+/// HTTP, the `agent` arg on MCP, "cli" on the terminal).
+pub async fn invalidate_fact_authored(
+    config: &MindConfig,
+    id: &str,
+    actor: Option<&str>,
+) -> Result<()> {
     let client = storage::get_client(config).await?;
+
+    // Capture the triple BEFORE flipping the flag, for the audit `before` field —
+    // so "what was hidden" is recoverable from the log even if the row is later
+    // pruned. One round-trip for all three fields (not three). Best-effort: a
+    // missing/legacy field just yields a partial triple. Not atomic with the
+    // flip below, but `before` is an advisory label, not load-bearing.
+    let triple_fields = storage::existing_payload_strings(
+        &client,
+        storage::FACTS_COLLECTION,
+        id,
+        &["subject", "predicate", "object"],
+    )
+    .await;
+    let subject = triple_fields[0].clone();
+    let predicate = triple_fields[1].clone();
+    let object = triple_fields[2].clone();
 
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
 
@@ -528,6 +552,28 @@ pub async fn invalidate_fact(config: &MindConfig, id: &str) -> Result<()> {
         )
         .await
         .context("Failed to invalidate fact")?;
+
+    let triple = format!(
+        "{} {} {}",
+        subject.as_deref().unwrap_or("?"),
+        predicate.as_deref().unwrap_or("?"),
+        object.as_deref().unwrap_or("?"),
+    );
+    crate::audit::record(
+        crate::audit::AuditEvent::new(
+            // Synthetic label: facts live in their own collection, not a library;
+            // no audit consumer filters by library, so this names the source
+            // collection rather than a real library.
+            crate::audit::AuditOp::FactInvalidate,
+            "_facts".to_string(),
+            id.to_string(),
+        )
+        // The default is "unknown", NOT "cli": knowledge doesn't know who called,
+        // so each surface resolves its own actor (cli/http/mcp). Defaulting to
+        // "cli" here would log an anonymous HTTP sweep as a terminal action.
+        .actor(actor.unwrap_or("unknown"))
+        .before(storage::truncate_for_audit(&triple)),
+    );
 
     Ok(())
 }
@@ -1069,7 +1115,7 @@ mod tests {
     fn valid_payload_convention_is_string_true_or_false() {
         // Post-critic regression guard (PR #4 should-fix):
         // - add_fact writes payload["valid"] = "true" (string)
-        // - invalidate_fact writes payload["valid"] = "false" (string)
+        // - invalidate_fact_authored writes payload["valid"] = "false" (string)
         // - find_facts_by_subject_predicate filters with
         //   Condition::matches("valid", "true".to_string())
         //

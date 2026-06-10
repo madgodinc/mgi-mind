@@ -126,6 +126,79 @@ fn library_lifecycle_against_real_qdrant() {
     );
 }
 
+/// Invalidating a fact must leave an audit trail (PR-1, circle 1): who did it
+/// and what triple was hidden. Before this, invalidate wrote NO audit event at
+/// all, so a sweep of invalidations was untraceable. Facts are vectorless, so
+/// this needs only Qdrant, not the embedding model.
+#[test]
+fn invalidating_a_fact_writes_an_audit_event() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+
+    let run = |args: &[&str]| -> String {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .output()
+            .expect("spawn mgimind");
+        assert!(
+            out.status.success(),
+            "`mgimind {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // Add a fact; the CLI prints its id as `[id: <uuid>]`.
+    let add_out = run(&["fact", "add", "alice", "lives_in", "Berlin"]);
+    let id = add_out
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .map(str::trim)
+        .expect("fact add should print an id")
+        .to_string();
+
+    run(&["fact", "invalidate", &id]);
+
+    // The audit log must now carry a FactInvalidate row naming the actor and the
+    // hidden triple.
+    let log = std::fs::read_to_string(mind.join("audit.log")).expect("audit.log should exist");
+    let line = log
+        .lines()
+        .find(|l| l.contains("FactInvalidate") || l.contains("fact_invalidate"))
+        .unwrap_or_else(|| {
+            panic!("no FactInvalidate audit event after invalidate; log was:\n{log}")
+        });
+    assert!(
+        line.contains(&id),
+        "invalidate audit row should reference the fact id, got: {line}"
+    );
+    assert!(
+        line.contains("alice") && line.contains("Berlin"),
+        "invalidate audit row should record the hidden triple (before), got: {line}"
+    );
+    assert!(
+        line.contains("\"actor\":\"cli\"") || line.contains("cli"),
+        "bare CLI invalidate should be attributed to actor 'cli', got: {line}"
+    );
+    // And it must NOT be mis-attributed as a network caller — the actor default
+    // no longer collapses every surface into "cli", so a terminal call is "cli"
+    // and an anonymous HTTP call (covered in http_integration) is "http".
+    assert!(
+        !line.contains("\"actor\":\"http\"") && !line.contains("\"actor\":\"unknown\""),
+        "terminal invalidate must not read as http/unknown, got: {line}"
+    );
+}
+
 /// Full retrieval path: add -> embed -> hybrid search -> assert the memory is found.
 /// Needs the embedding model, so it is gated on `MGIMIND_IT_MODELS` (a models dir
 /// holding `multilingual-e5-base/`) and `ORT_DYLIB_PATH`. CI without the model skips
