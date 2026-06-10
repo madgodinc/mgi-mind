@@ -1,0 +1,14 @@
+# Keep the build context tiny — the image builds from src + Cargo files only.
+target/
+.git/
+.github/
+benchmark/
+snapshots/
+docs/
+clients/
+*.md
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/

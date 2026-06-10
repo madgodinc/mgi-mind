@@ -164,6 +164,26 @@ a designed mechanism with a preliminary, not-yet-clean score, not a proven win.
 
 ## Quick start
 
+### Docker (the whole brain in one command)
+
+The image bakes the binary, a bundled Qdrant, the ONNX runtime, and the models,
+so it runs offline with nothing to install:
+
+```bash
+docker run -p 8765:8765 madgodinc/mgi-mind
+```
+
+It prints a bearer token on startup. Point the [Python client](clients/python)
+or any agent at `http://localhost:8765` with that token. Persist memory across
+restarts with a volume, and pin a stable token:
+
+```bash
+docker run -p 8765:8765 -e MGIMIND_TOKEN=your-token \
+  -v mgimind-data:/data madgodinc/mgi-mind
+```
+
+### Native install
+
 One command. The installer drops the binary on PATH and runs `init` +
 `doctor --fix` (which pulls Qdrant, ONNX Runtime, and the models).
 

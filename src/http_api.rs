@@ -157,7 +157,29 @@ pub async fn run(
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = tokio::signal::ctrl_c();
+    // Also catch SIGTERM: `docker stop` (and most process managers) send it, and
+    // as PID 1 in a container an unhandled SIGTERM is ignored — without this every
+    // `docker stop` would wait the full grace period and then SIGKILL.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = ctrl_c.await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
+    }
 }
 
 // ----- auth + helpers --------------------------------------------------------
