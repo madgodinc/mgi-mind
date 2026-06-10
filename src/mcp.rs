@@ -340,6 +340,16 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 crate::storage::search_filtered(cfg, query, &mfilter, limit, tier).await?;
             Ok(crate::cli::render_search(&results))
         }
+        "mind_browse" => {
+            // Inventory browse: list memories by metadata with NO semantic query.
+            // "everything agent X wrote this week", "everything from this source".
+            // Newest-first; same filters as mind_search, no query vector.
+            let cfg = warm(true)?;
+            let mfilter = memory_filter_from_args(args);
+            let limit = arg_u64(args, "limit", 20) as usize;
+            let (records, truncated) = crate::storage::list_filtered(cfg, &mfilter, limit).await?;
+            Ok(crate::cli::render_records(&records, truncated))
+        }
         "mind_recall_all" => {
             // Unified recall across all three silos in one call: facts (current
             // first), memories, and procedures. A lean fusion over the existing
@@ -1031,6 +1041,22 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_browse",
+            "description": "Browse/list memories by metadata WITHOUT a search query — inventory, not ranking. Newest first. Use to answer 'what did agent X write recently', 'everything from this source', 'all memories since a date'. Same filters as mind_search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library": { "type": "string", "description": "List from one library" },
+                    "libraries": { "type": "array", "items": { "type": "string" }, "description": "List from ANY of these libraries (OR)" },
+                    "author": { "type": "string", "description": "Only memories written by this agent" },
+                    "source": { "type": "string", "description": "Only memories with this ingest source tag" },
+                    "created_since": { "type": "string", "description": "Only memories created at/after this instant, INCLUSIVE (RFC3339 or YYYY-MM-DD)" },
+                    "created_before": { "type": "string", "description": "Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)" },
+                    "limit": { "type": "number", "default": 20, "description": "Max records" }
+                }
+            }
+        }),
+        json!({
             "name": "mind_recall_all",
             "description": "Unified recall across all memory types at once (facts + memories + procedures) for one query. Current facts first, then semantic memories, then matching error->fix procedures. One call instead of three separate searches.",
             "inputSchema": {
@@ -1530,12 +1556,13 @@ mod tests {
         // verbs (mind_quarantine/_vault/_session/_fact/_library). The 15
         // deprecated singletons are still in the list, but flagged
         // `deprecated: true`. Total v1.1 = 35. v1.4 adds mind_predicate → 36.
-        // v1.5 Phase 7 adds mind_outcome → 37.
+        // v1.5 Phase 7 adds mind_outcome → 37. A later add of mind_browse
+        // (inventory list) → 41.
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            40,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) = 40"
+            41,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) = 41"
         );
         let deprecated = tools
             .iter()
@@ -1547,8 +1574,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 25,
-            "non-deprecated surface is 25 tools (20 v1.1 + 1 v1.4 mind_predicate + 1 v1.5 mind_outcome + 1 mind_recall_all + 1 mind_should_search + 1 mind_visualize)"
+            live_surface, 26,
+            "non-deprecated surface is 26 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse)"
         );
     }
 
@@ -1661,11 +1688,11 @@ mod tests {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
         // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
-        // + 1 (mind_visualize) = 40 total.
+        // + 1 (mind_visualize) + 1 (mind_browse) = 41 total.
         // Removal of the 15 deprecated singletons is scheduled for v2.0.
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 40);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 41);
     }
 
     #[tokio::test]

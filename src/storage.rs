@@ -2841,6 +2841,15 @@ pub struct MemoryRecord {
     pub r#type: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The library this memory lives in. Surfaced by the inventory `list` path
+    /// so a cross-library listing is self-describing. Defaults to empty for the
+    /// older per-library callers that already know the library from context.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub library: String,
+    /// The agent that wrote it, when tagged (multi-agent writes). None for the
+    /// legacy corpus and single-agent writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// v1.4 confidence score — the cached output of the duel-rule machinery.
     /// `None` for legacy memories written before the v1.4 schema landed and
     /// for memories whose score has not yet been computed by the background
@@ -2928,18 +2937,101 @@ pub async fn find_by_source(
         .result
         .into_iter()
         .map(|p| {
-            let pl = &p.payload;
-            MemoryRecord {
-                id: p.id.as_ref().map(format_point_id).unwrap_or_default(),
-                content: extract_string(pl, "content").unwrap_or_default(),
-                source: extract_string(pl, "source"),
-                r#type: extract_string(pl, "type").unwrap_or_else(|| "memory".into()),
-                created_at: extract_string(pl, "created_at").unwrap_or_default(),
-                updated_at: extract_string(pl, "updated_at").unwrap_or_default(),
-                confidence_score: payload_get_confidence(pl),
-            }
+            point_to_record(
+                p.id.as_ref().map(format_point_id).unwrap_or_default(),
+                &p.payload,
+            )
         })
         .collect())
+}
+
+/// Map one scroll/search point payload into a `MemoryRecord`. Shared so the
+/// inventory listers don't drift on which payload keys they read.
+fn point_to_record(
+    id: String,
+    payload: &HashMap<String, qdrant_client::qdrant::Value>,
+) -> MemoryRecord {
+    MemoryRecord {
+        id,
+        content: extract_string(payload, "content").unwrap_or_default(),
+        source: extract_string(payload, "source"),
+        r#type: extract_string(payload, "type").unwrap_or_else(|| "memory".into()),
+        created_at: extract_string(payload, "created_at").unwrap_or_default(),
+        updated_at: extract_string(payload, "updated_at").unwrap_or_default(),
+        library: extract_string(payload, "library").unwrap_or_default(),
+        author: extract_string(payload, "author"),
+        confidence_score: payload_get_confidence(payload),
+    }
+}
+
+/// How many points `list_filtered` scans before sorting. Bounds the work on a
+/// large collection; the newest `limit` of the scanned window are returned. A
+/// browse that hits this cap is reported as truncated so the caller knows it saw
+/// a window, not the whole corpus.
+const BROWSE_MAX_SCAN: usize = 2000;
+
+/// Browse memories by metadata WITHOUT a semantic query — the inventory path.
+/// Same `MemoryFilter` as `search_filtered` (author, source, date window,
+/// libraries), but lists newest-first instead of ranking by similarity, so
+/// "show me everything agent X wrote this week" or "everything imported from
+/// docs.example.com" works with no query vector. Excludes procedures and
+/// quarantined points, like normal search. All local; nothing leaves the box.
+///
+/// Ordering is done in-memory, NOT via Qdrant `order_by`: an ordered scroll
+/// silently drops points that lack the sort key, and the pre-`created_at` legacy
+/// corpus has no such key — they would vanish from an "inventory" that promises
+/// completeness. Here every matching point is scanned (up to `BROWSE_MAX_SCAN`),
+/// then sorted by `created_at` descending with missing/empty dates sorted LAST,
+/// so legacy points still appear (at the tail) instead of disappearing.
+///
+/// Returns the records plus a `scanned >= cap` truncation flag.
+pub async fn list_filtered(
+    config: &MindConfig,
+    mfilter: &MemoryFilter,
+    limit: usize,
+) -> Result<(Vec<MemoryRecord>, bool)> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok((Vec::new(), false));
+    }
+    // No order_by: scan the whole matching set (capped) so legacy points without
+    // created_at are included, then sort in-memory below.
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(memory_query_filter_ex(mfilter)?)
+                .limit(BROWSE_MAX_SCAN as u32)
+                .with_payload(true),
+        )
+        .await
+        .context("list_filtered scroll failed")?;
+    let scanned = response.result.len();
+    let truncated = scanned >= BROWSE_MAX_SCAN;
+    let mut records: Vec<MemoryRecord> = response
+        .result
+        .into_iter()
+        .map(|p| {
+            point_to_record(
+                p.id.as_ref().map(format_point_id).unwrap_or_default(),
+                &p.payload,
+            )
+        })
+        .collect();
+    // Newest first; empty created_at (legacy) sorts last so it still shows up.
+    records.sort_by(
+        |a, b| match (a.created_at.is_empty(), b.created_at.is_empty()) {
+            (false, false) => b.created_at.cmp(&a.created_at),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (true, true) => std::cmp::Ordering::Equal,
+        },
+    );
+    records.truncate(limit);
+    Ok((records, truncated))
 }
 
 /// List memories of a single library, newest first. Returns full content
@@ -2976,16 +3068,10 @@ pub async fn list_memories(
         .result
         .into_iter()
         .map(|point| {
-            let p = &point.payload;
-            MemoryRecord {
-                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
-                content: extract_string(p, "content").unwrap_or_default(),
-                source: extract_string(p, "source"),
-                r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
-                created_at: extract_string(p, "created_at").unwrap_or_default(),
-                updated_at: extract_string(p, "updated_at").unwrap_or_default(),
-                confidence_score: payload_get_confidence(p),
-            }
+            point_to_record(
+                point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                &point.payload,
+            )
         })
         .collect())
 }
@@ -3040,15 +3126,10 @@ pub async fn recent_by_source_since(
             if created_at.as_str() < since_iso {
                 return None;
             }
-            Some(MemoryRecord {
-                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
-                content: extract_string(p, "content").unwrap_or_default(),
-                source: extract_string(p, "source"),
-                r#type: extract_string(p, "type").unwrap_or_else(|| "memory".into()),
-                created_at,
-                updated_at: extract_string(p, "updated_at").unwrap_or_default(),
-                confidence_score: payload_get_confidence(p),
-            })
+            Some(point_to_record(
+                point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                p,
+            ))
         })
         .collect();
 
@@ -3484,6 +3565,42 @@ mod tests {
         // And matches the single-library legacy helper for the library case.
         let one = memory_query_filter_ex(&MemoryFilter::for_library(Some("p"))).unwrap();
         assert_eq!(one.must.len(), 1);
+    }
+
+    #[test]
+    fn browse_sort_keeps_undated_legacy_at_the_tail() {
+        // The fix for the ordered-scroll-drops-legacy bug: undated points must
+        // sort LAST, not vanish. Mirror the in-memory sort list_filtered uses.
+        fn rec(created_at: &str) -> MemoryRecord {
+            MemoryRecord {
+                id: created_at.into(),
+                content: String::new(),
+                source: None,
+                r#type: "memory".into(),
+                created_at: created_at.into(),
+                updated_at: String::new(),
+                library: String::new(),
+                author: None,
+                confidence_score: None,
+            }
+        }
+        let mut v = [
+            rec(""),                     // legacy, undated
+            rec("2026-01-01T00:00:00Z"), // older
+            rec("2026-06-01T00:00:00Z"), // newest
+        ];
+        v.sort_by(
+            |a, b| match (a.created_at.is_empty(), b.created_at.is_empty()) {
+                (false, false) => b.created_at.cmp(&a.created_at),
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (true, true) => std::cmp::Ordering::Equal,
+            },
+        );
+        // newest first, undated last — and the legacy point is still present.
+        assert_eq!(v[0].created_at, "2026-06-01T00:00:00Z");
+        assert_eq!(v[1].created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(v[2].created_at, "");
     }
 
     #[test]
