@@ -371,7 +371,13 @@ pub enum Commands {
     /// over 127.0.0.1 with a per-process bearer token. Destructive/bulk tools
     /// are NOT exposed. `X-Agent: <id>` tags the author (audit hint, not auth).
     ServeHttp {
-        /// Port to bind on 127.0.0.1. Omit for a random free port.
+        /// Interface to bind. Defaults to 127.0.0.1 (loopback). Use 0.0.0.0 to
+        /// accept connections from outside this machine's network namespace
+        /// (e.g. a Docker `-p` mapping). Non-loopback binds REQUIRE an explicit
+        /// --agent-token; the server refuses to expose an anonymous-token brain.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to bind. Omit for a random free port.
         #[arg(long)]
         port: Option<u16>,
         /// Per-agent bearer token as `NAME:TOKEN` (repeatable). When given, a
@@ -891,10 +897,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, true).await
         }
-        Commands::ServeHttp { port, agent_tokens } => {
+        Commands::ServeHttp {
+            host,
+            port,
+            agent_tokens,
+        } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
-            crate::http_api::run(config, port, agent_tokens).await
+            crate::http_api::run(config, &host, port, agent_tokens).await
         }
         Commands::Ingest {
             library,
