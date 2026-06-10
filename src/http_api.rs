@@ -94,6 +94,7 @@ pub async fn run(config: MindConfig, port: Option<u16>, agent_tokens: Vec<String
         .route("/memory/add", post(memory_add))
         .route("/memory/ingest", post(memory_ingest))
         .route("/memory/by-agent", post(memory_by_agent))
+        .route("/library/create", post(library_create))
         .route("/fact/add", post(fact_add))
         .route("/session/start", post(session_start))
         .route("/session/end", post(session_end))
@@ -278,6 +279,23 @@ async fn fact_add(
         Err(c) => return c.into_response(),
     };
     call(&state, "mind_fact_add", with_agent(args, &headers, derived)).await
+}
+
+/// Create a library by name. The only mutating-structure verb on the surface,
+/// and a non-destructive one: `mind_create` -> `run_create` only adds a library
+/// to the registry, never drops or deletes (drop/delete stay CLI-only). A Band
+/// of agents needs this to make its own working library instead of relying on an
+/// operator to pre-create one.
+async fn library_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    call(&state, "mind_create", with_agent(args, &headers, derived)).await
 }
 
 /// "What did agent X write." With per-agent tokens, omitting `agent` in the

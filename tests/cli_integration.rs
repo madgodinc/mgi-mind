@@ -189,6 +189,74 @@ fn add_then_search_finds_the_memory() {
     );
 }
 
+/// Regression: re-asserting an already-stored memory must keep it LIVE, not
+/// demote it into quarantine. The low-novelty gate fires on the second identical
+/// write (zero new tokens vs the stored neighbor); before the fix that quarantined
+/// the candidate, and because quarantine_id == deterministic_id it CLOBBERED the
+/// live point — a re-write silently lost a memory the user clearly wanted. Now a
+/// re-assertion of a live memory is a no-op and the memory stays searchable.
+#[test]
+fn reasserting_a_memory_keeps_it_live() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itreassert_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let memory = "The launch retrospective is scheduled for the second Tuesday of every month.";
+    let (ok, _o, e) = run(&["create", &lib]);
+    assert!(ok, "create failed: {e}");
+    // Ingest the SAME memory several times — first stores it, the rest hit the
+    // low-novelty gate and must be treated as re-assertions (no-op), not demotions.
+    // Include a whitespace-padded variant: the stored id is trim-canonicalized, so
+    // padding must NOT dodge the guard and spawn a duplicate / clobber.
+    let padded = format!("   {memory}  ");
+    for variant in [memory, memory, padded.as_str(), memory] {
+        let (ok, o, e) = run(&["ingest", "--library", &lib, "--memory", variant]);
+        assert!(ok, "ingest failed:\nstdout:{o}\nstderr:{e}");
+    }
+
+    // It must still be retrievable by ordinary search (quarantined points are not).
+    let (ok, out, err) = run(&[
+        "search",
+        "when is the launch retrospective",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    let _ = run(&["drop", &lib]);
+    assert!(ok, "search failed: {err}");
+    assert!(
+        out.contains("launch retrospective"),
+        "a re-asserted memory must stay live and searchable, got:\n{out}"
+    );
+}
+
 /// Same retrieval path as above, but driven over the **MCP stdio transport** end
 /// to end: feed JSON-RPC `initialize` + `tools/call` lines into `mgimind mcp` and
 /// assert the `mind_search` response retrieves what `mind_add` stored. Proves the
@@ -693,5 +761,210 @@ fn multi_cardinality_allows_coexistence() {
     assert!(
         query.1.contains("first") && query.1.contains("second"),
         "Multi cardinality must allow both facts to coexist: {chain}"
+    );
+}
+
+/// ADR 0006 toggle-test: procedure outcome stats live in the droppable
+/// `_mod_procstats` side collection, not on the core procedure point.
+///
+/// 1. Learn a procedure but record NO outcome → `_mod_procstats` is never
+///    created. Recall must still return the procedure (degraded to ✓0/✗0,
+///    unverified) — proving the read is existence-guarded, not an error on a
+///    missing collection.
+/// 2. Record a deterministic success (mind_outcome test_passed) → the stats land
+///    in the side collection and recall now shows the verified trust signal.
+///
+/// This is the empirical proof that dropping the derived collection degrades
+/// gracefully and never hides or errors a procedure.
+#[test]
+fn procedure_stats_live_in_droppable_side_collection() {
+    let (Some(_port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let port = qdrant_port().unwrap();
+    let (_home, mind) = setup_model_home(&port, &model_src);
+
+    // A distinctive error signature so recall matches it unambiguously.
+    let err = format!(
+        "error E0599 no method zorblify on Quibbler{}",
+        std::process::id()
+    );
+
+    // Phase 1: learn + recall, with NO outcome recorded (side collection absent).
+    let input1 = format!(
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_learn","arguments":{
+                "error":err,"fix":"import the QuibblerExt trait","context":"trait resolution"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_recall","arguments":{"error":err}}}),
+    );
+    let (stdout1, stderr1) = run_mcp(&mind, &ort, &input1);
+    let r1 = parse_mcp_results(&stdout1);
+    let learn_id = r1.get(&2).map(|(_, t)| t.clone()).unwrap_or_default();
+    let proc_id = learn_id
+        .split("[id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !proc_id.is_empty(),
+        "could not parse procedure id from: {learn_id}\n{stderr1}"
+    );
+
+    let (rec_err, rec_txt) = r1.get(&3).cloned().unwrap_or((true, String::new()));
+    assert!(
+        !rec_err,
+        "recall errored with no stats collection: {rec_txt}\n{stderr1}"
+    );
+    assert!(
+        rec_txt.contains("import the QuibblerExt trait"),
+        "recall must return the procedure even with NO stats collection: {rec_txt}"
+    );
+    assert!(
+        rec_txt.contains("unverified") && rec_txt.contains("✓0/✗0"),
+        "with no recorded outcome the procedure must show unverified ✓0/✗0: {rec_txt}"
+    );
+
+    // Phase 2: record a deterministic success → stats land in _mod_procstats.
+    let input2 = format!(
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_outcome","arguments":{
+                "memory_id":proc_id,"signal_type":"test_passed"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_recall","arguments":{"error":err}}}),
+    );
+    let (stdout2, stderr2) = run_mcp(&mind, &ort, &input2);
+    let r2 = parse_mcp_results(&stdout2);
+    let (out_err, _out_txt) = r2.get(&2).cloned().unwrap_or((true, String::new()));
+    assert!(!out_err, "mind_outcome should succeed\n{stderr2}");
+    let (rec2_err, rec2_txt) = r2.get(&3).cloned().unwrap_or((true, String::new()));
+    assert!(
+        !rec2_err,
+        "recall after outcome errored: {rec2_txt}\n{stderr2}"
+    );
+    assert!(
+        rec2_txt.contains("verified") && rec2_txt.contains("✓1/✗0"),
+        "after a test_passed outcome the procedure must show verified ✓1/✗0 (stats read \
+         back from the side collection): {rec2_txt}"
+    );
+}
+
+/// ADR 0006 orphan-resurrection guard: a procedure deleted then re-learned with
+/// the same (error, fix) lands on the same deterministic id. Its old
+/// `_mod_procstats` row (if `delete_procstats` didn't reach it) must NOT be
+/// resurrected onto the fresh procedure — the delete was an explicit "drop this
+/// history" signal. The re-learn must start at ✓0/✗0, unverified.
+#[test]
+fn relearn_after_delete_does_not_resurrect_stats() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let err = format!(
+        "error E0277 ResurrectGuard unsatisfied proc {}",
+        std::process::id()
+    );
+    let fix = "impl ResurrectGuard for the type";
+
+    // learn → outcome(success) → grab id
+    let input1 = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_learn","arguments":{"error":err,"fix":fix,"context":"c"}}}),
+    );
+    let (so1, se1) = run_mcp(&mind, &ort, &input1);
+    let learn_txt = parse_mcp_results(&so1)
+        .get(&2)
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default();
+    let id = learn_txt
+        .split("[id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .unwrap_or("")
+        .to_string();
+    assert!(!id.is_empty(), "no id parsed: {learn_txt}\n{se1}");
+
+    let input2 = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_outcome","arguments":{"memory_id":id,"signal_type":"test_passed"}}}),
+    );
+    let (so2, _) = run_mcp(&mind, &ort, &input2);
+    assert!(
+        !parse_mcp_results(&so2)
+            .get(&2)
+            .map(|(e, _)| *e)
+            .unwrap_or(true),
+        "outcome failed"
+    );
+
+    // delete the procedure via CLI (delete_procstats runs, but we re-learn to prove
+    // that even if a stale row survived, the new procedure starts fresh).
+    let _ = Command::new(bin())
+        .args(["delete", "_procedures", &id])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .output();
+
+    // re-learn the same (err, fix) → same id → must be ✓0/✗0 unverified.
+    let input3 = format!(
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_learn","arguments":{"error":err,"fix":fix,"context":"c"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_recall","arguments":{"error":err}}}),
+    );
+    let (so3, se3) = run_mcp(&mind, &ort, &input3);
+    let r3 = parse_mcp_results(&so3);
+    let relearn_id = r3.get(&2).map(|(_, t)| t.clone()).unwrap_or_default();
+    assert!(
+        relearn_id.contains(&id),
+        "re-learn must produce the SAME deterministic id {id}, got: {relearn_id}"
+    );
+    let (rec_err, rec_txt) = r3.get(&3).cloned().unwrap_or((true, String::new()));
+    assert!(!rec_err, "recall errored: {rec_txt}\n{se3}");
+    // Find the line for our fix and assert it is unverified ✓0/✗0 (not resurrected).
+    let our_block = rec_txt
+        .split("\n\n")
+        .find(|b| b.contains(fix))
+        .unwrap_or_else(|| panic!("re-learned procedure not in recall: {rec_txt}"));
+    assert!(
+        our_block.contains("unverified") && our_block.contains("✓0/✗0"),
+        "a re-learned procedure must start fresh (✓0/✗0 unverified), not resurrect old \
+         stats: {our_block}"
     );
 }
