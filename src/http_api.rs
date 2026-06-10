@@ -529,14 +529,25 @@ async fn fact_query(
 }
 
 /// `mind_fact_invalidate`: mark a fact invalid by id. Non-destructive — the row
-/// and its history stay; this flips the validity flag the duel model reads.
+/// and its history stay; this flips the validity flag the duel model reads. The
+/// caller's token-derived identity is attached as the audit actor (who hid it).
 async fn fact_invalidate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if let Err(c) = check_auth(&state, &headers) {
-        return c.into_response();
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    // Attribute to the token-derived identity, else the X-Agent hint, else "http"
+    // — an anonymous HTTP invalidate must read as "http", never fall through to
+    // the MCP/cli default. So we resolve the actor here and inject it explicitly.
+    let mut args = with_agent(args, &headers, derived);
+    if let Value::Object(m) = &mut args
+        && !m.contains_key("agent")
+    {
+        m.insert("agent".into(), Value::String("http".into()));
     }
     call(&state, "mind_fact_invalidate", args).await
 }
