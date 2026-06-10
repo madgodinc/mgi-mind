@@ -91,11 +91,33 @@ def recall_memory(query: str) -> str:
 
 CrewAI, AutoGen, and Band wrap the same way: a function the agent can call.
 
+## Async
+
+For async agent frameworks (LangGraph, Pydantic AI, the OpenAI Agents SDK, any
+FastAPI handler), use `AsyncMemory`. Same five verbs, `await`-able, so a memory
+call doesn't block the event loop:
+
+```python
+from mgimind import AsyncMemory
+
+async with AsyncMemory() as mem:
+    await mem.add("The release ships on the second Tuesday.")
+    ctx = await mem.search("when does it ship")
+```
+
+As an async tool, e.g. with Pydantic AI:
+
+```python
+@agent.tool
+async def recall_memory(ctx, query: str) -> str:
+    return str(await mem.search(query))
+```
+
 ## Status
 
-v0.1: connect-only, synchronous, five verbs. Async methods, a managed-server
-mode, and structured (non-text) results are planned. The server speaks the same
-surface over MCP, so AI assistants (Claude Code, Cursor, Cline) can use the brain
-without this client at all.
+v0.2: connect-only, sync (`Memory`) and async (`AsyncMemory`), five verbs.
+Structured (non-text) results and a managed-server mode are planned. The server
+speaks the same surface over MCP, so AI assistants (Claude Code, Cursor, Cline)
+can use the brain without this client at all.
 
 Apache-2.0.
