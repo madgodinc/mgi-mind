@@ -107,6 +107,7 @@ pub async fn run(
     let app = Router::new()
         .route("/health", get(health))
         .route("/memory/search", post(memory_search))
+        .route("/memory/browse", post(memory_browse))
         .route("/memory/recall", post(memory_recall))
         .route("/memory/add", post(memory_add))
         .route("/memory/ingest", post(memory_ingest))
@@ -143,7 +144,9 @@ pub async fn run(
         eprintln!("  auth:   per-agent tokens — identity DERIVED from the bearer token");
         eprintln!("  agents: {agent_names}");
     }
-    eprintln!("  routes: POST /memory/{{search,recall,add,ingest,by-agent}}  POST /fact/add");
+    eprintln!(
+        "  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}  POST /fact/add"
+    );
     eprintln!("          POST /session/{{start,end,last}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
@@ -396,6 +399,44 @@ async fn memory_search(
         Ok(Format::Json) => search_json(&state, &args).await,
         Ok(Format::Text) => call(&state, "mind_search", args).await,
         Err(other) => bad_request(&format!("unknown format '{other}' (use 'json' or 'text')")),
+    }
+}
+
+/// Browse/list memories by metadata with no search query (the inventory path).
+/// JSON by default returns the structured MemoryRecord list; `format: "text"`
+/// returns the rendered block via `mind_browse`. Same metadata filters as search.
+async fn memory_browse(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    note_read(&state, &derived, &headers);
+    match resolve_format(&args) {
+        Ok(Format::Json) => browse_json(&state, &args).await,
+        Ok(Format::Text) => call(&state, "mind_browse", args).await,
+        Err(other) => bad_request(&format!("unknown format '{other}' (use 'json' or 'text')")),
+    }
+}
+
+/// `/memory/browse` with `format=json`: the structured MemoryRecord list.
+async fn browse_json(state: &AppState, args: &Value) -> Response {
+    let mfilter = crate::mcp::memory_filter_from_args(args);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    match crate::storage::list_filtered(&state.config, &mfilter, limit).await {
+        // `truncated` tells a caller the result is a newest-window, not the whole
+        // matching set — so it can page with created_before or narrow the filter.
+        Ok((records, truncated)) => {
+            Json(json!({ "ok": true, "results": records, "truncated": truncated })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": format!("{e:#}") })),
+        )
+            .into_response(),
     }
 }
 
