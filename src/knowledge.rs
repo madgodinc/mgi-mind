@@ -233,6 +233,12 @@ pub struct Fact {
     pub predicate: String,
     pub object: String,
     pub created_at: Option<String>,
+    /// When this value stopped being current (set by `dampen_loser` /
+    /// `mark_superseded` on a TemporalSingle flip). `None` for a fact that is
+    /// still active — its validity interval is `[created_at, valid_until)`, open
+    /// on the right while active. Reading this is what enables point-in-time
+    /// (`as_of`) queries; before, the field was written but no reader saw it.
+    pub valid_until: Option<String>,
     pub valid: bool,
 }
 
@@ -499,28 +505,7 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
 
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            let p = &point.payload;
-            let id = point
-                .id
-                .as_ref()
-                .map(|pid| {
-                    use qdrant_client::qdrant::point_id::PointIdOptions;
-                    match &pid.point_id_options {
-                        Some(PointIdOptions::Uuid(u)) => u.clone(),
-                        Some(PointIdOptions::Num(n)) => n.to_string(),
-                        None => "unknown".to_string(),
-                    }
-                })
-                .unwrap_or_default();
-
-            facts.push(Fact {
-                id,
-                subject: extract_string(p, "subject").unwrap_or_default(),
-                predicate: extract_string(p, "predicate").unwrap_or_default(),
-                object: extract_string(p, "object").unwrap_or_default(),
-                created_at: extract_string(p, "created_at"),
-                valid: true,
-            });
+            facts.push(fact_from_point(point));
         }
 
         match response.next_page_offset {
@@ -538,6 +523,38 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
 /// `stale`: a stale fact lost a contradiction and is gone; a superseded fact is
 /// a past-but-once-true entry in a timeline, surfaced here and only here.
 /// Default `query_facts` still hides both. Optionally narrow to one predicate.
+/// Build a `Fact` from a scrolled point — one place, so the `valid_until` field
+/// (and the rest) can't drift between the several query paths.
+fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
+    let p = &point.payload;
+    Fact {
+        id: point
+            .id
+            .as_ref()
+            .map(storage::format_point_id)
+            .unwrap_or_default(),
+        subject: extract_string(p, "subject").unwrap_or_default(),
+        predicate: extract_string(p, "predicate").unwrap_or_default(),
+        object: extract_string(p, "object").unwrap_or_default(),
+        created_at: extract_string(p, "created_at"),
+        valid_until: extract_string(p, "valid_until"),
+        valid: true,
+    }
+}
+
+/// Was a fact current at instant `at`? Its validity interval is
+/// `[created_at, valid_until)` — half-open: valid from creation, up to (but not
+/// including) the moment it was superseded. An active fact (`valid_until = None`)
+/// is open on the right: current for any `at >= created_at`. A fact with no
+/// `created_at` (legacy) is treated as always-having-existed (`at < valid_until`
+/// only). Pure, so it is unit-tested without Qdrant. Timestamps compared as
+/// RFC3339 strings (lexicographic == chronological for uniform UTC).
+fn fact_valid_at(created_at: Option<&str>, valid_until: Option<&str>, at: &str) -> bool {
+    let after_start = created_at.is_none_or(|from| from <= at);
+    let before_end = valid_until.is_none_or(|until| at < until);
+    after_start && before_end
+}
+
 pub async fn query_fact_history(
     config: &MindConfig,
     subject: &str,
@@ -576,19 +593,7 @@ pub async fn query_fact_history(
         }
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            let p = &point.payload;
-            facts.push(Fact {
-                id: point
-                    .id
-                    .as_ref()
-                    .map(storage::format_point_id)
-                    .unwrap_or_default(),
-                subject: extract_string(p, "subject").unwrap_or_default(),
-                predicate: extract_string(p, "predicate").unwrap_or_default(),
-                object: extract_string(p, "object").unwrap_or_default(),
-                created_at: extract_string(p, "created_at"),
-                valid: true,
-            });
+            facts.push(fact_from_point(point));
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
@@ -603,6 +608,89 @@ pub async fn query_fact_history(
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
+    });
+    Ok(facts)
+}
+
+/// POINT-IN-TIME query: which facts about `subject` were CURRENT at instant
+/// `at`? This is the bay-temporal capability the `valid_until` machinery was
+/// built for. Unlike `query_facts` (only the present) and `query_fact_history`
+/// (the whole superseded chain), this returns the slice of the timeline valid at
+/// one moment: `created_at <= at < valid_until` for each fact. For a
+/// TemporalSingle predicate that yields the one value current then.
+///
+/// Considers active AND superseded facts (the history is in superseded entries),
+/// but excludes `valid=false` (intentionally invalidated) — a deleted fact is
+/// not "what was true", it was a mistake retracted.
+pub async fn query_fact_as_of(
+    config: &MindConfig,
+    subject: &str,
+    predicate: Option<&str>,
+    at: &str,
+) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    // The timeline is exactly the chain statuses: Active (current), Superseded
+    // (past TemporalSingle), Stale (a dampened Single loser — also carries a
+    // valid_until), plus legacy facts that have no `status` field (read as
+    // Active). We must NOT pull Contested (both still live, no decided interval),
+    // QuarantineCandidate (rejected weak), PropagationShadowed/Unknown — they are
+    // valid=true but not points on a temporal line, so they'd pollute the slice.
+    // This is a WHITELIST of the chain, not a removal of the hidden-status filter.
+    let timeline_statuses = Filter::should([
+        Condition::matches("status", EntryStatus::Active.as_str().to_string()),
+        Condition::matches("status", EntryStatus::Superseded.as_str().to_string()),
+        Condition::matches("status", EntryStatus::Stale.as_str().to_string()),
+        Condition::is_empty("status"), // legacy facts predate the status field
+    ]);
+    let mut must = vec![
+        Condition::matches("subject", subject.to_string()),
+        Condition::matches("valid", "true".to_string()),
+        timeline_statuses.into(),
+    ];
+    if let Some(p) = predicate {
+        must.push(Condition::matches("predicate", p.to_string()));
+    }
+    let filter = Filter {
+        must,
+        ..Default::default()
+    };
+
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let f = fact_from_point(point);
+            if fact_valid_at(f.created_at.as_deref(), f.valid_until.as_deref(), at) {
+                facts.push(f);
+            }
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    // Deterministic order: by predicate then object, so a multi-predicate subject
+    // reads stably and a tie (two facts valid at the same instant) is reproducible.
+    facts.sort_by(|a, b| {
+        a.predicate
+            .cmp(&b.predicate)
+            .then_with(|| a.object.cmp(&b.object))
     });
     Ok(facts)
 }
@@ -835,27 +923,7 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
         }
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            let p = &point.payload;
-            let id = point
-                .id
-                .as_ref()
-                .map(|pid| {
-                    use qdrant_client::qdrant::point_id::PointIdOptions;
-                    match &pid.point_id_options {
-                        Some(PointIdOptions::Uuid(u)) => u.clone(),
-                        Some(PointIdOptions::Num(n)) => n.to_string(),
-                        None => "unknown".to_string(),
-                    }
-                })
-                .unwrap_or_default();
-            facts.push(Fact {
-                id,
-                subject: extract_string(p, "subject").unwrap_or_default(),
-                predicate: extract_string(p, "predicate").unwrap_or_default(),
-                object: extract_string(p, "object").unwrap_or_default(),
-                created_at: extract_string(p, "created_at"),
-                valid: true,
-            });
+            facts.push(fact_from_point(point));
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
@@ -1021,27 +1089,7 @@ pub async fn find_facts_by_subject_predicate(
         }
         let response = client.scroll(builder).await?;
         for point in &response.result {
-            let p = &point.payload;
-            let id = point
-                .id
-                .as_ref()
-                .map(|pid| {
-                    use qdrant_client::qdrant::point_id::PointIdOptions;
-                    match &pid.point_id_options {
-                        Some(PointIdOptions::Uuid(u)) => u.clone(),
-                        Some(PointIdOptions::Num(n)) => n.to_string(),
-                        None => "unknown".to_string(),
-                    }
-                })
-                .unwrap_or_default();
-            facts.push(Fact {
-                id,
-                subject: extract_string(p, "subject").unwrap_or_default(),
-                predicate: extract_string(p, "predicate").unwrap_or_default(),
-                object: extract_string(p, "object").unwrap_or_default(),
-                created_at: extract_string(p, "created_at"),
-                valid: true,
-            });
+            facts.push(fact_from_point(point));
         }
         match response.next_page_offset {
             Some(next) => offset = Some(next),
@@ -1107,6 +1155,37 @@ pub async fn count_pending_conflicts(config: &MindConfig) -> Result<(u64, u64)> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn fact_valid_at_is_half_open_interval() {
+        // [created_at, valid_until): valid from creation up to (not incl) the
+        // moment it was superseded. This is the primitive behind `as_of`.
+        let from = "2025-01-01T00:00:00Z";
+        let until = "2025-06-01T00:00:00Z";
+        // Inside the interval.
+        assert!(fact_valid_at(
+            Some(from),
+            Some(until),
+            "2025-03-01T00:00:00Z"
+        ));
+        // At the start (inclusive).
+        assert!(fact_valid_at(Some(from), Some(until), from));
+        // At the end (EXCLUSIVE — the new value takes over here).
+        assert!(!fact_valid_at(Some(from), Some(until), until));
+        // Before it existed.
+        assert!(!fact_valid_at(
+            Some(from),
+            Some(until),
+            "2024-12-31T00:00:00Z"
+        ));
+        // Active fact (no valid_until) — current for anything at/after creation.
+        assert!(fact_valid_at(Some(from), None, "2030-01-01T00:00:00Z"));
+        assert!(!fact_valid_at(Some(from), None, "2024-01-01T00:00:00Z"));
+        // Legacy fact (no created_at) — treated as always-having-existed, bounded
+        // only by valid_until.
+        assert!(fact_valid_at(None, Some(until), "2025-03-01T00:00:00Z"));
+        assert!(!fact_valid_at(None, Some(until), until));
+    }
+
     /// Helper: build a `valid = true` fact with a fixed subject/predicate so
     /// the cases below differ only on `object`. The conflict detector is
     /// concerned with object disagreement, not identity rewriting.
@@ -1117,6 +1196,7 @@ mod tests {
             predicate: "primary_language".into(),
             object: object.into(),
             created_at: None,
+            valid_until: None,
             valid: true,
         }
     }

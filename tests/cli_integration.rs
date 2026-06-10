@@ -1553,3 +1553,108 @@ fn browse_archived_lists_forgotten_and_restores_from_listing() {
 
     let _ = run(&["drop", &lib]);
 }
+
+// Point-in-time `as_of` (PR-A1, circle 2, axis: temporal): a TemporalSingle
+// subject's CURRENT fact differs by query instant. Berlin then Munich; as_of in
+// the far future returns Munich (current), as_of before Munich's takeover returns
+// Berlin (the superseded prior value, time-travelled to). This is the capability
+// the valid_until field was built for — and proves valid_until reaches a reader.
+#[test]
+fn fact_as_of_returns_the_value_current_at_that_instant() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    let pid = std::process::id();
+    let predicate = format!("asof_pred_{pid}");
+    let subject = format!("asof_subj_{pid}");
+
+    // Register TemporalSingle, add Berlin (becomes active), add Munich (Berlin ->
+    // superseded with valid_until ~= the moment Munich is added). Then query
+    // history (to read Berlin's created_at) and as_of at two instants.
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_predicate","arguments":{
+                "action":"register","predicate":predicate,"cardinality":"TemporalSingle"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"Berlin"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"add","subject":subject,"predicate":predicate,"object":"Munich"}}}),
+        // id 5: as_of far in the FUTURE -> the current value (Munich).
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject,"as_of":"2099-01-01T00:00:00Z"}}}),
+        // id 6: as_of far in the PAST (before either existed) -> nothing.
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject,"as_of":"2000-01-01T00:00:00Z"}}}),
+    );
+
+    let (stdout, stderr) = run_mcp(&mind, &ort, &input);
+    let results = parse_mcp_results(&stdout);
+    let future = results.get(&5).cloned().unwrap_or((true, String::new()));
+    let past = results.get(&6).cloned().unwrap_or((true, String::new()));
+    let chain = format!("future: {future:?}\npast: {past:?}\n--- stderr ---\n{stderr}");
+
+    assert!(!future.0, "as_of future query must succeed: {chain}");
+    assert!(
+        future.1.contains("Munich") && !future.1.contains("Berlin"),
+        "as_of in the future must return the CURRENT value (Munich), not Berlin: {chain}"
+    );
+    assert!(!past.0, "as_of past query must succeed: {chain}");
+    assert!(
+        !past.1.contains("Berlin") && !past.1.contains("Munich"),
+        "as_of before anything existed must return nothing: {chain}"
+    );
+
+    // And the discriminator: as_of at the instant Berlin was current (just after
+    // its created_at, before Munich) must return Berlin. Read Berlin's created_at
+    // from history, then query as_of one second later.
+    let hist_in = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_fact","arguments":{
+                "action":"query","subject":subject,"history":true}}}),
+    );
+    let (hstdout, _he) = run_mcp(&mind, &ort, &hist_in);
+    let hres = parse_mcp_results(&hstdout);
+    let hist = hres.get(&2).cloned().unwrap_or((true, String::new()));
+    // history render shows "valid: <from> .. <until>" for Berlin (superseded).
+    if let Some(from) = hist
+        .1
+        .split("valid: ")
+        .nth(1)
+        .and_then(|s| s.split(" ..").next())
+        .map(str::to_string)
+    {
+        let asof_in = format!(
+            "{}\n{}\n{}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"mind_fact","arguments":{
+                    "action":"query","subject":subject,"as_of":from}}}),
+        );
+        let (astdout, _ae) = run_mcp(&mind, &ort, &asof_in);
+        let ares = parse_mcp_results(&astdout);
+        let at_berlin = ares.get(&2).cloned().unwrap_or((true, String::new()));
+        assert!(
+            at_berlin.1.contains("Berlin"),
+            "as_of at Berlin's valid-from instant must return Berlin, got: {:?}",
+            at_berlin
+        );
+    }
+}
