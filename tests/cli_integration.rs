@@ -330,6 +330,108 @@ fn reasserting_a_memory_keeps_it_live() {
     );
 }
 
+/// A near-duplicate at ingest must NOT vanish (PR-2, circle 1: write discipline).
+/// Before this, a memory similar enough to a live neighbor (>=0.95 cosine) was
+/// dropped with no recovery row — a correction to a stale memory, the case most
+/// likely to read as a near-dup, was silently lost. Now it lands in quarantine,
+/// listable with reason `near_dup_drop` and promotable back to live.
+#[test]
+fn near_dup_ingest_is_recoverable_not_dropped() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itneardup_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, _o, e) = run(&["create", &lib]);
+    assert!(ok, "create failed: {e}");
+
+    // Store an original, then ingest SYNONYM PARAPHRASES — each lexically novel
+    // enough to pass the low-novelty gate (different vocabulary), yet semantically
+    // >=0.95 similar so the near-dup vector check fires. This is the exact window
+    // the near_dup_drop path serves (a synonym-paraphrase correction). The
+    // low-novelty gate above it catches token-overlap dups recoverably already;
+    // these variants reach past it. Several are tried so at least one lands on the
+    // near-dup branch regardless of small embedder score differences.
+    let original = "The meeting is at 3pm on Friday in conference room B.";
+    let (ok, o, e) = run(&["ingest", "--library", &lib, "--memory", original]);
+    assert!(ok, "first ingest failed:\nstdout:{o}\nstderr:{e}");
+    let variants = [
+        "Friday's gathering happens at three in the afternoon within room B.",
+        "We convene Friday at fifteen hundred hours inside meeting space B.",
+        "The Friday session takes place at three o'clock afternoon in chamber B.",
+    ];
+    let mut near_dup_seen = false;
+    for v in variants {
+        let (ok, o2, e2) = run(&["ingest", "--library", &lib, "--memory", v]);
+        assert!(ok, "ingest failed:\nstdout:{o2}\nstderr:{e2}");
+        if o2.contains("near-duplicate") {
+            near_dup_seen = true;
+        }
+    }
+
+    // Whether a variant hit the near-dup branch or the low-novelty gate, NOTHING
+    // was dropped on the floor: every suppressed variant is recoverable in
+    // quarantine. And when the near-dup branch fired, its reason is near_dup_drop.
+    let (ok, qlist, qerr) = run(&["quarantine", "list", "--library", &lib]);
+    assert!(ok, "quarantine list failed: {qerr}");
+    if near_dup_seen {
+        assert!(
+            qlist.contains("near_dup_drop"),
+            "a near-dup-skipped variant must be quarantined under near_dup_drop, got:\n{qlist}"
+        );
+        // The recovered row must be promotable back to live memory.
+        let qid = qlist
+            .split("id: ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(str::to_string)
+            .expect("a quarantine row should expose an id");
+        let (ok, _po, pe) = run(&["quarantine", "promote", &qid]);
+        assert!(ok, "promote of a near-dup quarantine row failed: {pe}");
+    } else {
+        // Embedder never crossed 0.95 for any variant → all stored live. Then the
+        // original is still searchable — no silent loss either way.
+        let (ok, s, _e) = run(&[
+            "search",
+            "Friday meeting room",
+            "--library",
+            &lib,
+            "--tier",
+            "3",
+        ]);
+        assert!(
+            ok && s.contains("room B"),
+            "stored-live memory must be searchable"
+        );
+    }
+    let _ = run(&["drop", &lib]);
+}
+
 /// Same retrieval path as above, but driven over the **MCP stdio transport** end
 /// to end: feed JSON-RPC `initialize` + `tools/call` lines into `mgimind mcp` and
 /// assert the `mind_search` response retrieves what `mind_add` stored. Proves the

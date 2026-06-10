@@ -91,7 +91,7 @@ impl IngestReport {
         );
         if self.skipped_dup > 0 {
             s.push_str(&format!(
-                "\nSkipped {} near-duplicate(s).",
+                "\nSkipped {} near-duplicate(s) (kept in quarantine — re-assert to restore).",
                 self.skipped_dup
             ));
         }
@@ -358,19 +358,21 @@ pub async fn run_ingest_authored(
                     continue;
                 }
 
-                // Near-dup check (the missing audit #8 primitive): skip writing a
-                // memory that already has a very similar neighbor.
+                // Near-dup check (the missing audit #8 primitive): don't write a
+                // memory that already has a very similar neighbor — but DON'T drop
+                // it on the floor either. A correction to a stale memory is exactly
+                // the case most likely to read as a near-dup of the thing it means
+                // to replace, so an unrecoverable drop here silently eats real
+                // user writes. Route it to the recoverable quarantine layer: it
+                // stays out of ordinary search but is listable and promotable, so
+                // a wrongly-suppressed correction can be restored.
                 if let Ok(Some(score)) =
                     crate::storage::nearest_score(config, Some(library), &content).await
                     && score >= INGEST_DEDUP_THRESHOLD
                 {
                     report.skipped_dup += 1;
-                    // This drop is UNRECOVERABLE (no quarantine row), and a
-                    // correction to a stale fact is exactly the case most likely
-                    // to read as a near-dup of the thing it means to replace. So
-                    // log the dropped content + the score, making a "lost write"
-                    // answerable from the audit log and giving us the data to
-                    // decide later whether this threshold eats real corrections.
+                    // Keep the SkipDup audit event (history + the data to tune the
+                    // threshold), with the actual content in `after`.
                     crate::audit::record(
                         crate::audit::AuditEvent::new(
                             crate::audit::AuditOp::SkipDup,
@@ -383,6 +385,31 @@ pub async fn run_ingest_authored(
                             "near-dup skip (score {score:.3} ≥ {INGEST_DEDUP_THRESHOLD})"
                         )),
                     );
+                    // Clobber guard: a quarantine point is keyed by
+                    // deterministic_id(library, content.trim()). If this near-dup
+                    // is in fact BYTE-IDENTICAL to a live memory (cosine 1.0),
+                    // writing a quarantine row with the same id would demote the
+                    // live point. In that case it's already stored — leave it
+                    // live, don't quarantine. Only distinct-but-similar gets a row.
+                    //
+                    // NOTE: `nearest_score` embeds the RAW content while
+                    // `live_memory_exists`/`add_quarantined`/`deterministic_id`
+                    // all compare on `content.trim()`. That mismatch is LOAD-
+                    // BEARING here: a whitespace-only variant ("  foo  " vs live
+                    // "foo") scores ~1.0 on the raw embedding (reaching this
+                    // branch) but is caught by the trim-based guard (same id) and
+                    // correctly left live. Do not "tidy" one side to match the
+                    // other without re-checking this case.
+                    if !crate::storage::live_memory_exists(config, library, &content).await {
+                        let _ = crate::storage::add_quarantined(
+                            config,
+                            library,
+                            &content,
+                            Some(src),
+                            "near_dup_drop",
+                        )
+                        .await?;
+                    }
                     continue;
                 }
                 // add_memory also secret-scrubs and is idempotent on exact content.
