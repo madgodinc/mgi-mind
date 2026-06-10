@@ -429,6 +429,26 @@ pub async fn mark_superseded(config: &MindConfig, fact_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Retire the loser of a Flip by predicate cardinality — the single source of
+/// truth for "which terminal status does a displaced fact get". Used by BOTH the
+/// write path (`add_fact`, when a new value flips the old) and the consolidate
+/// batch pass, so the card->action mapping lives in one place instead of being
+/// re-derived at each call site. `Single` (and the unreachable `Multi`) dampen to
+/// stale; `TemporalSingle` supersedes (kept as queryable history).
+pub async fn retire_loser(
+    config: &MindConfig,
+    cardinality: crate::knowledge::Cardinality,
+    fact_id: &str,
+) -> Result<()> {
+    match cardinality {
+        crate::knowledge::Cardinality::TemporalSingle => mark_superseded(config, fact_id).await,
+        // Single dampens; Multi never reaches a Flip (admits_conflict() == false),
+        // so it can only arrive here through a misuse — treat it as a dampen
+        // rather than panic, since this runs on the live write path.
+        _ => dampen_loser(config, fact_id).await,
+    }
+}
+
 // ===== Tests for the pure helpers =====
 //
 // These tests fix the *shape* of the formulas and the *behavioural
