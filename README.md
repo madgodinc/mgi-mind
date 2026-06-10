@@ -31,6 +31,7 @@ local. No cloud account, no API key, no telemetry.
 ## Contents
 
 - [What it is](#what-it-is)
+  - [The validity model](#the-validity-model)
 - [Why bother](#why-bother)
 - [Quick start](#quick-start)
 - [Using it](#using-it)
@@ -72,6 +73,45 @@ Around retrieval there's a knowledge graph for structured facts, per-agent
 session logs for cross-session continuity, and an encrypted terminal-only
 vault for secrets.
 
+### The validity model
+
+Hybrid search is table stakes; most memory tools have some version of it.
+The part that is harder to find is what keeps the store from ossifying as it
+fills with old, contradictory, or self-reinforcing beliefs. These run mostly
+on their own:
+
+- **Duel rule.** When a new fact contradicts an existing one on the same
+  subject and predicate, the second write resolves against the first instead
+  of piling up a second "truth". An entrenched fact (many dependants,
+  confirmations, age) holds; a strong fresh fact flips it and dampens the
+  loser to a hidden `stale` status; a borderline one is marked contested or
+  diverted to quarantine. Nothing is deleted, so the audit log keeps the
+  loser. Automatic, inside a normal `mind_fact add`.
+- **Doubt window.** An entrenched fact has to keep re-justifying itself. A
+  retrieval whose context has drifted from where the fact was learned does
+  not strengthen it, and after enough such drifted retrievals the fact's
+  ranking weight is halved until a fresh in-context confirmation. A
+  background pass re-tests entrenched facts that have gone quiet, under hard
+  guarantees: never during a tool call, a per-tick cap, and a load-aware
+  cadence.
+- **Inheritance discount.** Facts carried into a session from memory count at
+  half weight and cannot co-confirm each other. One stale source agreeing
+  with itself is not two confirmations, so memory can't self-reinforce into
+  false certainty.
+- **Bi-temporal facts.** A predicate can be registered (`mind_predicate`) as
+  single-valued, temporal-single (one current value, but the previous ones
+  are kept and queryable by date via `mind_history`), or multi-valued. A
+  superseded value is hidden from default ranking, not erased.
+- **Typed outcome signals.** `mind_outcome` records that a remembered fix
+  actually worked (`test_passed`, `code_compiled`, `user_confirmed`,
+  `cited_by`). A real success raises a memory's weight and marks a procedure
+  verified; a failure pulls the weight down rather than being ignored.
+
+These are research-shaped mechanisms, and their tuning constants are still
+being calibrated (see [BENCHMARKS.md](BENCHMARKS.md) for what is and isn't
+measured). The shape is the point: a memory that argues with itself and
+demotes what stops holding up, instead of accreting forever.
+
 ## Why bother
 
 An assistant without memory asks for the same context every session and
@@ -104,13 +144,21 @@ relevance gate, dedup, facts, sessions, procedural memory ("error → fix"
 playbooks), and a terminal-only vault — behind one binary you run
 yourself.
 
-A note on evaluating it: one benchmark scores one slice. The conflict
-resolution, the doubt window, the bi-temporal facts, the procedural layer,
-and the multi-agent surface have no single standard test to sit in. MGI-Mind
-is a technical brain that coordinates how an AI works over time, and it sits
-outside the systems today's memory benchmarks were built to rank. Different,
-not superior. [BENCHMARKS.md](BENCHMARKS.md) reports the slices we can measure
-honestly and names the parts no public test reaches yet.
+A note on evaluating it. [BENCHMARKS.md](BENCHMARKS.md) reports **retrieval
+recall** (R@k on LongMemEval-S, zero-API, no LLM judge): given a question,
+did the gold session land in the top-k. On the default CPU config that is
+R@5 ≈ 98%. This is not the same metric as the QA-accuracy numbers other
+memory tools publish (they run an answerer and a judge over their retrieval),
+so do not put it in the same table. It measures whether the evidence was
+retrievable, not whether an LLM then answered correctly. mgi-mind has no
+answering step, so retrieval recall is the number it actually owns.
+
+The honest gap: the validity model (duel rule, doubt window, supersession)
+is the differentiator, and retrieval recall does not test it. The benchmark
+that does is STALE, a belief-revision suite; its harness is scaffolded in the
+repo but not yet wired to a judge, so there is no published STALE number yet.
+Until there is, treat the validity model as a designed mechanism with no
+head-to-head score, not a proven win.
 
 ## Quick start
 
@@ -149,7 +197,7 @@ embedder loads), the Qdrant binary, the embedding model
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v1.0.1 curl ... | sh` — pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v1.6.4 curl ... | sh` — pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh` — just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -455,22 +503,26 @@ memories must be re-embedded:
 
 ## Status and audit
 
-Current version: **1.0.x** (semver-stable since v1.0.0). Built on top
-of the 0.10.x audit log and ephemeral viewer, the 0.11.x quarantine
-layer + best-effort retrieval policy, the 0.12.x viewer wave, the
-0.13.x session liveness, and the 0.14.x procedural-memory дом
-(LongMemEval baseline + Д6 dataset of 227 pairs from 20 public repos).
-The 1.0 contract is the asymmetric "Qdrant now → md says" md reconcile
-diff, the `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch, and the
-31-tool MCP surface — these are frozen until a 2.0 bump.
+Current version: **1.6.4** (semver-stable since v1.0.0). The 0.x line built
+the foundation: the audit log and ephemeral viewer (0.10), the quarantine
+layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
+session liveness (0.13), and procedural memory (0.14, benchmarked on
+LongMemEval-S plus a 227-pair error→fix dataset from 20 public repos). The
+1.x line added the validity model: the duel rule, the doubt window and its
+background re-test, bi-temporal fact supersession, the confidence score, and
+typed outcome signals (`mind_outcome`), plus install-mode CPU/GPU profiles.
 
-The project went through a code audit covering 27 issues. **21 are fully
-fixed, 6 are partial** — the mechanism shipped, hardening continues.
-[`AUDIT_STATUS.md`](AUDIT_STATUS.md) accounts for every issue one by one,
-including the gaps (fact supersession isn't implemented yet, for
-example). [`CHANGELOG.md`](CHANGELOG.md) has the per-release history,
-and [`ROADMAP.md`](ROADMAP.md) names what is committed for v1.1–v2.0
-and which directions are still **candidate** at the v3.0 horizon.
+The MCP surface is a frozen contract until a 2.0 bump: 25 consolidated tools
+plus 15 deprecated aliases kept for compatibility. The other 1.0 contracts
+are the asymmetric "Qdrant now → md says" reconcile diff and the
+`MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch.
+
+The project went through a code audit; [`AUDIT_STATUS.md`](AUDIT_STATUS.md)
+accounts for every issue one by one with where it was fixed or why it was
+deferred. [`CHANGELOG.md`](CHANGELOG.md) has the per-release history (current
+through v1.6.4, with a v1.7 candidate section), and
+[`ROADMAP.md`](ROADMAP.md) names what is committed for the next releases and
+which directions are still **candidate** at the v3.0 horizon.
 
 ## Project layout
 
@@ -480,22 +532,34 @@ src/
   storage.rs     Qdrant: single collection, hybrid search, history, stats, migrate, chunking
   embedder.rs    ONNX embedding (model-aware pooling, prefixes, 512-token cap)
   reranker.rs    cross-encoder reranking
-  knowledge.rs   knowledge-graph facts
+  knowledge.rs   knowledge-graph facts + cardinality + supersession
+  duel.rs        duel rule: resolve contradicting facts (flip / contested / quarantine)
+  doubt.rs       doubt window + background active re-test of entrenched facts
+  confidence.rs  per-fact confidence score (dependants / confirmations / signals)
+  outcome.rs     typed external signals (test_passed, code_compiled, ...) into weight
   procedure.rs   procedural memory: learn / recall / outcome
   ingest.rs      auto-extract & ingest candidates
-  relevance.rs   v0.11 relevance gate (length, blacklists, decision markers, token novelty)
+  relevance.rs   relevance gate (length, blacklists, decision markers, token novelty)
+  retrieval_policy.rs  search-before-answer classifier
+  provenance.rs  cited external snippets with mandatory source
+  extractor.rs   optional local LLM extraction (off by default)
   consolidate.rs merge duplicates, report cold entries
   md_reconcile.rs md import as reconcile with "md wins"
   audit.rs       append-only audit log for every storage mutation
+  http_api.rs    loopback HTTP surface for multi-agent access
   viewer.rs      ephemeral local HTTP viewer (axum, static frontend baked in)
+  pulse.rs       live graph pulses for the viewer
   session.rs     per-agent session files
+  secrets.rs     secret-scrub on the write path
   vault.rs       encrypted secret vault (terminal only)
   mcp.rs         MCP server over stdio (hand-rolled JSON-RPC; warm in-process models)
-  config.rs      configuration
+  config.rs      configuration + install-mode profiles
   integrity.rs   pinned SHA-256 hashes for downloads
   util.rs        atomic writes, verified downloads
+  (plus migrate, install-mode, access/decay, and bench harnesses)
 tests/
   cli_integration.rs   black-box tests against a real Qdrant (CLI + MCP round-trip)
+  http_integration.rs  the multi-agent HTTP surface end to end
 ```
 
 ## License
