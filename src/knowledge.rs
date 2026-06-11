@@ -301,6 +301,50 @@ fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync
         .clone()
 }
 
+/// Holds an exclusive cross-process advisory lock on the facts critical section
+/// for the lifetime of the value. The OS releases it if the process dies, so a
+/// crash can't wedge the lock. Dropping the `File` unlocks.
+struct FactsCrossProcessGuard {
+    _file: std::fs::File,
+}
+
+/// Take the cross-process facts lock (`data_dir/.facts.lock`). The in-process
+/// `SUBJECT_PREDICATE_LOCKS` serializes agents WITHIN one process; this extends
+/// serialization to SEPARATE processes on the same machine, closing the
+/// torn-state bug (two Active facts on a Single axis) the #53 verification
+/// exposed. Coarse by design — one lock for ALL `add_fact` calls, not per-axis:
+/// file locks don't granulate cheaply, and cross-process fact writes are rare,
+/// so serializing them machine-wide is the right trade. flock is blocking +
+/// sync, so we acquire it on a blocking thread to avoid stalling the runtime.
+///
+/// SCOPE (do not overstate): this is an ADVISORY flock, honored only by callers
+/// that take it. It covers the add-vs-add duel race (the proven bug). It does
+/// NOT yet serialize add-vs-`invalidate_fact` / add-vs-`consolidate --apply` /
+/// add-vs-doubt-tick across processes — those fact-mutating paths bypass this
+/// lock, so the torn-Active invariant is still reachable via add-vs-consolidate.
+/// Extending the lock to those writers is a tracked follow-up (see the mind_learn
+/// note "session-2026-06-10-circle1-pr6-concurrency-bug").
+async fn lock_facts_cross_process(config: &MindConfig) -> Result<FactsCrossProcessGuard> {
+    use fs2::FileExt;
+    let path = config.data_dir.join(".facts.lock");
+    let file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+        // create(true) so the lock file appears on first use; it's a zero-byte
+        // sentinel, never written to.
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening facts lock file at {}", path.display()))?;
+        f.lock_exclusive()
+            .context("acquiring exclusive facts lock")?;
+        Ok(f)
+    })
+    .await
+    .context("facts lock task panicked")??;
+    Ok(FactsCrossProcessGuard { _file: file })
+}
+
 pub async fn add_fact(
     config: &MindConfig,
     subject: &str,
@@ -324,9 +368,15 @@ pub async fn add_fact_authored(
     // Post-critic (PR #5): acquire per-(subject, predicate) lock so
     // concurrent add_fact on the same axis cannot race the duel.
     // Held until the end of add_fact (including the upsert + dampen
-    // sequence below), ensuring atomic outcome per axis.
+    // sequence below), ensuring atomic outcome per axis WITHIN this process.
     let lock = lock_for_subject_predicate(subject, predicate);
     let _guard = lock.lock().await;
+
+    // circle-3: extend that serialization across SEPARATE processes on this
+    // machine. Held (via `_xproc`) through the whole read->duel->upsert->retire
+    // sequence, so two `mgimind` processes writing the same Single axis can't
+    // both read an empty set and both write themselves Active (the #53 bug).
+    let _xproc = lock_facts_cross_process(config).await?;
 
     let client = storage::get_client(config).await?;
     storage::ensure_facts_collection(&client).await?;

@@ -1228,16 +1228,12 @@ fn relearn_after_delete_does_not_resurrect_stats() {
 // Concurrency: N writers racing the SAME (subject, predicate) Single axis must
 // converge to exactly ONE visible winner — no two live facts, no torn state.
 //
-// IGNORED because it CURRENTLY FAILS, exposing a real bug: the per-axis write
-// lock (knowledge.rs SUBJECT_PREDICATE_LOCKS) is process-local, so SEPARATE
-// processes racing the same Single axis both read an empty/stale set and both
-// write themselves Active — two live winners on a Single axis. The in-process
-// case (one MCP server, many agents) IS serialized and is covered by the unit
-// tests in knowledge.rs; this cross-process gap needs a data_dir file-lock and
-// is scheduled for circle 2. The test is kept (not deleted) as a live regression
-// marker: when the file-lock lands, remove the `#[ignore]` and it must pass.
+// This pins the cross-process fix (circle 3): SEPARATE processes racing the same
+// Single axis are serialized by the data_dir `.facts.lock` (knowledge.rs
+// lock_facts_cross_process), so they can't both read an empty set and both write
+// Active. Before the file-lock this test FAILED (two Active winners); it is the
+// regression guard that the in-process-only lock no longer leaves a hole.
 // Facts are vectorless, so this needs only Qdrant, not the model.
-#[ignore = "KNOWN BUG (circle-2): cross-process add_fact races the duel — two Active winners on a Single axis. In-process lock does not span processes; needs a data_dir file-lock."]
 #[test]
 fn concurrent_writes_to_one_axis_converge_to_single_winner() {
     let Some(port) = qdrant_port() else {
