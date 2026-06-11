@@ -99,12 +99,68 @@ fix, retroactive walk, and what 290 passing unit tests can't tell
 you about a user-facing read path that drifted out of sync with
 the write model.
 
+### Validity model: six axes, every stored field now has a reader
+
+Three review rounds hardened the memory-validation model across six
+axes: provenance, write discipline, temporal correctness, concurrency,
+forgetting, and retrieval fidelity. The guiding rule each round: a
+stored field that nothing reads back is dead weight, so every change
+ships with the consumer that distinguishes the new behavior. PRs
+[#57](https://github.com/madgodinc/mgi-mind/pull/57)–[#62](https://github.com/madgodinc/mgi-mind/pull/62).
+
+**Temporal, point-in-time fact queries (PR #57).** `fact query
+--as-of <timestamp>` answers what a `(subject, predicate)` axis held at
+a past instant. The reader gives `valid_until` a job: before this,
+`dampen_loser` and `mark_superseded` wrote the timestamp and no query
+ever consulted it. A fact counts as valid at instant `t` over the
+half-open interval `[created_at, valid_until)`.
+
+**Forgetting, coldness surfaced in browse (PR #59).** `browse` and
+`list_filtered` stamp a recency-weighted `coldness` score on each
+record, so decay shows up before consolidation acts on it.
+`consolidate --archive-cold` archives the cold tail; the destructive
+prune stays a separate, narrower `cold_prune` so an archive sweep
+deletes only what the operator asked for.
+
+**Retrieval, per-query rerank override (PR #60).** `search --rerank /
+--no-rerank / --rerank-top-k N` overrides the configured reranker for
+one call, so an agent trades latency against precision per request, not
+per deployment.
+
+**Temporal cardinality inference (PR #61).** `migrate-v14` now proposes
+`TemporalSingle` alongside `Single` by reading a subject's superseded
+history, so a predicate that changes over time gets a cardinality that
+fits a value sequence and a single-value axis stays a conflict.
+
+**Concurrency, the torn-Active bug closed across every writer (PRs
+#58, #62).** Two processes adding to the same `Single` axis could each
+duel against a stale read and both end Active, violating the
+one-canonical-value invariant. PR #58 closed the add-vs-add case with a
+cross-process advisory file lock (`fs2` flock on
+`data_dir/.facts.lock`, released by the OS on process death, acquired
+on a blocking thread). PR #62 extended that lock to every path that
+flips a fact's status or validity: `invalidate_fact_authored` now takes
+it, and `redo-duels --apply` re-reads each axis under the lock,
+recomputes the winner, then retires the losers, so the decision and the
+write are one atomic step rather than a check against an unlocked
+snapshot. The duel winner order is total (newest `created_at`, `id`
+breaks ties) and lives in one shared comparator, so the dry-run plan
+and the applied result agree even when two facts share a timestamp.
+`set_fact_payload_field` stays lock-free by design: it writes only
+keys disjoint from status/validity, and Qdrant's `set_payload` merges
+named keys rather than replacing the payload, so a concurrent status
+write survives. A live run collapsed a torn `Single` axis from two
+Active facts to one; the loser kept its row with `status=stale` and a
+`valid_until`, and a second run found nothing left to do.
+
 ### Stats and tests
 
-- 290 unit tests pass (no change from 1.6.4).
-- 8 CLI integration tests pass (2 new for duel happy / Multi
-  regression).
-- Build remains warning-free.
+- 339 unit tests pass (up from 290; +49 across circle-3, including 3
+  that pin the total-order duel tie-break).
+- 8 CLI integration tests pass.
+- CI green on macOS, Ubuntu, and Windows, plus the real-Qdrant and
+  bundled-Qdrant integration suites and `cargo-audit`.
+- Build remains warning-free; `clippy` clean.
 
 ## 1.6.4 — Windows fix + doctor --fix cardinality + ADRs + SECURITY policy
 
