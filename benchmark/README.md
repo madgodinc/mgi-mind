@@ -5,19 +5,20 @@ Reproducible benchmark results for mgi-mind retrieval and recall.
 ## Layout
 
 ```
-benchmarks/
-├── README.md                           # this file
-├── v0.14.3-gpu/                        # baseline: pre-v1.4 retrieval
-│   ├── README.md                       # what was run + how
-│   └── results.json                    # headline R@k numbers
-└── (future runs land here, one dir per version)
+benchmark/
+├── README.md                           # this file (headline table + layout)
+├── datasets/                           # input corpora (LongMemEval-S, procedural pairs)
+└── results/                            # one dir per run, dated <YYYY-MM-DD>-<label>/
+    ├── 2026-06-03-gpu-v0143/           # GPU R@k runs: raw.json + summary.json + README
+    ├── 2026-06-02-cpu-overnight/       # CPU overnight R@k
+    └── ...                             # future runs land here
 ```
 
-Each `<version>-<platform>/` directory contains:
+Each `results/<date>-<label>/` directory contains:
 
 - `README.md` — what was run, hardware, model, env vars, reproduction steps.
-- `results.json` — machine-parseable numbers (R@k by mode, wall-time, raw counts).
-- Optional: `raw.json` — per-question outputs if the run produced them.
+- `summary.json` — machine-parseable numbers (R@k by mode, wall-time, raw counts).
+- `raw.json` — per-question outputs (with sha256 cited in BENCHMARKS.md).
 
 ## Headlines
 
