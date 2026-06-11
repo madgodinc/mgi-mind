@@ -1220,11 +1220,17 @@ pub async fn add_memory_authored(
         .context("Failed to add memory")?;
     // Audit the write. Empty target — one logical add can produce N point ids
     // for a long note; the (library, content) tuple is the meaningful trail.
-    crate::audit::record(
-        crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, "")
-            .after(truncate_for_audit(content))
-            .note(format!("{stored} chunks")),
-    );
+    // When an author is present (per-agent HTTP token, multi-agent runs), stamp
+    // it as the actor so the audit log self-sources the "who" — the Track-3
+    // "prove every decision" trail then needs no join against the payload author
+    // index. Absent an author (CLI/MCP single user) the actor defaults to "cli".
+    let mut event = crate::audit::AuditEvent::new(crate::audit::AuditOp::Add, library, "")
+        .after(truncate_for_audit(content))
+        .note(format!("{stored} chunks"));
+    if let Some(a) = author {
+        event = event.actor(a);
+    }
+    crate::audit::record(event);
     Ok(stored)
 }
 

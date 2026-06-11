@@ -439,6 +439,46 @@ fn http_surface_full_contract() {
         "invalidate audit must record the hidden triple in `before`; got: {row}"
     );
 
+    // 9) /audit route (Track-3 / Crescendo decision-ledger substrate): the
+    //    append-only trail is readable over HTTP, and a memory ADD by a named
+    //    token is now self-attributed in the audit log (actor=alice), so the
+    //    "prove every decision" trail needs no join against the payload index.
+    let audit = format!("{base}/audit");
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &bearer,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        "{\"limit\":500}",
+        &audit,
+    ]);
+    assert_eq!(code, 200, "/audit should 200, got {code}: {out}");
+    assert!(
+        out.contains("\"events\""),
+        "/audit must return an events array, got: {out}"
+    );
+    assert!(
+        out.contains("\"op\":\"add\"") && out.contains("\"actor\":\"alice\""),
+        "a memory add over a named token must be attributed to alice in the audit \
+         log (storage.rs Add event now stamps the author); got: {out}"
+    );
+    // A bad token is still rejected on the audit route — the trail isn't public.
+    let (code, _) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        "Authorization: Bearer WRONG",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        "{}",
+        &audit,
+    ]);
+    assert_eq!(code, 401, "/audit must reject a bad token with 401");
+
     // Best-effort cleanup so repeated runs don't accumulate collections in the
     // shared Qdrant. The guard kills the server regardless.
     let _ = Command::new(bin())

@@ -129,6 +129,7 @@ pub async fn run(
         .route("/session/context", post(session_context))
         .route("/stats/activity", post(stats_activity))
         .route("/should-search", post(should_search))
+        .route("/audit", post(audit_recent))
         .with_state(state);
 
     let bind = format!("{host}:{}", port.unwrap_or(0));
@@ -159,7 +160,7 @@ pub async fn run(
     eprintln!(
         "          POST /library/{{create,list}}  /quarantine/{{list,promote}}  /memory/restore"
     );
-    eprintln!("          POST /consolidate  /should-search");
+    eprintln!("          POST /consolidate  /should-search  /audit");
     eprintln!("          POST /session/{{start,end,last,context}}  GET /health");
     eprintln!("  stop:   Ctrl-C");
     eprintln!();
@@ -836,6 +837,44 @@ async fn should_search(
         return c.into_response();
     }
     call(&state, "mind_should_search", args).await
+}
+
+/// The append-only audit trail, most-recent-N. This is the Track-3 / Crescendo
+/// "prove every decision" substrate over HTTP: a multi-agent run reads it to
+/// render an attributable decision ledger (each event carries op / actor /
+/// target / before / after / note / timestamp). `limit` caps the count
+/// (default 200, hard max 2000 so a caller can't pull an unbounded log into a
+/// browser). `since_ts` is an optional RFC3339 lower bound (inclusive) for
+/// incremental fetch — a dashboard polls with the last timestamp it saw.
+/// Read-only; the log itself is never mutated here.
+async fn audit_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if let Err(c) = check_auth(&state, &headers) {
+        return c.into_response();
+    }
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200)
+        .min(2000) as usize;
+    let mut events = match crate::audit::recent(limit) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    };
+    // Optional inclusive lower bound on timestamp for incremental polling.
+    if let Some(since) = args.get("since_ts").and_then(|v| v.as_str()) {
+        events.retain(|e| e.ts.as_str() >= since);
+    }
+    Json(json!({ "ok": true, "events": events })).into_response()
 }
 
 /// Whether the server may bind `host`. Loopback is always allowed (the safe
