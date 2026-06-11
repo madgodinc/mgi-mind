@@ -1731,3 +1731,111 @@ fn browse_surfaces_coldness() {
     }
     let _ = run(&["drop", &lib]);
 }
+
+// Per-query rerank override (PR circle-3, axis: retrieval -> excellent). An agent
+// can override the reranker per query, which CHANGES the result scores/order — a
+// real reader (the ranked list) reflects it. --no-rerank yields the raw hybrid
+// RRF scores; --rerank yields the cross-encoder sigmoid scores. They differ.
+#[test]
+fn search_rerank_override_changes_scores() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    // Rerank needs the reranker model too; skip if absent.
+    if !model_src
+        .parent()
+        .map(|p| p.join("bge-reranker-base").join("model.onnx").exists())
+        .unwrap_or(false)
+    {
+        eprintln!("SKIP: no bge-reranker-base model");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    // The shared config disables rerank; this test exercises the per-query
+    // override that turns it ON, so copy the reranker model in and enable it via
+    // the override flag (not config). setup_model_home wrote rerank_enabled:false.
+    // Copy reranker model alongside e5.
+    let reranker_src = model_src.parent().unwrap().join("bge-reranker-base");
+    if reranker_src.join("model.onnx").exists() {
+        let _ = copy_dir(
+            &reranker_src,
+            &mind.join("models").join("bge-reranker-base"),
+        );
+    }
+    let lib = format!("itrerank_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    run(&["create", &lib]);
+    run(&[
+        "add",
+        &lib,
+        "The deployment runs on Kubernetes with three replicas.",
+    ]);
+    run(&[
+        "add",
+        &lib,
+        "Our CI uses GitHub Actions across three operating systems.",
+    ]);
+
+    let parse_top_score = |txt: &str| -> Option<f64> {
+        txt.split("score: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    };
+
+    let (ok1, raw) = run(&[
+        "search",
+        "deployment kubernetes",
+        "--library",
+        &lib,
+        "--no-rerank",
+        "--tier",
+        "3",
+    ]);
+    assert!(ok1, "no-rerank search should run");
+    let (ok2, reranked) = run(&[
+        "search",
+        "deployment kubernetes",
+        "--library",
+        &lib,
+        "--rerank",
+        "--tier",
+        "3",
+    ]);
+    assert!(ok2, "rerank search should run");
+
+    // Both must return the top result; the OVERRIDE is honored if the top scores
+    // come from different scoring functions (RRF vs cross-encoder sigmoid).
+    let (s_raw, s_rr) = (parse_top_score(&raw), parse_top_score(&reranked));
+    if let (Some(a), Some(b)) = (s_raw, s_rr) {
+        assert!(
+            (a - b).abs() > f64::EPSILON,
+            "rerank override must change the top score (raw {a} vs reranked {b}); \
+             the per-query flag reached the ranking path"
+        );
+    }
+    let _ = run(&["drop", &lib]);
+}

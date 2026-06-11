@@ -73,6 +73,15 @@ pub enum Commands {
         /// Retrieval tier: 1=facts, 2=summaries, 3=full
         #[arg(long, default_value = "2")]
         tier: u8,
+        /// Force the reranker on for this query (overrides config)
+        #[arg(long, conflicts_with = "no_rerank")]
+        rerank: bool,
+        /// Force the reranker OFF for this query — see the raw hybrid order
+        #[arg(long)]
+        no_rerank: bool,
+        /// Override how many candidates the reranker re-orders for this query
+        #[arg(long)]
+        rerank_top_k: Option<usize>,
     },
     /// Browse/list memories by metadata, newest first, with NO search query
     Browse {
@@ -790,7 +799,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             before,
             limit,
             tier,
+            rerank,
+            no_rerank,
+            rerank_top_k,
         } => {
+            // --rerank / --no-rerank are mutually exclusive (clap-enforced); map
+            // to Some(true)/Some(false), else None (use config).
+            let enabled = if rerank {
+                Some(true)
+            } else if no_rerank {
+                Some(false)
+            } else {
+                None
+            };
             cmd_search(
                 &query,
                 crate::storage::MemoryFilter {
@@ -803,6 +824,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 },
                 limit,
                 tier,
+                crate::storage::RerankOverride {
+                    enabled,
+                    top_k: rerank_top_k,
+                },
             )
             .await
         }
@@ -2580,9 +2605,11 @@ async fn cmd_search(
     mfilter: crate::storage::MemoryFilter,
     limit: usize,
     tier: u8,
+    rerank: crate::storage::RerankOverride,
 ) -> Result<()> {
     let config = crate::config::load_cached()?;
-    let results = crate::storage::search_filtered(&config, query, &mfilter, limit, tier).await?;
+    let results =
+        crate::storage::search_filtered(&config, query, &mfilter, limit, tier, rerank).await?;
     println!("{}", render_search(&results));
     Ok(())
 }
