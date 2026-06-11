@@ -312,7 +312,7 @@ fn lock_for_subject_predicate(subject: &str, predicate: &str) -> Arc<tokio::sync
 /// Holds an exclusive cross-process advisory lock on the facts critical section
 /// for the lifetime of the value. The OS releases it if the process dies, so a
 /// crash can't wedge the lock. Dropping the `File` unlocks.
-struct FactsCrossProcessGuard {
+pub(crate) struct FactsCrossProcessGuard {
     _file: std::fs::File,
 }
 
@@ -320,19 +320,23 @@ struct FactsCrossProcessGuard {
 /// `SUBJECT_PREDICATE_LOCKS` serializes agents WITHIN one process; this extends
 /// serialization to SEPARATE processes on the same machine, closing the
 /// torn-state bug (two Active facts on a Single axis) the #53 verification
-/// exposed. Coarse by design — one lock for ALL `add_fact` calls, not per-axis:
+/// exposed. Coarse by design — one lock for ALL fact mutations, not per-axis:
 /// file locks don't granulate cheaply, and cross-process fact writes are rare,
 /// so serializing them machine-wide is the right trade. flock is blocking +
 /// sync, so we acquire it on a blocking thread to avoid stalling the runtime.
 ///
-/// SCOPE (do not overstate): this is an ADVISORY flock, honored only by callers
-/// that take it. It covers the add-vs-add duel race (the proven bug). It does
-/// NOT yet serialize add-vs-`invalidate_fact` / add-vs-`consolidate --apply` /
-/// add-vs-doubt-tick across processes — those fact-mutating paths bypass this
-/// lock, so the torn-Active invariant is still reachable via add-vs-consolidate.
-/// Extending the lock to those writers is a tracked follow-up (see the mind_learn
-/// note "session-2026-06-10-circle1-pr6-concurrency-bug").
-async fn lock_facts_cross_process(config: &MindConfig) -> Result<FactsCrossProcessGuard> {
+/// SCOPE: this is an ADVISORY flock, honored only by callers that take it. It is
+/// taken by every path that flips a fact's STATUS or VALIDITY — `add_fact_authored`,
+/// `invalidate_fact_authored`, and the `redo_duels --apply` retire loop — so the
+/// torn-Active invariant holds across processes for all of them, not just add-vs-add.
+/// It is deliberately NOT taken by `set_fact_payload_field` (doubt-tick's
+/// `confidence_score` write, dependants backfill): those touch only scalar score
+/// keys, never status/validity, and Qdrant's `set_payload` merges named keys, so
+/// they cannot clobber a concurrent status write (see `set_fact_payload_field`).
+/// Any NEW path that flips a fact's status/validity payload MUST take this lock.
+pub(crate) async fn lock_facts_cross_process(
+    config: &MindConfig,
+) -> Result<FactsCrossProcessGuard> {
     use fs2::FileExt;
     let path = config.data_dir.join(".facts.lock");
     let file = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
@@ -765,6 +769,12 @@ pub async fn invalidate_fact_authored(
     id: &str,
     actor: Option<&str>,
 ) -> Result<()> {
+    // Hold the cross-process facts lock so an invalidate can't race a concurrent
+    // add_fact's duel (e.g. process A resolving a duel against the very fact
+    // process B is invalidating). Closes the add-vs-invalidate hole the circle-3
+    // file-lock left open.
+    let _xproc = lock_facts_cross_process(config).await?;
+
     let client = storage::get_client(config).await?;
 
     // Capture the triple BEFORE flipping the flag, for the audit `before` field —
@@ -1111,6 +1121,27 @@ pub async fn list_top_dependants_facts(
 /// Set a payload field on a fact by id. Used by Phase 1 migrations to
 /// write back computed values (dependants_count, confirmations_count)
 /// without re-creating the point.
+///
+/// Lock-free AT ITS DEFINITION — it does not take `lock_facts_cross_process`
+/// itself. That is only sound because Qdrant's `set_payload` MERGES the named
+/// keys into the existing payload (it does NOT replace the whole payload), so
+/// two writers touching DIFFERENT keys never clobber each other. DO NOT switch
+/// this to `overwrite_payload`: that replaces the entire payload and a concurrent
+/// status write would be silently lost, reintroducing a torn-fact race.
+///
+/// IMPORTANT — this function is the write vehicle for BOTH classes of key:
+///   - score-only callers (doubt-tick `confidence_score`, dependants backfill)
+///     write keys disjoint from status/validity and are safe WITHOUT the lock;
+///   - status/validity callers (`dampen_loser` writes `status`+`valid_until`,
+///     `mark_superseded` likewise) DO touch the contended keys and are safe ONLY
+///     because their CALLER (`add_fact_authored` / `invalidate_fact_authored` /
+///     the `redo_duels --apply` loop) holds `lock_facts_cross_process` around the
+///     call. The lock-freedom is at this definition, not a property of every
+///     write it performs. A new status/validity caller MUST hold the lock.
+///
+/// Corollary for deadlock-freedom: keep this function lock-free. If it ever takes
+/// `lock_facts_cross_process` internally, every locked caller above self-deadlocks
+/// on the non-reentrant flock.
 pub async fn set_fact_payload_field(
     config: &MindConfig,
     fact_id: &str,

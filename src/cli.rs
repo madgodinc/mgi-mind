@@ -1641,6 +1641,20 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
     Ok(())
 }
 
+/// Duel winner policy, in ONE place so the dry-run display and the apply path
+/// cannot drift: sort facts so index 0 is the keeper. Newest `created_at` wins;
+/// `id` breaks ties to make the order TOTAL. Without the id tie-break, two facts
+/// with equal `created_at` (the concurrent-add case the redo-duels cleanup
+/// targets) would sort by Qdrant scroll order — not stable across two queries —
+/// so the displayed winner could differ from the applied one.
+fn sort_facts_by_duel_winner(facts: &mut [crate::knowledge::Fact]) {
+    facts.sort_by(|a, b| {
+        let av = a.created_at.as_deref().unwrap_or("");
+        let bv = b.created_at.as_deref().unwrap_or("");
+        bv.cmp(av).then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result<()> {
     use crate::knowledge::{Cardinality, list_all_facts, list_cardinalities};
     use std::collections::HashMap;
@@ -1731,11 +1745,7 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
         // for Single — a user who re-asserts is updating their belief, not
         // forking it.
         let mut sorted: Vec<crate::knowledge::Fact> = (*group).clone();
-        sorted.sort_by(|a, b| {
-            let av = a.created_at.as_deref().unwrap_or("");
-            let bv = b.created_at.as_deref().unwrap_or("");
-            bv.cmp(av) // newest first
-        });
+        sort_facts_by_duel_winner(&mut sorted);
         let winner = &sorted[0];
         let losers = &sorted[1..];
         total_kept += 1;
@@ -1764,8 +1774,24 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
         }
 
         if apply {
-            for l in losers {
-                // Shared with the write path (add_fact): one card->status mapping.
+            // CHECK-AND-ACT MUST BE ATOMIC. The cluster above came from an
+            // UNLOCKED `list_all_facts` snapshot; a concurrent add_fact could have
+            // changed this axis since. So take the cross-process lock and RE-READ
+            // the axis under it, recompute the winner/losers from the fresh state,
+            // and only then retire. The displayed dry-run is advisory; the
+            // authoritative decision happens here, under the lock — otherwise we
+            // retire against a stale snapshot (the TOCTOU the per-apply-only lock
+            // left open).
+            let _xproc = crate::knowledge::lock_facts_cross_process(&config).await?;
+            let mut fresh =
+                crate::knowledge::find_facts_by_subject_predicate(&config, subject, predicate)
+                    .await?;
+            // SAME policy as the dry-run — literally the same function, so the
+            // applied winner matches the displayed one whenever the axis is
+            // unchanged between display and apply.
+            sort_facts_by_duel_winner(&mut fresh);
+            // Nothing to do if the race already collapsed the axis to ≤1 live fact.
+            for l in fresh.iter().skip(1) {
                 crate::duel::retire_loser(&config, *card, &l.id).await?;
             }
         }
@@ -3778,4 +3804,68 @@ async fn cmd_extractor_batch_from_library(
         eprintln!("\n(dry_run: no facts written. Re-run without --dry-run to persist.)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod redo_duels_tests {
+    use super::sort_facts_by_duel_winner;
+    use crate::knowledge::Fact;
+
+    fn fact(id: &str, created_at: Option<&str>) -> Fact {
+        Fact {
+            id: id.to_string(),
+            subject: "s".into(),
+            predicate: "p".into(),
+            object: format!("obj-{id}"),
+            created_at: created_at.map(str::to_string),
+            valid_until: None,
+            status: None,
+            valid: true,
+        }
+    }
+
+    #[test]
+    fn winner_is_newest_created() {
+        let mut v = vec![
+            fact("a", Some("2026-01-01T00:00:00Z")),
+            fact("b", Some("2026-03-01T00:00:00Z")),
+            fact("c", Some("2026-02-01T00:00:00Z")),
+        ];
+        sort_facts_by_duel_winner(&mut v);
+        assert_eq!(v[0].id, "b", "newest created_at must win");
+    }
+
+    #[test]
+    fn equal_created_at_breaks_tie_on_id_total_order() {
+        // The concurrent-add case: identical created_at. The order must be TOTAL
+        // and INPUT-ORDER-INDEPENDENT so the dry-run display and the apply path
+        // (which read the axis in possibly different Qdrant scroll orders) agree
+        // on the same winner.
+        let ts = Some("2026-01-01T00:00:00Z");
+        let mut forward = vec![fact("id-1", ts), fact("id-2", ts), fact("id-3", ts)];
+        let mut shuffled = vec![fact("id-3", ts), fact("id-1", ts), fact("id-2", ts)];
+        sort_facts_by_duel_winner(&mut forward);
+        sort_facts_by_duel_winner(&mut shuffled);
+        let order_a: Vec<&str> = forward.iter().map(|f| f.id.as_str()).collect();
+        let order_b: Vec<&str> = shuffled.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(order_a, order_b, "tie order must not depend on input order");
+        assert_eq!(
+            forward[0].id, "id-1",
+            "lowest id wins the tie deterministically"
+        );
+    }
+
+    #[test]
+    fn missing_created_at_sorts_last_but_stays_total() {
+        let mut v = vec![
+            fact("z", None),
+            fact("a", Some("2026-01-01T00:00:00Z")),
+            fact("m", None),
+        ];
+        sort_facts_by_duel_winner(&mut v);
+        assert_eq!(v[0].id, "a", "a dated fact beats undated ones");
+        // The two undated facts tie on created_at="" → id order, total.
+        assert_eq!(v[1].id, "m");
+        assert_eq!(v[2].id, "z");
+    }
 }
