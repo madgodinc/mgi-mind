@@ -255,6 +255,19 @@ fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+/// Build a `RerankOverride` from the shared search-arg shape: `rerank` (bool) and
+/// `rerank_top_k` (number). Both optional — absent means "use config", so the
+/// default behavior is unchanged.
+pub(crate) fn rerank_from_args(args: &Value) -> crate::storage::RerankOverride {
+    crate::storage::RerankOverride {
+        enabled: args.get("rerank").and_then(Value::as_bool),
+        top_k: args
+            .get("rerank_top_k")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+    }
+}
+
 /// Build a `MemoryFilter` from the shared query-arg shape used by `mind_search`
 /// (MCP) and `/memory/search` + `/memory/recall` (HTTP). Accepts a single
 /// `library` or a `libraries` array (OR), plus optional `author`, `source`,
@@ -344,8 +357,15 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let mfilter = memory_filter_from_args(args);
             let limit = arg_u64(args, "limit", 5) as usize;
             let tier = arg_u64(args, "tier", 2) as u8;
-            let results =
-                crate::storage::search_filtered(cfg, query, &mfilter, limit, tier).await?;
+            let results = crate::storage::search_filtered(
+                cfg,
+                query,
+                &mfilter,
+                limit,
+                tier,
+                rerank_from_args(args),
+            )
+            .await?;
             Ok(crate::cli::render_search(&results))
         }
         "mind_browse" => {
@@ -1083,7 +1103,9 @@ fn tool_definitions() -> Vec<Value> {
                     "created_since": { "type": "string", "description": "Only memories created at/after this instant, INCLUSIVE (RFC3339 timestamp or YYYY-MM-DD date)" },
                     "created_before": { "type": "string", "description": "Only memories created before this instant, EXCLUSIVE (RFC3339 timestamp or YYYY-MM-DD date)" },
                     "limit": { "type": "number", "default": 5, "description": "Max results" },
-                    "tier": { "type": "number", "default": 2, "description": "Retrieval tier: 1=facts, 2=summaries, 3=full" }
+                    "tier": { "type": "number", "default": 2, "description": "Retrieval tier: 1=facts, 2=summaries, 3=full" },
+                    "rerank": { "type": "boolean", "description": "Override the reranker for THIS query: true forces it on, false gives the raw hybrid (dense+sparse) order. Omit to use the configured default." },
+                    "rerank_top_k": { "type": "number", "description": "Override how many candidates the reranker re-orders for this query." }
                 },
                 "required": ["query"]
             }
