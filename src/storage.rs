@@ -2994,6 +2994,14 @@ pub struct MemoryRecord {
     /// v1.0 relevance formula" when consumed by ranking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence_score: Option<f32>,
+    /// Recency-weighted "coldness" in days since last relevance (the same metric
+    /// the decay/consolidate path uses). Higher = colder = closer to being a
+    /// forget candidate. Surfaced by `browse` so a user/agent can SEE the
+    /// temperature of memory — pure observability, nothing is hidden or reordered
+    /// by it. `None` when the timestamp can't be dated. Only computed on the
+    /// inventory (browse) path, not on the hot search path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coldness: Option<f64>,
 }
 
 /// Phase 0 helper: store a confidence score into a Qdrant point payload.
@@ -3098,6 +3106,9 @@ fn point_to_record(
         library: extract_string(payload, "library").unwrap_or_default(),
         author: extract_string(payload, "author"),
         confidence_score: payload_get_confidence(payload),
+        // Set by `list_filtered` (the browse path) from the access journal; the
+        // bare payload carries no coldness, so the mapper leaves it None.
+        coldness: None,
     }
 }
 
@@ -3148,14 +3159,27 @@ pub async fn list_filtered(
         .context("list_filtered scroll failed")?;
     let scanned = response.result.len();
     let truncated = scanned >= BROWSE_MAX_SCAN;
+    // Snapshot the access journal ONCE for this listing, then stamp each record's
+    // recency-weighted coldness. Browse is the inventory path (not the hot search
+    // path), so this extra read is acceptable; it makes decay observable.
+    let access = crate::access::snapshot();
+    let now = chrono::Utc::now().to_rfc3339();
     let mut records: Vec<MemoryRecord> = response
         .result
         .into_iter()
         .map(|p| {
-            point_to_record(
-                p.id.as_ref().map(format_point_id).unwrap_or_default(),
-                &p.payload,
-            )
+            let id = p.id.as_ref().map(format_point_id).unwrap_or_default();
+            let mut rec = point_to_record(id.clone(), &p.payload);
+            let stat = access.get(&id);
+            let count = stat.map(|s| s.count).unwrap_or(0);
+            let last = stat.and_then(|s| s.last_access.as_deref());
+            let created = if rec.created_at.is_empty() {
+                None
+            } else {
+                Some(rec.created_at.as_str())
+            };
+            rec.coldness = crate::consolidate::coldness_score(created, last, count, &now);
+            rec
         })
         .collect();
     // Newest first; empty created_at (legacy) sorts last so it still shows up.
@@ -3720,6 +3744,7 @@ mod tests {
                 library: String::new(),
                 author: None,
                 confidence_score: None,
+                coldness: None,
             }
         }
         let mut v = [

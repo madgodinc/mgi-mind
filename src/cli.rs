@@ -2558,6 +2558,11 @@ pub(crate) fn render_records(records: &[crate::storage::MemoryRecord], truncated
         if let Some(src) = &r.source {
             let _ = writeln!(out, "   source: {src}");
         }
+        // Show the recency-weighted coldness so decay is observable: higher =
+        // colder = closer to a forget candidate. Nothing is hidden by it.
+        if let Some(c) = r.coldness {
+            let _ = writeln!(out, "   coldness: {c:.0}d");
+        }
         let _ = writeln!(out);
     }
     if truncated {

@@ -1654,3 +1654,80 @@ fn fact_as_of_returns_the_value_current_at_that_instant() {
         );
     }
 }
+
+// Browse surfaces coldness (PR circle-3, axis: forgetting -> excellent). The
+// recency-weighted decay score is now OBSERVABLE in the browse output — a number
+// the user/agent reads. Pure observability: nothing is hidden or reordered by it.
+// (The warming-on-access logic itself is unit-tested deterministically in
+// consolidate.rs; the access journal only flushes every 64 records, so a single
+// cross-process search may not persist its bump — hence the comparison below is a
+// guarded bonus, while the presence of the coldness line is the real assertion.)
+#[test]
+fn browse_surfaces_coldness() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itcold_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    run(&["create", &lib]);
+    run(&[
+        "add",
+        &lib,
+        "The aurora borealis was visible over the northern fjords.",
+    ]);
+
+    // Browse before any access — coldness is shown (a number, observable).
+    let (ok, before) = run(&["browse", "--library", &lib]);
+    assert!(ok, "browse should run");
+    assert!(
+        before.contains("coldness:"),
+        "browse must surface a coldness line, got:\n{before}"
+    );
+
+    // Surface the memory via search (bumps its access journal => warms it).
+    let (ok, _s) = run(&["search", "aurora fjords", "--library", &lib, "--tier", "3"]);
+    assert!(ok, "search should run");
+
+    // Browse again — the same memory is now warmer (lower coldness). Parse the
+    // coldness number from each render and compare.
+    let parse_cold = |txt: &str| -> Option<f64> {
+        txt.split("coldness: ")
+            .nth(1)
+            .and_then(|s| s.split('d').next())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    };
+    let (ok, after) = run(&["browse", "--library", &lib]);
+    assert!(ok);
+    let (c_before, c_after) = (parse_cold(&before), parse_cold(&after));
+    if let (Some(b), Some(a)) = (c_before, c_after) {
+        assert!(
+            a <= b,
+            "an accessed memory must not be COLDER than before access ({a} <= {b})"
+        );
+    }
+    let _ = run(&["drop", &lib]);
+}
