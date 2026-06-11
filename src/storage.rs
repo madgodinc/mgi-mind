@@ -1857,6 +1857,29 @@ fn build_payload_full(
 
 /// Library-scoped semantic search — the original surface, unchanged for the
 /// existing callers. Thin wrapper over `search_filtered`.
+/// Per-query override of the reranker config, so an agent can ask for the raw
+/// hybrid order (no rerank) or a different rerank depth on ONE query without
+/// touching global config. `None` fields fall back to `config.rerank_*`, so the
+/// default (all-None) is byte-identical to the pre-override behavior.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RerankOverride {
+    /// `Some(true/false)` forces rerank on/off for this query; `None` = config.
+    pub enabled: Option<bool>,
+    /// `Some(k)` overrides how many candidates the reranker re-orders; `None` =
+    /// config.
+    pub top_k: Option<usize>,
+}
+
+impl RerankOverride {
+    /// Resolve against config: returns (enabled, top_k) actually used this query.
+    fn resolve(&self, config: &MindConfig) -> (bool, usize) {
+        (
+            self.enabled.unwrap_or(config.rerank_enabled),
+            self.top_k.unwrap_or(config.rerank_top_k),
+        )
+    }
+}
+
 pub async fn search(
     config: &MindConfig,
     query: &str,
@@ -1870,6 +1893,7 @@ pub async fn search(
         &MemoryFilter::for_library(library),
         limit,
         tier,
+        RerankOverride::default(),
     )
     .await
 }
@@ -1884,7 +1908,9 @@ pub async fn search_filtered(
     mfilter: &MemoryFilter,
     limit: usize,
     tier: u8,
+    rerank: RerankOverride,
 ) -> Result<Vec<SearchResult>> {
+    let (rerank_enabled, rerank_top_k) = rerank.resolve(config);
     // Live read pulse for the viewer (one per search, not per result). Cheap
     // when no viewer is open (broadcast drops to no subscribers).
     crate::pulse::emit(crate::pulse::PulseEvent::new(
@@ -1914,8 +1940,8 @@ pub async fn search_filtered(
     let (s_idx, s_val) = sparse_vector(query);
 
     // Fetch a wider candidate set so the reranker has room to re-order (#22).
-    let fetch_k = if config.rerank_enabled {
-        config.rerank_top_k.max(limit)
+    let fetch_k = if rerank_enabled {
+        rerank_top_k.max(limit)
     } else {
         limit
     } as u64;
@@ -1968,7 +1994,7 @@ pub async fn search_filtered(
 
     // Cross-encoder rerank (audit #22). Best-effort: on any reranker failure the
     // dense order is kept (reranking is a quality boost, not a dependency).
-    if config.rerank_enabled && cands.len() > 1 {
+    if rerank_enabled && cands.len() > 1 {
         let texts: Vec<String> = cands.iter().map(|c| c.content.clone()).collect();
         if let Ok(scores) = crate::reranker::scores(config, query, &texts).await
             && scores.len() == cands.len()
@@ -3702,6 +3728,44 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rerank_override_resolves_against_config() {
+        let cfg = MindConfig {
+            rerank_enabled: true,
+            rerank_top_k: 20,
+            ..Default::default()
+        };
+        // All-None override = use config exactly (byte-identical old behavior).
+        assert_eq!(RerankOverride::default().resolve(&cfg), (true, 20));
+        // Force off for this query.
+        assert_eq!(
+            RerankOverride {
+                enabled: Some(false),
+                top_k: None
+            }
+            .resolve(&cfg),
+            (false, 20)
+        );
+        // Override depth only.
+        assert_eq!(
+            RerankOverride {
+                enabled: None,
+                top_k: Some(50)
+            }
+            .resolve(&cfg),
+            (true, 50)
+        );
+        // Both overridden.
+        assert_eq!(
+            RerankOverride {
+                enabled: Some(false),
+                top_k: Some(5)
+            }
+            .resolve(&cfg),
+            (false, 5)
+        );
+    }
 
     #[test]
     fn parse_datetime_bound_accepts_rfc3339_and_bare_date() {

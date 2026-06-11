@@ -314,7 +314,10 @@ async fn search_json(state: &AppState, args: &Value) -> Response {
         Err(()) => return bad_request("missing required argument 'query'"),
     };
     let mfilter = crate::mcp::memory_filter_from_args(args);
-    match crate::storage::search_filtered(&state.config, &query, &mfilter, limit, tier).await {
+    let rerank = crate::mcp::rerank_from_args(args);
+    match crate::storage::search_filtered(&state.config, &query, &mfilter, limit, tier, rerank)
+        .await
+    {
         Ok(results) => Json(json!({ "ok": true, "results": results })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
