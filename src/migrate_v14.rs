@@ -110,6 +110,126 @@ impl DistributionSummary {
     }
 }
 
+/// One subject's observation for a predicate, with the temporal signal the plain
+/// object-count heuristic lacks: how many of its distinct objects had
+/// `status == "superseded"` — retired into a TemporalSingle chain. A subject with
+/// several objects that are mostly superseded never had two LIVE values at once —
+/// a temporal sequence (TemporalSingle), not coexistence (Multi). NOTE: this is
+/// the `superseded` status specifically, NOT `valid_until.is_some()`, because
+/// `stale` (Single-duel losers) also carry valid_until but mean the opposite.
+#[derive(Debug, Clone, Copy)]
+pub struct SubjectObservation {
+    /// Number of distinct objects this subject had for the predicate.
+    pub distinct_objects: usize,
+    /// How many of them had `status == "superseded"` (a temporal-chain retirement).
+    pub superseded_objects: usize,
+}
+
+/// TEMPORAL-AWARE cardinality proposal. Distinguishes Multi (objects coexist)
+/// from TemporalSingle (objects form a non-overlapping sequence over time), which
+/// the object-count-only `propose_cardinality` physically cannot see. A predicate
+/// is proposed `TemporalSingle` when subjects that hold multiple objects show a
+/// strong "one-at-a-time, superseded over time" pattern; `Multi` when objects
+/// genuinely coexist; `Single` when no subject ever held >1.
+///
+/// This is a PROPOSAL (written to the review JSON, never auto-applied) — so it
+/// respects the circle-2 rule against auto-applying a guess. The reader is the
+/// human reviewing proposals.json / doctor output. Pure, unit-testable.
+pub fn propose_cardinality_temporal(obs: &[SubjectObservation]) -> CardinalityProposal {
+    if obs.is_empty() {
+        return CardinalityProposal {
+            proposed: Cardinality::Multi,
+            confidence: ProposalConfidence::Low,
+            reason: "no observations".to_string(),
+        };
+    }
+    let n = obs.len();
+    let multi: Vec<&SubjectObservation> = obs.iter().filter(|o| o.distinct_objects >= 2).collect();
+    if multi.is_empty() {
+        return CardinalityProposal {
+            proposed: Cardinality::Single,
+            confidence: ProposalConfidence::High,
+            reason: format!("every subject has ≤ 1 distinct object across {n} subjects"),
+        };
+    }
+    // Among subjects with multiple objects, what share of their objects were
+    // superseded? A high share means values were retired over time (sequence);
+    // a low share means they coexist.
+    let (total_objs, superseded): (usize, usize) = multi.iter().fold((0, 0), |(t, s), o| {
+        // superseded ⊆ distinct by construction (group_facts_temporal only adds an
+        // object to `superseded` after adding it to `distinct`), so this holds.
+        debug_assert!(
+            o.superseded_objects <= o.distinct_objects,
+            "superseded must be a subset of distinct"
+        );
+        (t + o.distinct_objects, s + o.superseded_objects)
+    });
+    // Each multi-subject with k objects in a clean temporal sequence supersedes
+    // k-1 of them (all but the current). So the "sequential share" benchmark is
+    // (total - n_multi) superseded out of total.
+    let expected_sequential = total_objs.saturating_sub(multi.len());
+    let temporal_ratio = if expected_sequential == 0 {
+        0.0
+    } else {
+        superseded as f32 / expected_sequential as f32
+    };
+
+    // ratio > 1.0 means MORE superseded than a clean k-1-per-subject sequence
+    // explains — the data doesn't fit a tidy timeline (e.g. re-added-then-re-
+    // superseded values). Don't pretend confidence; flag for manual review.
+    if temporal_ratio > 1.0 {
+        return CardinalityProposal {
+            proposed: Cardinality::TemporalSingle,
+            confidence: ProposalConfidence::Low,
+            reason: format!(
+                "{}/{} multi-object subjects look temporal, but superseded count exceeds a clean \
+                 sequence ({:.0}%) — data doesn't fit a tidy timeline; review manually",
+                multi.len(),
+                n,
+                temporal_ratio * 100.0
+            ),
+        };
+    }
+
+    // The 0.6 / 0.85 cut-offs are REVIEW TRIGGERS, not decision boundaries — this
+    // is a suggestion a human accepts or rejects, so the exact value only tunes
+    // how eagerly TemporalSingle is surfaced. Recalibrate with real data later.
+    if temporal_ratio >= 0.6 {
+        CardinalityProposal {
+            proposed: Cardinality::TemporalSingle,
+            confidence: if temporal_ratio >= 0.85 {
+                ProposalConfidence::High
+            } else {
+                ProposalConfidence::Low
+            },
+            reason: format!(
+                "{}/{} multi-object subjects show a sequential single-value-over-time pattern \
+                 ({:.0}% of prior values superseded) — looks TemporalSingle, not coexisting",
+                multi.len(),
+                n,
+                temporal_ratio * 100.0
+            ),
+        }
+    } else {
+        let multi_ratio = multi.len() as f32 / n as f32;
+        CardinalityProposal {
+            proposed: Cardinality::Multi,
+            confidence: if multi_ratio >= 0.20 {
+                ProposalConfidence::High
+            } else {
+                ProposalConfidence::Low
+            },
+            reason: format!(
+                "{}/{} subjects have ≥ 2 distinct objects and they coexist ({:.0}% superseded \
+                 — below the temporal trigger) → Multi",
+                multi.len(),
+                n,
+                temporal_ratio * 100.0
+            ),
+        }
+    }
+}
+
 /// Cardinality inference: given the set of distinct objects observed for a
 /// `(subject, predicate)` group, propose a cardinality.
 ///
@@ -298,22 +418,23 @@ pub async fn run_dependants(
 /// User reviews, edits if needed, and runs the proposals back through
 /// `mind_predicate(action="register")` (or a future bulk-apply command).
 pub async fn run_cardinality_inference(config: &MindConfig, output: PathBuf) -> Result<usize> {
-    // Step 1: enumerate every valid fact, group into (predicate → subject →
-    // [objects]).
-    let facts = crate::knowledge::list_all_facts(config).await?;
+    // Step 1: enumerate every valid fact INCLUDING superseded history (so the
+    // temporal signal — `valid_until` — is visible), group per predicate into
+    // per-subject (distinct, superseded) observations.
+    let facts = crate::knowledge::list_all_facts_with_history(config).await?;
     if facts.is_empty() {
         eprintln!("  no facts in the knowledge graph — nothing to propose.");
         return Ok(0);
     }
-    eprintln!("  inspecting {} facts...", facts.len());
-    let grouped = group_facts_by_predicate(&facts);
+    eprintln!("  inspecting {} facts (incl. history)...", facts.len());
+    let grouped = group_facts_temporal(&facts);
     eprintln!("  {} distinct predicates observed.", grouped.len());
 
-    // Step 2: for every predicate, run the heuristic against the observed
-    // objects-per-subject and produce a proposal.
+    // Step 2: for every predicate, run the temporal-aware heuristic. It can now
+    // propose TemporalSingle (sequence of retired values), not just Single/Multi.
     let mut proposals: HashMap<String, CardinalityProposal> = HashMap::new();
     for (pred, observations) in &grouped {
-        proposals.insert(pred.clone(), propose_cardinality(observations));
+        proposals.insert(pred.clone(), propose_cardinality_temporal(observations));
     }
 
     // Step 3: serialise to JSON for user review. The reviewer either edits
@@ -440,6 +561,46 @@ pub(crate) fn group_facts_by_predicate(facts: &[Fact]) -> HashMap<String, Vec<Ve
         .collect()
 }
 
+/// TEMPORAL grouping: predicate → per-subject (distinct objects, superseded
+/// count). Carries the `valid_until` signal `group_facts_by_predicate` drops, so
+/// `propose_cardinality_temporal` can tell a retired-over-time sequence
+/// (TemporalSingle) from coexistence (Multi). Input must include superseded
+/// facts (`list_all_facts_with_history`).
+pub(crate) fn group_facts_temporal(facts: &[Fact]) -> HashMap<String, Vec<SubjectObservation>> {
+    // predicate -> subject -> (set of distinct objects, set of superseded objects)
+    type ObjSets = (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    );
+    let mut by_pred: HashMap<String, HashMap<String, ObjSets>> = HashMap::new();
+    for f in facts {
+        let by_subj = by_pred.entry(f.predicate.clone()).or_default();
+        let (distinct, superseded) = by_subj.entry(f.subject.clone()).or_default();
+        distinct.insert(f.object.clone());
+        // ONLY status=="superseded" counts as a temporal-chain retirement. NOT
+        // `valid_until.is_some()`: `dampen_loser` ALSO sets valid_until but with
+        // status=="stale" — that's the loser of a Single-cardinality correction
+        // duel, the OPPOSITE of a temporal sequence. Gating on valid_until would
+        // mislabel "I corrected a wrong Single value" as TemporalSingle.
+        if f.status.as_deref() == Some("superseded") {
+            superseded.insert(f.object.clone());
+        }
+    }
+    by_pred
+        .into_iter()
+        .map(|(pred, by_subj)| {
+            let obs: Vec<SubjectObservation> = by_subj
+                .into_values()
+                .map(|(distinct, superseded)| SubjectObservation {
+                    distinct_objects: distinct.len(),
+                    superseded_objects: superseded.len(),
+                })
+                .collect();
+            (pred, obs)
+        })
+        .collect()
+}
+
 // ===== Tests for the pure helpers =====
 //
 // These tests cover the formula-shape decision (DistributionSummary) and
@@ -450,6 +611,73 @@ pub(crate) fn group_facts_by_predicate(facts: &[Fact]) -> HashMap<String, Vec<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- propose_cardinality_temporal (TemporalSingle detection) ---
+
+    #[test]
+    fn temporal_proposes_single_when_no_subject_has_two() {
+        let obs = vec![
+            SubjectObservation {
+                distinct_objects: 1,
+                superseded_objects: 0,
+            },
+            SubjectObservation {
+                distinct_objects: 1,
+                superseded_objects: 0,
+            },
+        ];
+        assert_eq!(
+            propose_cardinality_temporal(&obs).proposed,
+            Cardinality::Single
+        );
+    }
+
+    #[test]
+    fn temporal_proposes_temporal_single_for_sequential_pattern() {
+        // Subjects with several objects where the prior values are SUPERSEDED:
+        // alice lived_in [Berlin(superseded), Munich(superseded), Hamburg(live)]
+        // bob lived_in   [Paris(superseded), Lyon(live)]
+        // No subject ever had 2 LIVE values — a temporal sequence.
+        let obs = vec![
+            SubjectObservation {
+                distinct_objects: 3,
+                superseded_objects: 2,
+            },
+            SubjectObservation {
+                distinct_objects: 2,
+                superseded_objects: 1,
+            },
+        ];
+        let p = propose_cardinality_temporal(&obs);
+        assert_eq!(
+            p.proposed,
+            Cardinality::TemporalSingle,
+            "all prior values superseded => TemporalSingle, got {:?} ({})",
+            p.proposed,
+            p.reason
+        );
+    }
+
+    #[test]
+    fn temporal_proposes_multi_when_objects_coexist() {
+        // Subjects hold multiple objects that are NOT superseded — they coexist.
+        // alice uses_language [Rust(live), Go(live)]; bob uses [Python(live), JS(live)]
+        let obs = vec![
+            SubjectObservation {
+                distinct_objects: 2,
+                superseded_objects: 0,
+            },
+            SubjectObservation {
+                distinct_objects: 2,
+                superseded_objects: 0,
+            },
+        ];
+        assert_eq!(
+            propose_cardinality_temporal(&obs).proposed,
+            Cardinality::Multi,
+            "coexisting (none superseded) => Multi, not TemporalSingle"
+        );
+    }
 
     // --- DistributionSummary ---
 
@@ -580,6 +808,62 @@ mod tests {
         assert!(p.reason.contains("10%"));
     }
 
+    // A `stale` fact (Single-duel loser) carries a valid_until too, but must NOT
+    // be counted as a temporal-chain supersession — that conflation would mislabel
+    // a corrected Single predicate as TemporalSingle (the critic's blocker).
+    #[test]
+    fn group_facts_temporal_ignores_stale_losers() {
+        let fact = |subj: &str, obj: &str, status: Option<&str>, until: Option<&str>| Fact {
+            id: format!("{subj}-{obj}"),
+            subject: subj.into(),
+            predicate: "lives_in".into(),
+            object: obj.into(),
+            created_at: Some("2025-01-01T00:00:00Z".into()),
+            valid_until: until.map(str::to_string),
+            status: status.map(str::to_string),
+            valid: true,
+        };
+        // alice: Berlin (STALE loser, has valid_until) + Munich (active). A Single
+        // predicate that was corrected — NOT a temporal sequence.
+        let facts = vec![
+            fact(
+                "alice",
+                "Berlin",
+                Some("stale"),
+                Some("2025-02-01T00:00:00Z"),
+            ),
+            fact("alice", "Munich", Some("active"), None),
+        ];
+        let grouped = group_facts_temporal(&facts);
+        let obs = &grouped["lives_in"];
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].distinct_objects, 2);
+        // The stale loser must NOT count as superseded.
+        assert_eq!(
+            obs[0].superseded_objects, 0,
+            "a stale (duel-loser) fact must not be counted as a temporal supersession"
+        );
+        // ...so the proposal is Multi/Single-ish, NOT TemporalSingle.
+        assert_ne!(
+            propose_cardinality_temporal(obs).proposed,
+            Cardinality::TemporalSingle,
+            "a corrected Single predicate must not be mislabeled TemporalSingle"
+        );
+
+        // Contrast: a genuinely SUPERSEDED chain (temporal) IS counted.
+        let temporal = vec![
+            fact(
+                "bob",
+                "Paris",
+                Some("superseded"),
+                Some("2025-03-01T00:00:00Z"),
+            ),
+            fact("bob", "Lyon", Some("active"), None),
+        ];
+        let g2 = group_facts_temporal(&temporal);
+        assert_eq!(g2["lives_in"][0].superseded_objects, 1);
+    }
+
     #[test]
     fn group_facts_by_predicate_separates_subjects() {
         // Two predicates, four facts. Group must put the right
@@ -592,6 +876,7 @@ mod tests {
                 object: "Rust".into(),
                 created_at: None,
                 valid_until: None,
+                status: None,
                 valid: true,
             },
             Fact {
@@ -601,6 +886,7 @@ mod tests {
                 object: "Python".into(),
                 created_at: None,
                 valid_until: None,
+                status: None,
                 valid: true,
             },
             Fact {
@@ -610,6 +896,7 @@ mod tests {
                 object: "Rust".into(),
                 created_at: None,
                 valid_until: None,
+                status: None,
                 valid: true,
             },
             Fact {
@@ -619,6 +906,7 @@ mod tests {
                 object: "Go".into(),
                 created_at: None,
                 valid_until: None,
+                status: None,
                 valid: true,
             },
         ];
