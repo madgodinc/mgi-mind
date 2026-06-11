@@ -239,6 +239,14 @@ pub struct Fact {
     /// on the right while active. Reading this is what enables point-in-time
     /// (`as_of`) queries; before, the field was written but no reader saw it.
     pub valid_until: Option<String>,
+    /// The lifecycle status wire string (active/superseded/stale/...). `None` for
+    /// legacy facts with no status field (read as active). CRITICAL distinction:
+    /// `valid_until` is set by BOTH `mark_superseded` (status=superseded — a
+    /// TemporalSingle chain entry) AND `dampen_loser` (status=stale — the loser
+    /// of a Single-cardinality error-correction duel). They mean OPPOSITE things
+    /// for cardinality inference, so a temporal signal must read `status`, not
+    /// `valid_until`.
+    pub status: Option<String>,
     pub valid: bool,
 }
 
@@ -588,6 +596,7 @@ fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
         object: extract_string(p, "object").unwrap_or_default(),
         created_at: extract_string(p, "created_at"),
         valid_until: extract_string(p, "valid_until"),
+        status: extract_string(p, "status"),
         valid: true,
     }
 }
@@ -983,6 +992,46 @@ pub async fn list_all_facts(config: &MindConfig) -> Result<Vec<Fact>> {
     Ok(facts)
 }
 
+/// Every `valid=true` fact INCLUDING the hidden timeline statuses (superseded,
+/// stale) — unlike `list_all_facts`, which excludes them. Cardinality inference
+/// needs the superseded entries: their `valid_until` is exactly the temporal
+/// signal that distinguishes TemporalSingle (a sequence of retired values) from
+/// Multi (coexisting values). Excludes only invalidated facts.
+pub async fn list_all_facts_with_history(config: &MindConfig) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let filter = Filter {
+        must: vec![Condition::matches("valid", "true".to_string())],
+        ..Default::default()
+    };
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            facts.push(fact_from_point(point));
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(facts)
+}
+
 /// v1.5 Phase 8 step 8.1A: scroll every valid fact and return the
 /// top-N by `dependants_count` payload. Used by the background
 /// re-test loop to pick "load-bearing" facts to re-evaluate first.
@@ -1247,6 +1296,7 @@ mod tests {
             object: object.into(),
             created_at: None,
             valid_until: None,
+            status: None,
             valid: true,
         }
     }
