@@ -341,6 +341,7 @@ mod tests {
             author: None,
             // Reconcile tests predate v1.4 and don't care about scores.
             confidence_score: None,
+            coldness: None,
         }
     }
 
