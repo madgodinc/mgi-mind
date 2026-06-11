@@ -423,6 +423,11 @@ pub enum Commands {
     },
     /// Open the 3D memory visualization in your browser (alias for `viewer`).
     Brain,
+    /// Run the validity-model behavioral calibration suite and print the report.
+    /// Feeds a corpus of realistic conflict situations through the live duel
+    /// formulas and reports how many land on the outcome a human would expect.
+    /// Zero-API, deterministic, no store needed; the same suite runs in CI.
+    Calibrate,
     /// Serve a loopback HTTP tool-surface for external multi-agent systems.
     /// Exposes a small allowlist (memory search/recall/add/ingest, fact add)
     /// over 127.0.0.1 with a per-process bearer token. Destructive/bulk tools
@@ -1032,6 +1037,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .context("Failed to load config — run `mgimind init` first")?;
             crate::viewer::run(config, true).await
         }
+        Commands::Calibrate => {
+            cmd_calibrate();
+            Ok(())
+        }
         Commands::ServeHttp {
             host,
             port,
@@ -1639,6 +1648,44 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
         "Registered {registered} High-confidence proposals; skipped {skipped} Low-confidence; {errors} errors."
     );
     Ok(())
+}
+
+/// Print the validity-model behavioral calibration report. Runs the corpus
+/// through the live duel formulas and shows the match rate plus every
+/// documented divergence, so the number the README cites is reproducible from
+/// the CLI.
+fn cmd_calibrate() {
+    let report = crate::calibration::run_calibration();
+    println!("Validity-model behavioral calibration");
+    println!(
+        "  corpus: {} conflict scenarios (ChatOnly mode)",
+        report.total
+    );
+    println!(
+        "  match rate: {}/{} = {:.1}% of outcomes land on intended behavior",
+        report.matched,
+        report.total,
+        report.match_rate() * 100.0,
+    );
+    if report.misses.is_empty() {
+        println!("  no divergences: every scenario matches intent.");
+    } else {
+        println!(
+            "  documented divergences ({}/{} frozen) — known gaps between the",
+            report.misses.len(),
+            crate::calibration::DIVERGENCES.len(),
+        );
+        println!("  placeholder constants and intended behavior, pending phase-4 calibration:");
+        for (name, expected, actual, rationale) in &report.misses {
+            println!("    - {name}: expected {expected:?}, got {actual:?}");
+            println!("        {rationale}");
+        }
+    }
+    println!(
+        "\nThis measures the SHAPE of the model, not that the constants are tuned\n\
+         against real data (they are not — see TODO(phase-4-calibration)). Retrieval\n\
+         recall (R@k) is the separately measured number; see BENCHMARKS.md."
+    );
 }
 
 /// Duel winner policy, in ONE place so the dry-run display and the apply path

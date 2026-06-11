@@ -4,6 +4,7 @@ mod bench;
 mod bench_policy;
 mod bench_procedural;
 mod bench_stale;
+mod calibration;
 mod cli;
 mod confidence;
 mod config;

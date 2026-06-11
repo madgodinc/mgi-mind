@@ -110,9 +110,19 @@ on their own:
   verified; a failure pulls the weight down rather than being ignored.
 
 These are research-shaped mechanisms, and their tuning constants are still
-being calibrated (see [BENCHMARKS.md](BENCHMARKS.md) for what is and isn't
-measured). The shape is the point: a memory that argues with itself and
-demotes what stops holding up, instead of accreting forever.
+being calibrated (the `TODO(phase-4-calibration)` markers in `duel.rs` /
+`doubt.rs` are honest). The shape is the point: a memory that argues with
+itself and demotes what stops holding up, instead of accreting forever.
+
+`mgimind calibrate` measures whether that shape behaves as intended. It runs a
+corpus of realistic conflict situations through the live duel formulas and
+reports how many land on the outcome a person would expect: a fresh unsupported
+claim cannot overturn an entrenched belief, a CI signal can, repetition alone
+coexists rather than overwriting. Today 14 of 15 scenarios match intent; the one
+that does not is printed with its reason, not hidden, and the suite runs in CI.
+This measures the *shape* of the validity model, separate from retrieval recall
+(R@k, see [BENCHMARKS.md](BENCHMARKS.md)). The two are different numbers and
+never belong in the same table.
 
 ## Why bother
 
@@ -156,13 +166,17 @@ retrievable, not whether an LLM then answered correctly. mgi-mind has no
 answering step, so retrieval recall is the number it actually owns.
 
 The honest gap: the validity model (duel rule, doubt window, supersession)
-is the differentiator, and retrieval recall does not test it. The benchmark
-that does is STALE, a belief-revision suite. A preliminary partial run exists
-(N=155, ~32%, raw verdicts committed under `benchmark/results/`), but it was
-produced by the harness on a branch rather than the scaffold on `main`, used a
-reduced haystack, and may have run while the duel rule was still broken. See
+is the differentiator, and retrieval recall does not test it. Two things test
+it instead. `mgimind calibrate` checks behavioral shape against intent
+(14/15 today, run it yourself); it proves the mechanism does what a reader
+expects, not that the constants are tuned against real data. The external
+belief-revision benchmark is STALE, and there only a preliminary partial run
+exists (N=155, ~32%, raw verdicts under `benchmark/results/`), produced by the
+harness on a branch rather than the scaffold on `main`, on a reduced haystack,
+possibly while the duel rule was still broken. See
 [BENCHMARKS.md](BENCHMARKS.md) for the full caveats. Treat the validity model as
-a designed mechanism with a preliminary, not-yet-clean score, not a proven win.
+a designed mechanism whose shape is verified and whose constants are not yet
+tuned, not a proven win on external data.
 
 ## Quick start
 
