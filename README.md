@@ -8,9 +8,13 @@ Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
 assistants read and write memory on their own. Also a normal CLI.
 
-<!-- TERMINAL-DEMO: VHS-generated session GIF goes here (docs/demo.tape).
-     A real "question -> mind_search -> answer" session, regenerated per
-     release so the demo never lies about the current version. -->
+<p align="center">
+  <img src="docs/demo.gif" alt="Store a fact, then recall it by meaning — a query with no shared keywords still finds it" width="900">
+  <br>
+  <em>Store a fact in plain words, recall it with a query that shares none of them — semantic search matches intent. Your assistant runs the same <code>mind_search</code> on its own over MCP. Regenerate with <code>vhs docs/demo.tape</code>.</em>
+</p>
+
+The same exchange inside an assistant:
 
 ```
 You:  what was the deploy server again?
@@ -349,6 +353,16 @@ Assistant: (mind_search "staging database") Postgres 16, host db-staging.interna
 Search returns results in tiers so the assistant spends tokens carefully:
 `--tier 1` is a ~100-character snippet, `--tier 2` (default) is ~500,
 `--tier 3` is the full text.
+
+### Seeing the store
+
+`mgimind brain` renders the memory as a graph: cores for memories, facts,
+and regions, wired by the links between them, pulsing as the store changes.
+It runs locally and is read-only over the same data.
+
+<p align="center">
+  <img src="https://github.com/madgodinc/mgi-mind/releases/download/media-assets/brain-demo.gif" alt="Memory rendered as a brain — glowing cores wired by neurons" width="760">
+</p>
 
 ## How it works
 
