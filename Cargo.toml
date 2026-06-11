@@ -12,7 +12,7 @@ keywords = ["mcp", "memory", "llm", "embeddings", "qdrant"]
 categories = ["command-line-utilities", "database"]
 # Benchmark corpora and raw run outputs live in git for reproducibility
 # (cited by BENCHMARKS.md), but a `cargo install` needs only the source.
-exclude = ["benchmark/", "docs/", "clients/python/.venv/", "*.tape"]
+exclude = ["benchmark/", "docs/", "clients/python/.venv/", "*.tape", "CHANGELOG-ARCHIVE.md"]
 
 [[bin]]
 name = "mgimind"

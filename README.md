@@ -587,8 +587,9 @@ are the asymmetric "Qdrant now → md says" reconcile diff and the
 
 The project went through a code audit; [`AUDIT_STATUS.md`](AUDIT_STATUS.md)
 accounts for every issue one by one with where it was fixed or why it was
-deferred. [`CHANGELOG.md`](CHANGELOG.md) has the per-release history (current
-through v1.6.4, with a v1.7 candidate section), and
+deferred. [`CHANGELOG.md`](CHANGELOG.md) has the per-release history for the 1.x
+line plus the v1.7 candidate section (pre-1.0 releases are in
+[`CHANGELOG-ARCHIVE.md`](CHANGELOG-ARCHIVE.md)), and
 [`ROADMAP.md`](ROADMAP.md) names what is committed for the next releases and
 which directions are still **candidate** at the v3.0 horizon.
 
