@@ -46,6 +46,13 @@ struct AppState {
     /// append-only audit log). Gives the multi-agent graph a "who read how
     /// much" signal without disk churn; resets when the server restarts.
     reads: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Serializes writes to the file-backed KV store (`/kv/set`, `/kv/get`).
+    /// The KV surface is deliberately NOT a memory tool: it stores raw,
+    /// caller-opaque blobs (e.g. an orchestrator's run checkpoint) with no
+    /// chunking and no embedding, so the value round-trips byte-for-byte —
+    /// searchable memory mangles a large JSON blob into chunks. One mutex +
+    /// one JSON file is enough for the loopback, single-writer use case.
+    kv_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
@@ -102,6 +109,7 @@ pub async fn run(
         config: Arc::new(config),
         tokens: Arc::new(tokens),
         reads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        kv_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     let app = Router::new()
@@ -130,6 +138,8 @@ pub async fn run(
         .route("/stats/activity", post(stats_activity))
         .route("/should-search", post(should_search))
         .route("/audit", post(audit_recent))
+        .route("/kv/set", post(kv_set))
+        .route("/kv/get", post(kv_get))
         .with_state(state);
 
     let bind = format!("{host}:{}", port.unwrap_or(0));
@@ -875,6 +885,86 @@ async fn audit_recent(
         events.retain(|e| e.ts.as_str() >= since);
     }
     Json(json!({ "ok": true, "events": events })).into_response()
+}
+
+/// Path to the single file-backed KV store under the data dir.
+fn kv_path(state: &AppState) -> std::path::PathBuf {
+    state.config.data_dir.join("kv_store.json")
+}
+
+/// Load the whole KV map (missing/corrupt file → empty map, so a torn write
+/// degrades to "key not found" rather than a hard error).
+fn kv_load(state: &AppState) -> serde_json::Map<String, Value> {
+    match std::fs::read_to_string(kv_path(state)) {
+        Ok(s) => serde_json::from_str::<serde_json::Map<String, Value>>(&s).unwrap_or_default(),
+        Err(_) => serde_json::Map::new(),
+    }
+}
+
+/// `/kv/set` — store a raw `value` (any JSON) under `key`. Opaque to the brain:
+/// no chunking, no embedding, byte-for-byte round-trip. Built for an external
+/// orchestrator to persist run state (crash-proof resume). Writes are serialized
+/// by `kv_lock` and committed atomically (temp file + rename) so a crash
+/// mid-write cannot corrupt other keys.
+async fn kv_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if check_auth(&state, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let key = match args.get("key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => return bad_request("kv/set requires a non-empty string `key`"),
+    };
+    if !args.get("value").is_some() {
+        return bad_request("kv/set requires a `value`");
+    }
+    let value = args.get("value").cloned().unwrap();
+
+    let _guard = state.kv_lock.lock().await;
+    let mut map = kv_load(&state);
+    map.insert(key, value);
+    let path = kv_path(&state);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = match serde_json::to_string(&map) {
+        Ok(b) => b,
+        Err(e) => return bad_request(&format!("serialize failed: {e}")),
+    };
+    if let Err(e) = std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("kv write failed: {e}") })),
+        )
+            .into_response();
+    }
+    Json(json!({ "ok": true, "result": "stored" })).into_response()
+}
+
+/// `/kv/get` — fetch the raw value previously stored under `key`. Returns
+/// `{ok:true, found:false}` when absent (not an error — the caller decides).
+async fn kv_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    if check_auth(&state, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let key = match args.get("key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => return bad_request("kv/get requires a non-empty string `key`"),
+    };
+    let _guard = state.kv_lock.lock().await;
+    let map = kv_load(&state);
+    match map.get(&key) {
+        Some(v) => Json(json!({ "ok": true, "found": true, "value": v })).into_response(),
+        None => Json(json!({ "ok": true, "found": false })).into_response(),
+    }
 }
 
 /// Whether the server may bind `host`. Loopback is always allowed (the safe
