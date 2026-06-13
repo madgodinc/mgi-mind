@@ -849,7 +849,7 @@ pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
     if embedding.len() as u64 != config.vector_size {
         anyhow::bail!(
             "Embedding dimension {} does not match configured vector_size {} \
-             (model '{}' may have changed - run a reindex)",
+             (model '{}' may have changed - run `mgimind reindex`)",
             embedding.len(),
             config.vector_size,
             config.model_name
@@ -3628,6 +3628,180 @@ pub async fn migrate(config: &MindConfig, purge: bool) -> Result<(usize, usize, 
     libs.sort();
     libs.dedup();
     Ok((moved, skipped, libs))
+}
+
+/// Outcome of a reindex pass.
+pub struct ReindexReport {
+    /// How many points were re-embedded and written into the fresh collection.
+    pub reindexed: usize,
+    /// Points skipped (embed or upsert failure) — never aborts the whole pass.
+    pub skipped: usize,
+    /// The dimension the collection was rebuilt at (the current config value).
+    pub new_dim: u64,
+    /// JSON snapshot written before the drop. Recovery point if the pass dies
+    /// mid-rebuild; `None` only when the collection was empty (nothing to back up).
+    pub backup_path: Option<std::path::PathBuf>,
+}
+
+/// Re-embed every stored memory and procedure into a FRESH collection at the
+/// current `config.vector_size`. This is the fix for a changed embedding model
+/// (audit #11): swapping the model changes both the dimension and the vector
+/// space, so the old vectors are meaningless even at the same size. `reindex`
+/// reads each point's stored `content` (the source of truth — text is never
+/// lost), recreates the collection at the new dimension, and re-embeds.
+///
+/// Metadata is preserved: `created_at`, `source`, `author`, `type` (procedures
+/// reindex too), `quarantined` / `quarantine_reason`. The point ID stays the
+/// content-addressed `deterministic_id`, so links and dedup survive.
+///
+/// Safety: before the collection is dropped, every point is both held in memory
+/// AND written to a JSON snapshot under `backup_dir` (one file per library, the
+/// same format as `export`). qdrant is an external service, so a file backup of
+/// `mind_home` would NOT capture the memory store — this on-disk snapshot is the
+/// real recovery point if the pass dies between the drop and the re-upsert. The
+/// snapshot is the full JSON export (ids + content + metadata per library). The
+/// operation is idempotent
+/// (re-running re-embeds the same content to the same ids). Procedures keep
+/// their own id namespace.
+pub async fn reindex(config: &MindConfig, backup_dir: &std::path::Path) -> Result<ReindexReport> {
+    let client = get_client(config).await?;
+
+    // 1. Snapshot everything from the existing collection BEFORE touching it.
+    let existing = if client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        scroll_all(&client, MEMORIES_COLLECTION).await?
+    } else {
+        Vec::new()
+    };
+
+    // Capture the fields we need to rebuild each point, from the payload.
+    struct Captured {
+        id: qdrant_client::qdrant::PointId,
+        content: String,
+        library: String,
+        source: Option<String>,
+        author: Option<String>,
+        mem_type: String,
+        created_at: String,
+        quarantined: Option<bool>,
+        quarantine_reason: Option<String>,
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let captured: Vec<Captured> = existing
+        .into_iter()
+        .filter_map(|p| {
+            let id = p.id.clone()?;
+            let content = extract_string(&p.payload, "content")?;
+            Some(Captured {
+                id,
+                library: extract_string(&p.payload, "library").unwrap_or_default(),
+                source: extract_string(&p.payload, "source"),
+                author: extract_string(&p.payload, "author"),
+                mem_type: extract_string(&p.payload, "type")
+                    .unwrap_or_else(|| TYPE_MEMORY.to_string()),
+                created_at: extract_string(&p.payload, "created_at").unwrap_or_else(|| now.clone()),
+                quarantined: p.payload.get("quarantined").and_then(|v| v.as_bool()),
+                quarantine_reason: extract_string(&p.payload, "quarantine_reason"),
+                content,
+            })
+        })
+        .collect();
+
+    // 2. Persist the snapshot to disk BEFORE the drop. If the rebuild dies
+    //    mid-pass the store is recoverable from these files via `mgimind import`.
+    //    Skip when there is nothing to back up (fresh / empty collection).
+    let backup_path = if captured.is_empty() {
+        None
+    } else {
+        let written = export_all(config, "json", &backup_dir.to_string_lossy()).await?;
+        if written == 0 {
+            anyhow::bail!(
+                "Refusing to reindex: {} points to rebuild but the safety snapshot \
+                 wrote 0 files to {}. Aborting before any deletion.",
+                captured.len(),
+                backup_dir.display()
+            );
+        }
+        Some(backup_dir.to_path_buf())
+    };
+
+    // 3. Recreate the collection at the CURRENT dimension. Drop only after the
+    //    snapshot above is on disk, so the text is safe before any deletion.
+    if client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        client
+            .delete_collection(DeleteCollectionBuilder::new(MEMORIES_COLLECTION))
+            .await
+            .context("Failed to drop the memories collection during reindex")?;
+    }
+    MEMORIES_READY.store(false, Ordering::Release);
+    create_memories_collection(&client, config.vector_size).await?;
+    ensure_payload_indexes(&client, MEMORIES_COLLECTION).await;
+    MEMORIES_READY.store(true, Ordering::Release);
+
+    // 4. Re-embed each captured point from its stored content and re-insert.
+    let mut reindexed = 0usize;
+    let mut skipped = 0usize;
+    for c in &captured {
+        let embedding = match embedder::embed_passage(config, &c.content).await {
+            Ok(e) if check_dim(&e, config).is_ok() => e,
+            Ok(_) => {
+                eprintln!("  [skip] dimension mismatch re-embedding one entry");
+                skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                eprintln!("  [skip] embed failed: {e}");
+                skipped += 1;
+                continue;
+            }
+        };
+        let hash = blake3::hash(c.content.as_bytes()).to_hex().to_string();
+        let payload = build_payload_full(
+            &c.content,
+            &hash,
+            &c.created_at,
+            &now,
+            &c.library,
+            c.source.as_deref(),
+            &c.mem_type,
+            c.quarantined,
+            c.quarantine_reason.as_deref(),
+            c.author.as_deref(),
+        );
+        let (s_idx, s_val) = sparse_vector(&c.content);
+        let vectors = NamedVectors::default()
+            .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+            .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+        if let Err(e) = client
+            .upsert_points(
+                UpsertPointsBuilder::new(
+                    MEMORIES_COLLECTION,
+                    vec![PointStruct::new(c.id.clone(), vectors, payload)],
+                )
+                .wait(true),
+            )
+            .await
+        {
+            eprintln!("  [skip] upsert failed during reindex: {e}");
+            skipped += 1;
+            continue;
+        }
+        reindexed += 1;
+    }
+
+    Ok(ReindexReport {
+        reindexed,
+        skipped,
+        new_dim: config.vector_size,
+        backup_path,
+    })
 }
 
 /// Native gzip+tar backup of the data dir - no `tar` shellout (audit #19).

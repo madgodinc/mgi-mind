@@ -1839,3 +1839,90 @@ fn search_rerank_override_changes_scores() {
     }
     let _ = run(&["drop", &lib]);
 }
+
+/// Round-trip for `reindex` (audit #11): re-embedding from stored text into a
+/// fresh collection must (a) keep every memory searchable, (b) preserve its
+/// content, and (c) write a safety snapshot to disk BEFORE dropping anything.
+/// Reindexing at the SAME dimension is the honest test — the vectors are rebuilt
+/// from the same model, so a still-findable memory proves the read→drop→re-embed
+/// path round-trips rather than silently losing data (the regression this guards
+/// against). Needs the model, so gated like the other search tests.
+#[test]
+fn reindex_preserves_and_backs_up_memories() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let lib = format!("itreindex_{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // Seed a distinctive memory.
+    let (ok, out, err) = run(&["create", &lib]);
+    assert!(ok, "create failed:\nstdout:\n{out}\nstderr:\n{err}");
+    let needle = "The Eiffel Tower stands in Paris and was completed in 1889.";
+    let (ok, out, err) = run(&["add", &lib, needle]);
+    assert!(ok, "add failed:\nstdout:\n{out}\nstderr:\n{err}");
+
+    // Reindex (non-interactive). At the same dimension this rebuilds the vectors
+    // from stored text — the operation under test.
+    let (ok, out, err) = run(&["reindex", "--yes"]);
+    assert!(ok, "reindex failed:\nstdout:\n{out}\nstderr:\n{err}");
+    assert!(
+        out.contains("Reindexed") && out.contains("Safety snapshot"),
+        "reindex should report a count and a snapshot path, got:\n{out}"
+    );
+
+    // (c) The safety snapshot must be on disk, and must already contain the
+    // memory — proving it was written BEFORE the drop, not after.
+    let backup_dir = mind.join("reindex-backup");
+    assert!(
+        backup_dir.is_dir(),
+        "reindex must write a safety snapshot dir at {}",
+        backup_dir.display()
+    );
+    let snapshot = std::fs::read_to_string(backup_dir.join(format!("{lib}.json")))
+        .unwrap_or_else(|e| panic!("snapshot for library {lib} should exist: {e}"));
+    assert!(
+        snapshot.contains("Eiffel Tower"),
+        "snapshot must hold the memory content before the rebuild, got:\n{snapshot}"
+    );
+
+    // (a) + (b) The memory survives the rebuild and is still retrievable.
+    let (ok, out, err) = run(&[
+        "search",
+        "where is the eiffel tower located",
+        "--library",
+        &lib,
+        "--tier",
+        "3",
+    ]);
+    let _ = run(&["drop", &lib]); // cleanup regardless of assertions
+    assert!(ok, "search after reindex failed: {err}");
+    assert!(
+        out.contains("Eiffel Tower") && out.contains("Paris"),
+        "memory must still be retrievable after reindex, got:\n{out}"
+    );
+}

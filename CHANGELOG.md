@@ -28,6 +28,25 @@ The Python client (0.2.0 → 0.3.0) tracks this: `MemoryResult` gains
 `.results` / `.facts` / `.memories` / `.procedures`, is iterable over
 hits, and has `len()`; `str(result)` still yields a prompt-ready block.
 
+### Added: `mgimind reindex` — rebuild the index after switching models
+
+**Audit #11.** Swapping the embedding model changes both the vector
+dimension and the vector space, so the stored vectors become meaningless —
+searches either error on a dimension mismatch or silently return garbage
+neighbours. `mgimind reindex` re-embeds every memory and procedure from its
+stored text into a fresh collection at the current `vector_size`.
+
+It is safe by construction: the full set of points is read, then written to
+a JSON snapshot on disk (one file per library, ids + content + metadata),
+and only then is the collection dropped and rebuilt. A crash mid-rebuild
+leaves that snapshot as the recovery point — which matters because qdrant
+runs as an external service, so a file backup of the data dir would not
+capture the memory store. Point ids stay content-addressed, so links and
+dedup survive; `created_at` / `source` / `author` / `type` /
+`quarantined` are all preserved. The command confirms before touching
+anything (`--yes` to skip for CI). A dimension-mismatch warning now points
+at it by name.
+
 ### Fixed: duel rule was silently bypassed at the read path
 
 **Issue [#25](https://github.com/madgodinc/mgi-mind/issues/25) /

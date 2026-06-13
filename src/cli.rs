@@ -243,6 +243,18 @@ pub enum Commands {
         purge: bool,
     },
 
+    /// Rebuild the memory index for a changed embedding model. Re-embeds every
+    /// stored memory and procedure from its saved text into a fresh collection
+    /// at the current `vector_size`. Run this after switching models — the old
+    /// vectors are meaningless in the new space, even at the same dimension.
+    /// Idempotent; preserves created_at / source / author / type. Stored text is
+    /// never lost (read in full before the collection is rebuilt).
+    Reindex {
+        /// Skip the confirmation prompt (for scripts / CI).
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// v1.4 Phase 1: prepare the existing memory base for the validity
     /// model. Computes dependant counts per fact, proposes predicate
     /// cardinalities, and backfills confirmation history where derivable.
@@ -912,6 +924,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         #[cfg(feature = "extractor")]
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
+        Commands::Reindex { yes } => cmd_reindex(yes).await,
         Commands::Config { what } => cmd_config(what).await,
         Commands::Outcome {
             memory_id,
@@ -1547,6 +1560,56 @@ async fn cmd_migrate(purge: bool) -> Result<()> {
         } else {
             println!("Old collections kept. Re-run with --purge to delete them once verified.");
         }
+    }
+    Ok(())
+}
+
+async fn cmd_reindex(yes: bool) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    println!(
+        "Reindex will rebuild the memory collection for model '{}' (vector_size {}).",
+        config.model_name, config.vector_size
+    );
+    println!(
+        "Every memory and procedure is re-embedded from its stored text into a\n\
+         fresh collection. Stored text is read in full first, so nothing is lost.\n\
+         This is the step to run after switching embedding models."
+    );
+    if !yes {
+        print!("Proceed? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted. Nothing changed.");
+            return Ok(());
+        }
+    }
+    let backup_dir = crate::config::mind_home().join("reindex-backup");
+    println!(
+        "Snapshotting current memories to {} before the rebuild...",
+        backup_dir.display()
+    );
+    let report = crate::storage::reindex(&config, &backup_dir).await?;
+    println!(
+        "Reindexed {} entries at dimension {}.",
+        report.reindexed, report.new_dim
+    );
+    if report.skipped > 0 {
+        println!(
+            "Skipped {} entries that failed (see warnings above).",
+            report.skipped
+        );
+    }
+    match &report.backup_path {
+        Some(path) => println!(
+            "Safety snapshot (JSON, one file per library) in {}. It holds every \
+             memory's id, content, and metadata — your recovery point if the rebuild \
+             looks wrong. Safe to delete once you've verified the result.",
+            path.display()
+        ),
+        None => println!("No existing memories — nothing to back up."),
     }
     Ok(())
 }
@@ -3436,6 +3499,9 @@ async fn warn_on_dimension_mismatch() {
             );
         }
         eprintln!("       Adds/searches on these collections will fail until you reindex.");
+        eprintln!(
+            "       Fix: run `mgimind reindex` to re-embed from stored text at the new size."
+        );
     }
 }
 
