@@ -155,8 +155,10 @@ Required to cut v2.0:
 - **Self-editing memory (Д5)**, only if it can be shown to not regress
   R@k on LongMemEval-S and not increase the contradiction rate from
   v1.4. Otherwise pushed to v2.1.
-- **Multi-tenant isolation (Д7)** — per-user library scoping, fuzz-
-  tested on the storage and the viewer paths.
+- **Multi-tenant isolation (Д7)** — per-token library scoping landed in
+  2.0 (`--agent-token NAME:TOKEN:lib1,lib2`, enforced on the memory
+  read/write routes). Still open before the gate closes: `/memory/by-agent`
+  confinement, the viewer path, and fuzz-testing the enforcement.
 - Optional **encrypted collection-at-rest** with a documented key-loss
   threat model.
 

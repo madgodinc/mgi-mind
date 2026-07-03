@@ -1,6 +1,53 @@
 # Changelog
 
-## Unreleased — v1.7 candidate
+## 2.0.0 — trustworthy shared multi-agent memory
+
+Several agents reading and writing one brain at once made shared-pool
+correctness the priority. This release closes the gaps that opens, all off the
+hot search path.
+
+### Added: per-token library ACL
+
+`--agent-token` now takes an optional third segment, `NAME:TOKEN:lib1,lib2`, that
+scopes the token to a library allowlist. Enforcement is fail-closed. A scoped
+token reaches only `/memory/{search,browse,recall,add,ingest}` (plus `/health`
+and `/should-search`); every other route returns 403 for it, because those span
+all libraries (by-agent, facts, quarantine, consolidate, audit), share a global
+namespace (kv, sessions), or administer libraries, none of which the library ACL
+can confine yet. On the reachable routes: a write must name an allowlisted
+library; a read naming a disallowed library is a 403; a read naming none has the
+allowlist injected as its `libraries` filter. `/memory/recall` requires
+`format=json` for scoped tokens (the text render fuses all libraries). Two-segment
+tokens (`NAME:TOKEN`) stay unscoped, and the anonymous single-token mode has no
+scoping, so existing setups are unchanged. Facts are global by design, so a
+coordinator uses an unscoped token to read or invalidate them. Duplicate token
+names and empty scope segments are rejected at startup.
+
+### Added: per-author write flood control
+
+`serve-http` caps writes per author over a rolling 60s window
+(`write_quota_per_min`, default 600; 0 disables). A looping agent writing through
+`/memory/add` skips the ingest relevance gate, so without a cap it can flood the
+shared pool; over-budget writes now return 429. The counter is in-memory and
+keyed by the token-derived author, so the limit follows identity, not connection.
+
+### Added: duel verdict on `/fact/add` and a `/fact/contested` route
+
+`/fact/add` returns `{ok, id, verdict}` where verdict is `recorded`, `won`,
+`contested`, or `quarantined`. An agent whose fact lost the duel no longer reads a
+bare id as "stored as truth". `/fact/contested` lists the facts the duel left
+unresolved (contested values and quarantine candidates), so a coordinator can see
+where its agents disagreed. Both read the outcome the duel already computes; the
+write path and its per-(subject,predicate) lock are unchanged.
+
+### Added: embedding-model stamp + fail-closed startup
+
+Each stored memory point now records the model that embedded it (`embed_model`).
+`serve-http` samples these stamps at startup and refuses to run if any disagrees
+with the configured model. A model swap that keeps the vector dimension is
+invisible to the dimension guard yet makes search return garbage neighbours; the
+startup check turns that silent corruption into a clear "run `mgimind reindex`".
+Unstamped legacy points and facts are never treated as a mismatch.
 
 ### BREAKING (serve-http): structured JSON is the default for read routes
 

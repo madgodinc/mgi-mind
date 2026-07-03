@@ -1065,6 +1065,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             ensure_qdrant_running().await?;
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
+            // v2.0 fail-closed: a same-dimension embedding-model swap silently
+            // corrupts search. Refuse to serve a mismatched store rather than hand
+            // agents garbage neighbours.
+            crate::storage::assert_embedding_space(&config).await?;
             crate::http_api::run(config, &host, port, agent_tokens).await
         }
         Commands::Ingest {

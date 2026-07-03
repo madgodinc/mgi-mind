@@ -858,6 +858,59 @@ pub(crate) fn check_dim(embedding: &[f32], config: &MindConfig) -> Result<()> {
     Ok(())
 }
 
+/// v2.0 fail-closed embedding-space guard. Samples stored memory points and, if
+/// any carries an `embed_model` stamp that disagrees with the configured model,
+/// refuses to start: a same-dimension model swap silently returns garbage
+/// neighbours (check_dim only catches a dimension change). Absence of a stamp is
+/// never a mismatch — legacy points and facts predate stamping, so an unstamped
+/// corpus starts normally. Off the hot path; runs once at startup.
+pub async fn assert_embedding_space(config: &MindConfig) -> Result<()> {
+    let client = match get_client(config).await {
+        Ok(c) => c,
+        // No Qdrant reachable yet (fresh install): nothing to check.
+        Err(_) => return Ok(()),
+    };
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    // Sample only STAMPED points (must_not is_empty). Sampling unfiltered would
+    // let a large legacy unstamped corpus hide the handful of newly-stamped points
+    // behind a model swap, so the guard would pass on a corrupted store — exactly
+    // the failure it exists to catch. Filtering makes detection fire the moment any
+    // stamped point disagrees.
+    let builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+        .filter(Filter {
+            must_not: vec![Condition::is_empty("embed_model")],
+            ..Default::default()
+        })
+        .limit(64)
+        .with_payload(true);
+    let response = match client.scroll(builder).await {
+        Ok(r) => r,
+        // A transient scroll error must not brick startup; the dim guard on the
+        // write path still protects correctness.
+        Err(_) => return Ok(()),
+    };
+    for point in &response.result {
+        if let Some(stamp) = extract_string(&point.payload, "embed_model")
+            && stamp != config.model_name
+        {
+            anyhow::bail!(
+                "embedding-model mismatch: stored points were embedded with '{}', \
+                 config now uses '{}'. Search would return garbage neighbours. Run \
+                 `mgimind reindex` to re-embed, or restore the previous model.",
+                stamp,
+                config.model_name
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Read the configured vector dimension of an existing collection, if it can be
 /// determined. Returns `None` for named-vector layouts or any shape we can't
 /// confidently parse - callers treat `None` as "unknown", never as a mismatch.
@@ -1857,6 +1910,16 @@ fn build_payload_full(
     // unaffected. Legacy points simply lack the key.
     if let Some(a) = author {
         payload.insert("author".into(), a.into());
+    }
+    // v2.0 embedding-space stamp: record which model embedded this point. A model
+    // swap that keeps the same vector dimension is invisible to check_dim (the
+    // dims still match) yet makes search return garbage neighbours; startup samples
+    // these stamps and refuses to run on a mismatch. Read from the process-global
+    // cached config (the one the running server embeds with); if it can't be read
+    // the point is left unstamped, which the startup guard treats as "unknown",
+    // never as a mismatch.
+    if let Ok(cfg) = crate::config::load_cached() {
+        payload.insert("embed_model".into(), cfg.model_name.as_str().into());
     }
     payload
 }

@@ -59,6 +59,16 @@ pub async fn serve() -> Result<()> {
         );
     }
 
+    // v2.0: warn (do not bail — this is the long-lived daily driver) if the store
+    // was embedded with a different model than the config now names. serve-http is
+    // fail-closed; here a mismatch surfaces as a loud line, and search stays
+    // garbage until `mgimind reindex`.
+    if let Some(cfg) = &config
+        && let Err(e) = crate::storage::assert_embedding_space(cfg).await
+    {
+        eprintln!("mgimind mcp: {e}");
+    }
+
     // v1.4 Phase 3 step 3: spawn the background doubt-window re-test
     // loop. Three hard guarantees: yields when an MCP call is in
     // flight, caps per-tick scan, adaptive cadence by edit rate.

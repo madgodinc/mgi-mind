@@ -62,6 +62,17 @@ pub struct MindConfig {
     /// — existing configs that pre-date v1.5 deserialise unchanged.
     #[serde(default)]
     pub install_mode: crate::install_mode::InstallMode,
+    /// v2.0: per-author write ceiling on serve-http, writes per rolling 60s.
+    /// A runaway multi-agent loop writing through /memory/add skips the ingest
+    /// relevance gate and floods the shared pool; this caps it per author. The
+    /// default is generous (a human or a sane agent never reaches it); 0 disables
+    /// the gate. Pre-v2.0 configs lack the field and take the default.
+    #[serde(default = "default_write_quota_per_min")]
+    pub write_quota_per_min: u32,
+}
+
+fn default_write_quota_per_min() -> u32 {
+    600
 }
 
 fn default_rerank_model() -> String {
@@ -93,6 +104,7 @@ impl Default for MindConfig {
             rerank_model: default_rerank_model(),
             rerank_top_k: default_rerank_top_k(),
             install_mode: crate::install_mode::InstallMode::default(),
+            write_quota_per_min: default_write_quota_per_min(),
         }
     }
 }

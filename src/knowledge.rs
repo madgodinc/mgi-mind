@@ -366,17 +366,18 @@ pub async fn add_fact(
     add_fact_authored(config, subject, predicate, object, None).await
 }
 
-/// Like `add_fact` but records which agent asserted the fact (payload `author`
-/// field). Identity (the fact id from subject+predicate+object) is unchanged —
-/// author is provenance, mirroring memory-side `add_memory_authored`. Used by
-/// the multi-agent HTTP surface; the plain `add_fact` stays unattributed.
-pub async fn add_fact_authored(
+/// Shared core for the fact-add path: runs the duel, upserts, retires the loser,
+/// and returns `(id, verdict)`. `author` records which agent asserted the fact
+/// (payload `author`); the id (subject+predicate+object) is unchanged, so author
+/// is provenance only. The public `add_fact_authored` / `add_fact_authored_verdict`
+/// wrappers select which half of the tuple they expose.
+async fn add_fact_core(
     config: &MindConfig,
     subject: &str,
     predicate: &str,
     object: &str,
     author: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, &'static str)> {
     // Post-critic (PR #5): acquire per-(subject, predicate) lock so
     // concurrent add_fact on the same axis cannot race the duel.
     // Held until the end of add_fact (including the upsert + dampen
@@ -514,11 +515,52 @@ pub async fn add_fact_authored(
     // Retire the loser by cardinality: TemporalSingle -> superseded (history),
     // Single -> stale. One shared helper, also used by the consolidate batch, so
     // the mapping isn't re-derived per call site.
+    // Capture whether this add unseated a prior value BEFORE the retire consumes
+    // the id, so the verdict can tell a flip ("won") from a plain record.
+    let flipped = loser_to_retire.is_some();
     if let Some(loser_id) = loser_to_retire {
         crate::duel::retire_loser(config, cardinality, &loser_id).await?;
     }
 
-    Ok(id)
+    // v2.0: surface the duel verdict so a multi-agent caller learns whether its
+    // fact won, is contested, or was quarantined — a bare id reads as "stored as
+    // truth" even when the duel rejected the write.
+    let verdict = match status {
+        EntryStatus::Active if flipped => "won",
+        EntryStatus::Active => "recorded",
+        EntryStatus::Contested => "contested",
+        EntryStatus::QuarantineCandidate => "quarantined",
+        // The new write only ever carries Active/Contested/QuarantineCandidate;
+        // Stale/Superseded belong to a retired loser, not to this write.
+        _ => "recorded",
+    };
+    Ok((id, verdict))
+}
+
+/// Add a fact and return its id (back-compat wrapper). Most callers only need the
+/// id; the duel verdict is available via `add_fact_authored_verdict` for the
+/// surfaces that report it.
+pub async fn add_fact_authored(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    author: Option<&str>,
+) -> Result<String> {
+    Ok(add_fact_core(config, subject, predicate, object, author).await?.0)
+}
+
+/// Add a fact and return `(id, verdict)` where verdict is one of
+/// `recorded` | `won` | `contested` | `quarantined`. Same write path and lock
+/// discipline as `add_fact_authored`; the duel outcome is also returned.
+pub async fn add_fact_authored_verdict(
+    config: &MindConfig,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    author: Option<&str>,
+) -> Result<(String, &'static str)> {
+    add_fact_core(config, subject, predicate, object, author).await
 }
 
 /// Query facts whose subject, predicate, OR object matches the term, filtered
@@ -567,6 +609,65 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
 
         let response = client.scroll(builder).await?;
         for point in &response.result {
+            facts.push(fact_from_point(point));
+        }
+
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    Ok(facts)
+}
+
+/// v2.0: list facts the duel left unresolved — `contested` (both values stay
+/// live, awaiting fresh observations) and `quarantine_candidate` (a weak newcomer
+/// held back, awaiting promote-on-repeat). The reader half of cross-agent
+/// conflict resolution: the duel already records the outcome, and this lets a
+/// coordinator ask "where did my agents disagree" instead of the disagreement
+/// staying invisible in the store. Scan order is unspecified; cap with `limit`.
+pub async fn list_contested(config: &MindConfig, limit: usize) -> Result<Vec<Fact>> {
+    let client = storage::get_client(config).await?;
+    if !client
+        .collection_exists(storage::FACTS_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    // valid = true AND status IN {contested, quarantine_candidate}. A non-empty
+    // `should` acts as an OR requirement (at least one must hold), the same shape
+    // query_facts uses for its subject/predicate/object OR.
+    let filter = Filter {
+        must: vec![Condition::matches("valid", "true".to_string())],
+        should: vec![
+            Condition::matches("status", EntryStatus::Contested.as_str().to_string()),
+            Condition::matches(
+                "status",
+                EntryStatus::QuarantineCandidate.as_str().to_string(),
+            ),
+        ],
+        ..Default::default()
+    };
+
+    let mut facts = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            if facts.len() >= limit {
+                return Ok(facts);
+            }
             facts.push(fact_from_point(point));
         }
 

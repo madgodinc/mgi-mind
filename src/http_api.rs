@@ -53,6 +53,19 @@ struct AppState {
     /// searchable memory mangles a large JSON blob into chunks. One mutex +
     /// one JSON file is enough for the loopback, single-writer use case.
     kv_lock: Arc<tokio::sync::Mutex<()>>,
+    /// v2.0 flood control: per-author write timestamps over a rolling 60s window.
+    /// A runaway agent writing through /memory/add skips the ingest relevance
+    /// gate, so serve-http caps writes per author (config.write_quota_per_min; 0
+    /// disables). In-memory, resets on restart — a rate limit, not an audit.
+    writes: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+        >,
+    >,
+    /// v2.0 library ACL: agent name -> the libraries a scoped token may touch.
+    /// Populated only for `--agent-token NAME:TOKEN:lib1,lib2`. A name absent here
+    /// is unscoped (full access), preserving the pre-v2.0 default.
+    scopes: Arc<std::collections::HashMap<String, Vec<String>>>,
 }
 
 /// Entry point used by `Commands::ServeHttp`. `agent_tokens` is a list of
@@ -77,6 +90,8 @@ pub async fn run(
 
     let mut tokens: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
+    let mut scopes: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut generated: Option<String> = None;
 
     if agent_tokens.is_empty() {
@@ -86,14 +101,43 @@ pub async fn run(
         generated = Some(token);
     } else {
         // Per-agent tokens: identity is derived from the token, X-Agent ignored.
+        // Optional third segment scopes the token to a library allowlist
+        // (NAME:TOKEN:lib1,lib2); a two-part token stays unscoped (full access).
+        // TOKEN must be colon-free (generated tokens are UUIDs): splitn(3) puts
+        // everything after the second ':' into the allowlist segment, so a ':'
+        // inside a token would mis-split.
+        let mut seen_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for pair in &agent_tokens {
-            let (name, tok) = pair
-                .split_once(':')
-                .ok_or_else(|| anyhow::anyhow!("--agent-token must be NAME:TOKEN, got '{pair}'"))?;
+            let mut parts = pair.splitn(3, ':');
+            let name = parts.next().unwrap_or("");
+            let tok = parts.next().unwrap_or("");
+            let libs = parts.next();
             if name.is_empty() || tok.is_empty() {
-                anyhow::bail!("--agent-token NAME and TOKEN must both be non-empty: '{pair}'");
+                anyhow::bail!("--agent-token must be NAME:TOKEN[:lib1,lib2], got '{pair}'");
+            }
+            if !seen_names.insert(name.to_string()) {
+                // Two tokens sharing a name would merge scopes ambiguously (scopes
+                // is keyed by name); reject rather than silently pick one.
+                anyhow::bail!("--agent-token NAME '{name}' is used more than once");
             }
             tokens.insert(tok.to_string(), Some(name.to_string()));
+            if let Some(libs) = libs {
+                let list: Vec<String> = libs
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if list.is_empty() {
+                    // A present-but-empty scope (`NAME:TOKEN:` or `NAME:TOKEN:,`)
+                    // must not silently fall through to full access.
+                    anyhow::bail!(
+                        "--agent-token '{name}' has an empty library scope; drop the \
+                         trailing ':' for full access or name at least one library"
+                    );
+                }
+                scopes.insert(name.to_string(), list);
+            }
         }
     }
 
@@ -110,6 +154,8 @@ pub async fn run(
         tokens: Arc::new(tokens),
         reads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         kv_lock: Arc::new(tokio::sync::Mutex::new(())),
+        writes: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        scopes: Arc::new(scopes),
     };
 
     let app = Router::new()
@@ -125,6 +171,7 @@ pub async fn run(
         .route("/fact/add", post(fact_add))
         .route("/fact/query", post(fact_query))
         .route("/fact/invalidate", post(fact_invalidate))
+        .route("/fact/contested", post(fact_contested))
         .route("/procedure/learn", post(procedure_learn))
         .route("/procedure/recall", post(procedure_recall))
         .route("/consolidate", post(consolidate_preview))
@@ -140,6 +187,10 @@ pub async fn run(
         .route("/audit", post(audit_recent))
         .route("/kv/set", post(kv_set))
         .route("/kv/get", post(kv_get))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            scope_gate,
+        ))
         .with_state(state);
 
     let bind = format!("{host}:{}", port.unwrap_or(0));
@@ -166,7 +217,7 @@ pub async fn run(
         eprintln!("  agents: {agent_names}");
     }
     eprintln!("  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}");
-    eprintln!("          POST /fact/{{add,query,invalidate}}  /procedure/{{learn,recall}}");
+    eprintln!("          POST /fact/{{add,query,invalidate,contested}}  /procedure/{{learn,recall}}");
     eprintln!(
         "          POST /library/{{create,list}}  /quarantine/{{list,promote}}  /memory/restore"
     );
@@ -227,13 +278,13 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<Option<String>, S
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Count one read for the caller. Cheap in-memory tally; the agent is the
-/// token-derived identity, falling back to the X-Agent header, then "anonymous".
-fn note_read(state: &AppState, derived: &Option<String>, headers: &HeaderMap) {
-    let who = derived
-        .clone()
-        .or_else(|| agent_of(headers))
-        .unwrap_or_else(|| "anonymous".to_string());
+/// Count one read for the caller. Cheap in-memory tally, keyed on the
+/// token-derived identity (else one shared "anonymous" bucket). Deliberately NOT
+/// the self-asserted X-Agent header: keying on it would let an anonymous-mode
+/// client grow this map without bound by rotating the header (the same DoS the
+/// write quota avoids). The key set stays bounded by the configured agents.
+fn note_read(state: &AppState, derived: &Option<String>) {
+    let who = quota_key(derived);
     if let Ok(mut map) = state.reads.lock() {
         *map.entry(who).or_insert(0) += 1;
     }
@@ -362,9 +413,14 @@ async fn recall_json(state: &AppState, args: &Value) -> Response {
         Err(_) => Vec::new(),
     };
 
-    let memories = crate::storage::search(cfg, &query, None, limit, 2)
-        .await
-        .unwrap_or_default();
+    // Honour the same metadata filters as /memory/search (author, source,
+    // libraries), so a library-scoped token's recall stays confined to its
+    // allowlist — apply_scope injects `libraries` into args before we get here.
+    let mfilter = crate::mcp::memory_filter_from_args(args);
+    let memories =
+        crate::storage::search_filtered(cfg, &query, &mfilter, limit, 2, Default::default())
+            .await
+            .unwrap_or_default();
 
     let procedures = match crate::procedure::recall(cfg, None, Some(&query), limit).await {
         Ok(p) => {
@@ -402,6 +458,219 @@ fn with_agent(mut args: Value, headers: &HeaderMap, derived: Option<String>) -> 
     args
 }
 
+/// The flood-control bucket key: the token-derived identity, else one shared
+/// "anonymous" bucket. Deliberately NOT the self-asserted X-Agent header — in the
+/// anonymous single-token mode a client could otherwise rotate X-Agent to both
+/// evade the quota and grow the map without bound. The key set stays bounded by
+/// the configured agent names plus "anonymous".
+fn quota_key(derived: &Option<String>) -> String {
+    derived
+        .clone()
+        .unwrap_or_else(|| "anonymous".to_string())
+}
+
+/// Enforce the per-author write quota (config.write_quota_per_min over a rolling
+/// 60s window). Err(429) once the caller has spent its budget; a quota of 0
+/// disables the gate. It exists because /memory/add writes skip the ingest
+/// relevance filter, so a looping agent can flood the shared pool directly.
+fn check_write_quota(state: &AppState, who: &str) -> Result<(), Response> {
+    let quota = state.config.write_quota_per_min;
+    if quota == 0 {
+        return Ok(());
+    }
+    let now = std::time::Instant::now();
+    let window = std::time::Duration::from_secs(60);
+    // A poisoned lock must not wedge writes; fail open (availability beats a
+    // best-effort rate limit).
+    let mut map = match state.writes.lock() {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    let hits = map.entry(who.to_string()).or_default();
+    while let Some(&front) = hits.front() {
+        if now.duration_since(front) >= window {
+            hits.pop_front();
+        } else {
+            break;
+        }
+    }
+    if hits.len() as u32 >= quota {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "ok": false,
+                "error": format!("write quota exceeded ({quota}/min for '{who}')"),
+            })),
+        )
+            .into_response());
+    }
+    hits.push_back(now);
+    Ok(())
+}
+
+/// Is this caller a library-scoped token (configured as NAME:TOKEN:lib1,lib2)?
+fn is_scoped(state: &AppState, derived: &Option<String>) -> bool {
+    derived
+        .as_ref()
+        .is_some_and(|name| state.scopes.contains_key(name))
+}
+
+/// A 403 for a library the token is not scoped to.
+fn scope_denied(name: &str, lib: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "error": format!("token '{name}' is not scoped to library '{lib}'"),
+        })),
+    )
+        .into_response()
+}
+
+/// Enforce a scoped token's library allowlist (v2.0 ACL) at the library grain.
+/// The route-level `scope_gate` middleware already fail-closes a scoped token out
+/// of every route that can not honour an allowlist; this narrows the surviving
+/// memory routes to the token's libraries.
+///
+/// A write commits to exactly one `library` and the write path ignores a
+/// `libraries` filter, so a scoped write MUST name an allowlisted library
+/// explicitly — injecting a filter would let an unlibraried write fall through to
+/// the tool's default library (`mind_ingest` defaults to "projects"), outside the
+/// allowlist. A read that names no library has the allowlist injected as its
+/// `libraries` filter; a read naming a disallowed library is a 403. Unscoped and
+/// anonymous tokens are unaffected.
+fn apply_scope(
+    state: &AppState,
+    derived: &Option<String>,
+    args: &mut Value,
+    is_write: bool,
+) -> Result<(), Response> {
+    let Some(name) = derived else {
+        return Ok(());
+    };
+    let Some(allowed) = state.scopes.get(name) else {
+        return Ok(());
+    };
+    let Value::Object(obj) = args else {
+        // A scoped token with a non-object body must fail closed, NOT pass through:
+        // `/memory/browse` accepts a bare/degenerate body (no `query` required) and
+        // would otherwise list every library. A write can not name its library, so
+        // 403; a read is coerced to the allowlist filter.
+        if is_write {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "error": format!(
+                        "library-scoped token '{name}' must name a 'library' it is scoped to"
+                    ),
+                })),
+            )
+                .into_response());
+        }
+        *args = json!({ "libraries": allowed });
+        return Ok(());
+    };
+
+    if is_write {
+        return match obj.get("library").and_then(|v| v.as_str()) {
+            Some(l) if allowed.iter().any(|a| a == l) => Ok(()),
+            Some(l) => Err(scope_denied(name, l)),
+            None => Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "error": format!(
+                        "library-scoped token '{name}' must name a 'library' it is scoped to"
+                    ),
+                })),
+            )
+                .into_response()),
+        };
+    }
+
+    let mut requested: Vec<String> = Vec::new();
+    if let Some(l) = obj.get("library").and_then(|v| v.as_str()) {
+        requested.push(l.to_string());
+    }
+    if let Some(arr) = obj.get("libraries").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                requested.push(s.to_string());
+            }
+        }
+    }
+    if requested.is_empty() {
+        // Confine an unlibraried read to the allowlist so it can not span other
+        // agents' libraries.
+        obj.remove("library");
+        obj.insert(
+            "libraries".to_string(),
+            Value::Array(allowed.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+        return Ok(());
+    }
+    for lib in &requested {
+        if !allowed.contains(lib) {
+            return Err(scope_denied(name, lib));
+        }
+    }
+    // Canonicalize the filter to exactly the validated set and drop the singular
+    // `library`. Otherwise a degenerate `libraries` (e.g. `[]`, `[123]`) that
+    // reduces to nothing here but stays PRESENT in the body would be read
+    // downstream (memory_filter_from_args gives `libraries` precedence) as "all
+    // libraries", escaping the allowlist even though a valid `library` was named.
+    obj.remove("library");
+    obj.insert(
+        "libraries".to_string(),
+        Value::Array(requested.iter().map(|s| Value::String(s.clone())).collect()),
+    );
+    Ok(())
+}
+
+/// Route-level fail-closed gate for library-scoped tokens (v2.0). A scoped token
+/// reaches only the memory routes that honour its allowlist (search/browse/recall
+/// /add/ingest) plus health/should-search; every other route is 403 for it. Those
+/// either span all libraries (by-agent, facts, quarantine, consolidate, audit),
+/// share a global namespace (kv, sessions), or administer libraries — none of
+/// which the library ACL can confine yet, so they are denied rather than leaked.
+/// Unscoped and anonymous tokens pass through; auth still runs in each handler.
+async fn scope_gate(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    const ALLOWED_FOR_SCOPED: &[&str] = &[
+        "/health",
+        "/should-search",
+        "/memory/search",
+        "/memory/browse",
+        "/memory/recall",
+        "/memory/add",
+        "/memory/ingest",
+    ];
+    let scoped = req
+        .headers()
+        .get("authorization")
+        .and_then(|a| a.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .and_then(|t| state.tokens.get(t))
+        .and_then(|name| name.as_ref())
+        .is_some_and(|name| state.scopes.contains_key(name));
+    if scoped && !ALLOWED_FOR_SCOPED.contains(&req.uri().path()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "route not available to a library-scoped token (2.0 confines \
+                          scoped tokens to /memory/{search,browse,recall,add,ingest})",
+            })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 // ----- routes ----------------------------------------------------------------
 
 async fn health() -> Json<Value> {
@@ -411,13 +680,16 @@ async fn health() -> Json<Value> {
 async fn memory_search(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> Response {
     let derived = match check_auth(&state, &headers) {
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    note_read(&state, &derived, &headers);
+    note_read(&state, &derived);
+    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+        return resp;
+    }
     // `format: "json"` (the default for agents) returns the structured
     // SearchResult list — id, score, author, library, created_at — instead of
     // the human-readable text block, so a caller never has to regex-parse the
@@ -435,13 +707,16 @@ async fn memory_search(
 async fn memory_browse(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> Response {
     let derived = match check_auth(&state, &headers) {
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    note_read(&state, &derived, &headers);
+    note_read(&state, &derived);
+    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+        return resp;
+    }
     match resolve_format(&args) {
         Ok(Format::Json) => browse_json(&state, &args).await,
         Ok(Format::Text) => call(&state, "mind_browse", args).await,
@@ -470,18 +745,32 @@ async fn browse_json(state: &AppState, args: &Value) -> Response {
 async fn memory_recall(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> Response {
     let derived = match check_auth(&state, &headers) {
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    note_read(&state, &derived, &headers);
+    note_read(&state, &derived);
+    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+        return resp;
+    }
     // Structured recall: a `{facts, memories, procedures_text}` object so a graph
     // can route each silo on its own. `format: "text"` falls back to the rendered
     // block; an unknown format is a 400.
     match resolve_format(&args) {
         Ok(Format::Json) => recall_json(&state, &args).await,
+        // The text render (mind_recall_all) fuses memories from ALL libraries and
+        // ignores the injected `libraries` filter, so it can not be confined. A
+        // scoped token must use the JSON path (search_filtered honours the scope).
+        Ok(Format::Text) if is_scoped(&state, &derived) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "library-scoped tokens must use format=json on /memory/recall",
+            })),
+        )
+            .into_response(),
         Ok(Format::Text) => call(&state, "mind_recall_all", args).await,
         Err(other) => bad_request(&format!("unknown format '{other}' (use 'json' or 'text')")),
     }
@@ -490,24 +779,40 @@ async fn memory_recall(
 async fn memory_add(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> Response {
     let derived = match check_auth(&state, &headers) {
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
+    // Scope before quota so a 403 does not spend the caller's write budget.
+    if let Err(resp) = apply_scope(&state, &derived, &mut args, true) {
+        return resp;
+    }
+    let who = quota_key(&derived);
+    if let Err(resp) = check_write_quota(&state, &who) {
+        return resp;
+    }
     call(&state, "mind_add", with_agent(args, &headers, derived)).await
 }
 
 async fn memory_ingest(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(args): Json<Value>,
+    Json(mut args): Json<Value>,
 ) -> Response {
     let derived = match check_auth(&state, &headers) {
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
+    // Scope before quota so a 403 does not spend the caller's write budget.
+    if let Err(resp) = apply_scope(&state, &derived, &mut args, true) {
+        return resp;
+    }
+    let who = quota_key(&derived);
+    if let Err(resp) = check_write_quota(&state, &who) {
+        return resp;
+    }
     call(&state, "mind_ingest", with_agent(args, &headers, derived)).await
 }
 
@@ -520,7 +825,49 @@ async fn fact_add(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    call(&state, "mind_fact_add", with_agent(args, &headers, derived)).await
+    // Structured path (like search_json): call the knowledge layer directly so the
+    // duel verdict comes back. The text dispatch returns only an id, which reads as
+    // "stored as truth" even when the duel contested or quarantined the write.
+    let subject = args.get("subject").and_then(|v| v.as_str());
+    let predicate = args.get("predicate").and_then(|v| v.as_str());
+    let object = args.get("object").and_then(|v| v.as_str());
+    let (subject, predicate, object) = match (subject, predicate, object) {
+        (Some(s), Some(p), Some(o)) if !s.is_empty() && !p.is_empty() && !o.is_empty() => (s, p, o),
+        _ => return bad_request("fact requires non-empty 'subject', 'predicate', 'object'"),
+    };
+    // Quota after validation so a malformed request does not spend the budget.
+    let who = quota_key(&derived);
+    if let Err(resp) = check_write_quota(&state, &who) {
+        return resp;
+    }
+    // Facts carry no library, so they are outside the library ACL — attribute to
+    // the token-derived author, else the X-Agent hint, else a body `agent` field
+    // (the last is honoured only in anonymous mode, matching the old dispatch).
+    let author = derived
+        .or_else(|| agent_of(&headers))
+        .or_else(|| {
+            args.get("agent")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    match crate::knowledge::add_fact_authored_verdict(
+        &state.config,
+        subject,
+        predicate,
+        object,
+        author.as_deref(),
+    )
+    .await
+    {
+        Ok((id, verdict)) => {
+            Json(json!({ "ok": true, "id": id, "verdict": verdict })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 // ----- HTTP/MCP parity (read + non-destructive) ------------------------------
@@ -569,6 +916,33 @@ async fn fact_invalidate(
     call(&state, "mind_fact_invalidate", args).await
 }
 
+/// v2.0: list facts the duel left unresolved — `contested` (both values live) and
+/// `quarantine_candidate` (a weak newcomer held back). The read half of
+/// cross-agent conflict resolution: a coordinator sees where its agents disagreed
+/// instead of the disagreement staying invisible. Read-only; returns the
+/// structured Fact list (Fact is Serialize). `limit` caps the scan (default 50).
+async fn fact_contested(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> Response {
+    let derived = match check_auth(&state, &headers) {
+        Ok(d) => d,
+        Err(c) => return c.into_response(),
+    };
+    note_read(&state, &derived);
+    // Clamp so a caller can not scroll the whole facts collection into RAM.
+    let limit = (args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize).min(2000);
+    match crate::knowledge::list_contested(&state.config, limit).await {
+        Ok(facts) => Json(json!({ "ok": true, "results": facts })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
 /// `mind_learn`: persist an error->fix procedure (write, like add). Carries the
 /// token-derived author so a multi-agent graph records who learned the lesson.
 async fn procedure_learn(
@@ -580,6 +954,10 @@ async fn procedure_learn(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
+    let who = quota_key(&derived);
+    if let Err(resp) = check_write_quota(&state, &who) {
+        return resp;
+    }
     call(&state, "mind_learn", with_agent(args, &headers, derived)).await
 }
 
@@ -734,7 +1112,7 @@ async fn memory_by_agent(
         Ok(d) => d,
         Err(c) => return c.into_response(),
     };
-    note_read(&state, &derived, &headers);
+    note_read(&state, &derived);
     // For by-agent, the body `agent` (explicit target) wins; fall back to the
     // caller's own derived/header identity ("what did I write").
     let has_explicit = args.get("agent").and_then(|v| v.as_str()).is_some();
