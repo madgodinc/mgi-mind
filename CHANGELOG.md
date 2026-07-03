@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.0 — connect Hermes and OpenClaude to a shared brain
+
+Two multi-agent orchestrators can now use mgi-mind as their shared memory.
+Hermes (NousResearch/hermes-agent) ships conversation tools but no memory, so
+two Hermes runs forget each other; OpenClaude (CC Mirror) spawns background
+Claude agents that share a task graph but not what they learn. Point either at
+one server and the whole group reads and writes a single pool.
+
+Nothing in the server changed: 2.1 is documentation and recipes on top of the
+2.0 surfaces. Hermes loads a plugin that registers `recall`/`remember` over the
+HTTP client; OpenClaude registers the brain as an MCP server (`mgimind mcp`) for
+a single Conductor or as HTTP tools for a parallel swarm. Per-agent tokens on
+`serve-http` (added in 2.0) tag every write with its author, so a shared pool
+stays attributable when many agents write at once.
+
+New recipes: [`docs/integrations/hermes.py`](docs/integrations/hermes.py),
+[`docs/integrations/openclaude.md`](docs/integrations/openclaude.md), and an
+updated integrations README.
+
 ## 2.0.0 — trustworthy shared multi-agent memory
 
 Several agents reading and writing one brain at once made shared-pool

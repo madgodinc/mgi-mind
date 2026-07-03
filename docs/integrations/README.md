@@ -54,7 +54,15 @@ pip install mgi-mind
 | [`langgraph.py`](./langgraph.py) | LangGraph + LangChain | `@tool` |
 | [`pydantic_ai.py`](./pydantic_ai.py) | Pydantic AI | `@agent.tool_plain` |
 | [`openai_agents.py`](./openai_agents.py) | OpenAI Agents SDK | `@function_tool` |
+| [`hermes.py`](./hermes.py) | Hermes (NousResearch) | plugin `register()` |
+| [`openclaude.md`](./openclaude.md) | OpenClaude (CC Mirror) | MCP server / HTTP tools |
 | [`raw_http.py`](./raw_http.py) | Any language (no client) | plain HTTP POST |
+
+Hermes and OpenClaude are multi-agent orchestrators: several agents run at once
+and, on their own, forget each other between contexts. Pointing them at one
+mgi-mind server gives the whole group shared memory. Hermes loads a plugin that
+registers `recall`/`remember`; OpenClaude connects its agents as MCP or HTTP
+clients. See [`hermes.py`](./hermes.py) and [`openclaude.md`](./openclaude.md).
 
 Every example targets the live HTTP server above; it assumes `MGIMIND_URL` and
 `MGIMIND_TOKEN` are set and the agent's own model key (`ANTHROPIC_API_KEY` or
@@ -111,3 +119,8 @@ A memory written through `tok-r` is tagged `author=researcher`. The identity is
 derived from the token, not self-asserted, so one agent can't write under
 another's name. Each result from `mem.search(...)` carries its `author`; query
 one agent's writes with `mem` pointed at `/memory/by-agent`.
+
+This is how a Hermes swarm and an OpenClaude swarm share one brain: run a single
+`serve-http`, hand each orchestrator its own token, and every write stays
+attributable. The per-framework wiring is in [`hermes.py`](./hermes.py) and
+[`openclaude.md`](./openclaude.md).
