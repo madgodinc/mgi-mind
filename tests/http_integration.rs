@@ -487,3 +487,402 @@ fn http_surface_full_contract() {
         .env("ORT_DYLIB_PATH", &ort)
         .output();
 }
+
+/// Locks the v2.0 contract end-to-end: the fail-closed `scope_gate` middleware,
+/// write-aware `apply_scope` (library ACL), per-author write flood control, and
+/// the duel verdict on `/fact/add` + `/fact/contested`. Same env-gate and idiom
+/// as `http_surface_full_contract`; reuses `curl`/`ServerGuard`/`copy_dir`.
+///
+/// Runs on a DIFFERENT fixed port and DIFFERENT library prefix so it can run in
+/// parallel with the other http test against the same shared Qdrant. It never
+/// hard-codes a duel outcome (that depends on trust scoring), and every write
+/// asserts against a per-author quota budget spelled out in comments (three
+/// independent buckets, quota=3), so no 200 can flake from a neighbour's bucket.
+#[test]
+fn http_v2_acl_flood_verdict_contract() {
+    let (Ok(port), Ok(models), Ok(ort)) = (
+        std::env::var("MGIMIND_IT_QDRANT"),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    // Isolated MGIMIND_HOME with an e5 config + a copy of the model. Quota=3 so a
+    // 4th write in one author's rolling window is the 429 boundary.
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(mind.join("models")).unwrap();
+    copy_dir(&model_src, &mind.join("models/multilingual-e5-base")).expect("copy model");
+    let cfg = serde_json::json!({
+        "version": "it",
+        "data_dir": mind,
+        "model_name": "multilingual-e5-base",
+        "qdrant_port": port.parse::<u16>().expect("MGIMIND_IT_QDRANT must be a port"),
+        "vector_size": 768,
+        "pooling": "mean",
+        "uses_token_type_ids": false,
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+        "rerank_enabled": false,
+        "write_quota_per_min": 5,
+    });
+    std::fs::write(
+        mind.join("config.json"),
+        serde_json::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    // A distinct port + library prefix from the other http test (they share this
+    // process and Qdrant). pid keeps fact subjects unique across parallel runs.
+    let http_port = 47291u16;
+    let pid = std::process::id();
+    let lib_a = format!("itacl_a_{pid}"); // bob's scoped library
+    let lib_priv = format!("itacl_priv_{pid}"); // a library bob is NOT scoped to
+    let (tok_admin, tok_bob, tok_carol, tok_flood) =
+        ("TOK_admin_1", "TOK_bob_2", "TOK_carol_3", "TOK_flood_4");
+
+    let mut server = ServerGuard(
+        Command::new(bin())
+            .args(["serve-http", "--port", &http_port.to_string()])
+            .arg("--agent-token")
+            .arg(format!("admin:{tok_admin}"))
+            .arg("--agent-token")
+            .arg(format!("bob:{tok_bob}:{lib_a}")) // scoped to lib_a only
+            .arg("--agent-token")
+            .arg(format!("carol:{tok_carol}"))
+            .arg("--agent-token")
+            .arg(format!("flood:{tok_flood}"))
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .spawn()
+            .expect("spawn serve-http"),
+    );
+
+    let base = format!("http://127.0.0.1:{http_port}");
+    let h_admin = format!("Authorization: Bearer {tok_admin}");
+    let h_bob = format!("Authorization: Bearer {tok_bob}");
+    let h_carol = format!("Authorization: Bearer {tok_carol}");
+    let h_flood = format!("Authorization: Bearer {tok_flood}");
+    let ct = "Content-Type: application/json";
+
+    // POST helper: (auth header, path, json body) -> (code, body).
+    let post = |auth: &str, path: &str, body: &str| -> (u16, String) {
+        let url = format!("{base}{path}");
+        curl(&["-X", "POST", "-H", auth, "-H", ct, "-d", body, &url])
+    };
+
+    // 1) Health up (fast-fail if the port is busy / server died).
+    let health = format!("{base}/health");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(Some(status)) = server.0.try_wait() {
+            panic!("serve-http exited before /health ({status}) — port {http_port} likely busy");
+        }
+        if curl(&["-H", &h_admin, &health]).0 == 200 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server /health never returned 200"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // admin creates both libraries (library/create is not quota-counted).
+    for l in [&lib_a, &lib_priv] {
+        let (code, out) = post(
+            &h_admin,
+            "/library/create",
+            &format!("{{\"name\":\"{l}\"}}"),
+        );
+        assert_eq!(code, 200, "admin create {l} should 200, got {code}: {out}");
+    }
+
+    // 2) scope_gate is fail-closed: bob (scoped) is 403 on every route NOT in
+    //    ALLOWED_FOR_SCOPED (http_api.rs), and 200 on /should-search.
+    for path in [
+        "/memory/by-agent",
+        "/fact/add",
+        "/fact/query",
+        "/fact/invalidate",
+        "/fact/contested",
+        "/library/create",
+        "/library/list",
+        "/procedure/learn",
+        "/procedure/recall",
+        "/consolidate",
+        "/quarantine/list",
+        "/quarantine/promote",
+        "/memory/restore",
+        "/session/start",
+        "/session/end",
+        "/session/last",
+        "/session/context",
+        "/stats/activity",
+        "/audit",
+        "/kv/set",
+        "/kv/get",
+    ] {
+        let (code, out) = post(&h_bob, path, "{}");
+        assert_eq!(
+            code, 403,
+            "scoped token must be 403 on {path}, got {code}: {out}"
+        );
+    }
+    assert_eq!(
+        post(&h_bob, "/should-search", "{\"query\":\"x\"}").0,
+        200,
+        "/should-search is on the scoped allowlist"
+    );
+    // The middleware does not replace auth: a bad bearer is still 401, not 403.
+    assert_eq!(
+        post(
+            "Authorization: Bearer WRONG",
+            "/memory/search",
+            "{\"query\":\"x\"}"
+        )
+        .0,
+        401,
+        "a bad token must 401 even on an allowlisted route"
+    );
+
+    // 3) apply_scope write branch. bob may write ONLY into lib_a.
+    //    bob write-budget: these two 200s are writes #1 and #2 (of 5).
+    let (code, out) = post(
+        &h_bob,
+        "/memory/ingest",
+        "{\"candidates\":[{\"type\":\"memory\",\"content\":\"anything\"}]}",
+    );
+    assert_eq!(
+        code, 403,
+        "scoped write with no library must 403, got {code}: {out}"
+    );
+    let (code, out) = post(
+        &h_bob,
+        "/memory/ingest",
+        &format!(
+            "{{\"library\":\"{lib_priv}\",\"candidates\":[{{\"type\":\"memory\",\"content\":\"x\"}}]}}"
+        ),
+    );
+    assert_eq!(
+        code, 403,
+        "scoped write into a non-allowlisted library must 403, got {code}: {out}"
+    );
+    let (code, out) = post(&h_bob, "/memory/add", "123"); // non-object body
+    assert_eq!(
+        code, 403,
+        "scoped write with a non-object body must 403, got {code}: {out}"
+    );
+    let bob_own = "the standup rotates to a new facilitator each sprint";
+    let (code, out) = post(
+        &h_bob,
+        "/memory/ingest",
+        &format!(
+            "{{\"library\":\"{lib_a}\",\"candidates\":[{{\"type\":\"memory\",\"content\":\"{bob_own}\"}}]}}"
+        ),
+    );
+    assert_eq!(
+        code, 200,
+        "scoped write into the allowlisted library should 200 (#1), got {code}: {out}"
+    );
+    let (code, out) = post(
+        &h_bob,
+        "/memory/add",
+        &format!("{{\"library\":\"{lib_a}\",\"content\":\"a second note in lib a\"}}"),
+    );
+    assert_eq!(
+        code, 200,
+        "scoped /memory/add into the allowlisted library should 200 (#2), got {code}: {out}"
+    );
+
+    // 4) apply_scope read branch + a falsifiable canary. admin plants a secret in
+    //    lib_priv; bob must never see it, but MUST see his own lib_a content
+    //    (positive control, so "canary absent" can't pass on an empty/broken read).
+    let canary = "the vault rotation code is plum-otter-seventine";
+    let (code, out) = post(
+        &h_admin,
+        "/memory/ingest",
+        &format!(
+            "{{\"library\":\"{lib_priv}\",\"candidates\":[{{\"type\":\"memory\",\"content\":\"{canary}\"}}]}}"
+        ),
+    );
+    assert_eq!(
+        code, 200,
+        "admin plant canary should 200, got {code}: {out}"
+    );
+    // Positive control on the CANARY itself: admin (unscoped) must actually find
+    // it in lib_priv. A 200 from ingest does not prove storage (the relevance gate
+    // could quarantine, the secret scanner could skip), so without this the later
+    // "bob does not see the canary" asserts could pass on a canary that was never
+    // stored. This is a read, so it spends no write quota.
+    let (code, out) = post(
+        &h_admin,
+        "/memory/search",
+        &format!("{{\"query\":\"vault rotation code\",\"library\":\"{lib_priv}\",\"tier\":3}}"),
+    );
+    assert_eq!(
+        code, 200,
+        "admin canary search should 200, got {code}: {out}"
+    );
+    assert!(
+        out.contains("plum-otter-seventine"),
+        "the canary must actually be stored+searchable in lib_priv (else the ACL \
+         asserts below are vacuous), got: {out}"
+    );
+
+    // positive control: bob search (no library) finds his OWN content (scope
+    // injected lib_a, search works).
+    let (code, out) = post(
+        &h_bob,
+        "/memory/search",
+        "{\"query\":\"who facilitates the standup\",\"tier\":3}",
+    );
+    assert_eq!(code, 200, "bob search should 200, got {code}: {out}");
+    assert!(
+        out.contains("standup"),
+        "bob must find his own lib_a content (positive control), got: {out}"
+    );
+    // canary is invisible to bob on every read shape. Each negative read asserts
+    // 200 first, so a 500/400 can't make "canary absent" pass vacuously.
+    let (code, out) = post(
+        &h_bob,
+        "/memory/search",
+        "{\"query\":\"vault rotation code\",\"tier\":3}",
+    );
+    assert_eq!(code, 200, "bob canary search should 200, got {code}: {out}");
+    assert!(
+        !out.contains("plum-otter-seventine"),
+        "bob search must not surface another library's canary, got: {out}"
+    );
+    assert_eq!(
+        post(
+            &h_bob,
+            "/memory/search",
+            &format!("{{\"query\":\"vault\",\"library\":\"{lib_priv}\"}}")
+        )
+        .0,
+        403,
+        "bob naming a non-allowlisted library must 403"
+    );
+    let (code, out) = post(&h_bob, "/memory/browse", "{}");
+    assert_eq!(code, 200, "bob browse should 200, got {code}: {out}");
+    assert!(
+        !out.contains("plum-otter-seventine"),
+        "bob browse must not surface the canary, got: {out}"
+    );
+    let (code, out) = post(&h_bob, "/memory/browse", "123"); // non-object read → coerced to allowlist
+    assert_eq!(
+        code, 200,
+        "bob non-object browse should 200, got {code}: {out}"
+    );
+    assert!(
+        !out.contains("plum-otter-seventine"),
+        "bob non-object browse must stay confined, got: {out}"
+    );
+    assert_eq!(
+        post(
+            &h_bob,
+            "/memory/recall",
+            "{\"query\":\"vault\",\"format\":\"text\"}"
+        )
+        .0,
+        403,
+        "scoped recall in text mode must 403 (text render is not library-confined)"
+    );
+    let (code, out) = post(
+        &h_bob,
+        "/memory/recall",
+        "{\"query\":\"vault rotation code\"}",
+    );
+    assert_eq!(code, 200, "bob json recall should 200, got {code}: {out}");
+    assert!(
+        !out.contains("plum-otter-seventine"),
+        "bob json recall memories must not surface the canary, got: {out}"
+    );
+
+    // 5) Flood control: the `flood` token's own bucket (quota=5). 5 writes 200,
+    //    the 6th 429. bob's writes are a different bucket, so they don't interfere.
+    for n in 1..=5 {
+        let (code, out) = post(
+            &h_flood,
+            "/memory/add",
+            &format!("{{\"library\":\"{lib_a}\",\"content\":\"flood note {n}\"}}"),
+        );
+        assert_eq!(code, 200, "flood write {n}/5 should 200, got {code}: {out}");
+    }
+    let (code, out) = post(
+        &h_flood,
+        "/memory/add",
+        &format!("{{\"library\":\"{lib_a}\",\"content\":\"flood note 6\"}}"),
+    );
+    assert_eq!(
+        code, 429,
+        "the 6th write in the window (quota=5) must be 429, got {code}: {out}"
+    );
+    // A malformed fact does NOT spend budget: carol's 400 leaves her bucket empty.
+    assert_eq!(
+        post(
+            &h_carol,
+            "/fact/add",
+            "{\"subject\":\"x\",\"predicate\":\"y\"}"
+        )
+        .0,
+        400,
+        "a fact missing 'object' is a 400 (validated before quota)"
+    );
+
+    // 6) Duel verdict wiring on /fact/add, and /fact/contested reachability. The
+    //    (subject, predicate) axis is pid-unique, so it can NOT match a registered
+    //    cardinality in any shared predicate registry: it defaults to Multi, no
+    //    conflict runs, and both adds are deterministically "recorded". This locks
+    //    the verdict PLUMBING (that /fact/add returns {id, verdict}) without
+    //    depending on a registered predicate's non-deterministic duel outcome.
+    //    admin write-budget (quota=5): canary was ingest #1; these are #2 and #3.
+    let subj = format!("svc_{pid}");
+    let pred = format!("runs_on_{pid}"); // pid-unique → guaranteed Multi (unregistered)
+    let (code, out) = post(
+        &h_admin,
+        "/fact/add",
+        &format!("{{\"subject\":\"{subj}\",\"predicate\":\"{pred}\",\"object\":\"port_9001\"}}"),
+    );
+    assert_eq!(code, 200, "fact/add should 200, got {code}: {out}");
+    assert!(
+        out.contains("\"id\"") && out.contains("\"verdict\":\"recorded\""),
+        "first fact/add must report {{id, verdict:recorded}}, got: {out}"
+    );
+    let (code, out) = post(
+        &h_admin,
+        "/fact/add",
+        &format!("{{\"subject\":\"{subj}\",\"predicate\":\"{pred}\",\"object\":\"port_9002\"}}"),
+    );
+    assert_eq!(code, 200, "second fact/add should 200, got {code}: {out}");
+    // Multi predicate → the second value coexists, also "recorded" (no duel runs).
+    assert!(
+        out.contains("\"verdict\":\"recorded\""),
+        "second fact/add on a Multi axis must also be 'recorded', got: {out}"
+    );
+    // /fact/contested is a reachability + shape smoke check: the contested set is
+    // global and may be empty; this Multi axis never contests.
+    let (code, out) = post(&h_admin, "/fact/contested", "{}");
+    assert_eq!(code, 200, "/fact/contested should 200, got {code}: {out}");
+    assert!(
+        out.contains("\"results\""),
+        "/fact/contested must return a results array, got: {out}"
+    );
+
+    // Cleanup: drop both libraries (facts in the shared _kg_facts are pid-unique).
+    for l in [&lib_a, &lib_priv] {
+        let _ = Command::new(bin())
+            .args(["drop", l])
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output();
+    }
+}

@@ -547,7 +547,9 @@ pub async fn add_fact_authored(
     object: &str,
     author: Option<&str>,
 ) -> Result<String> {
-    Ok(add_fact_core(config, subject, predicate, object, author).await?.0)
+    Ok(add_fact_core(config, subject, predicate, object, author)
+        .await?
+        .0)
 }
 
 /// Add a fact and return `(id, verdict)` where verdict is one of

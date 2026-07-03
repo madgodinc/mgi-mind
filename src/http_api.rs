@@ -106,8 +106,7 @@ pub async fn run(
         // TOKEN must be colon-free (generated tokens are UUIDs): splitn(3) puts
         // everything after the second ':' into the allowlist segment, so a ':'
         // inside a token would mis-split.
-        let mut seen_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for pair in &agent_tokens {
             let mut parts = pair.splitn(3, ':');
             let name = parts.next().unwrap_or("");
@@ -217,7 +216,9 @@ pub async fn run(
         eprintln!("  agents: {agent_names}");
     }
     eprintln!("  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}");
-    eprintln!("          POST /fact/{{add,query,invalidate,contested}}  /procedure/{{learn,recall}}");
+    eprintln!(
+        "          POST /fact/{{add,query,invalidate,contested}}  /procedure/{{learn,recall}}"
+    );
     eprintln!(
         "          POST /library/{{create,list}}  /quarantine/{{list,promote}}  /memory/restore"
     );
@@ -464,19 +465,17 @@ fn with_agent(mut args: Value, headers: &HeaderMap, derived: Option<String>) -> 
 /// evade the quota and grow the map without bound. The key set stays bounded by
 /// the configured agent names plus "anonymous".
 fn quota_key(derived: &Option<String>) -> String {
-    derived
-        .clone()
-        .unwrap_or_else(|| "anonymous".to_string())
+    derived.clone().unwrap_or_else(|| "anonymous".to_string())
 }
 
 /// Enforce the per-author write quota (config.write_quota_per_min over a rolling
 /// 60s window). Err(429) once the caller has spent its budget; a quota of 0
 /// disables the gate. It exists because /memory/add writes skip the ingest
 /// relevance filter, so a looping agent can flood the shared pool directly.
-fn check_write_quota(state: &AppState, who: &str) -> Result<(), Response> {
+fn check_write_quota(state: &AppState, who: &str) -> Option<Response> {
     let quota = state.config.write_quota_per_min;
     if quota == 0 {
-        return Ok(());
+        return None;
     }
     let now = std::time::Instant::now();
     let window = std::time::Duration::from_secs(60);
@@ -484,7 +483,7 @@ fn check_write_quota(state: &AppState, who: &str) -> Result<(), Response> {
     // best-effort rate limit).
     let mut map = match state.writes.lock() {
         Ok(m) => m,
-        Err(_) => return Ok(()),
+        Err(_) => return None,
     };
     let hits = map.entry(who.to_string()).or_default();
     while let Some(&front) = hits.front() {
@@ -495,17 +494,19 @@ fn check_write_quota(state: &AppState, who: &str) -> Result<(), Response> {
         }
     }
     if hits.len() as u32 >= quota {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "ok": false,
-                "error": format!("write quota exceeded ({quota}/min for '{who}')"),
-            })),
-        )
-            .into_response());
+        return Some(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "ok": false,
+                    "error": format!("write quota exceeded ({quota}/min for '{who}')"),
+                })),
+            )
+                .into_response(),
+        );
     }
     hits.push_back(now);
-    Ok(())
+    None
 }
 
 /// Is this caller a library-scoped token (configured as NAME:TOKEN:lib1,lib2)?
@@ -544,48 +545,39 @@ fn apply_scope(
     derived: &Option<String>,
     args: &mut Value,
     is_write: bool,
-) -> Result<(), Response> {
-    let Some(name) = derived else {
-        return Ok(());
+) -> Option<Response> {
+    let name = derived.as_ref()?;
+    let allowed = state.scopes.get(name)?;
+    let must_name_library = || -> Response {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": format!(
+                    "library-scoped token '{name}' must name a 'library' it is scoped to"
+                ),
+            })),
+        )
+            .into_response()
     };
-    let Some(allowed) = state.scopes.get(name) else {
-        return Ok(());
-    };
+
     let Value::Object(obj) = args else {
         // A scoped token with a non-object body must fail closed, NOT pass through:
         // `/memory/browse` accepts a bare/degenerate body (no `query` required) and
         // would otherwise list every library. A write can not name its library, so
         // 403; a read is coerced to the allowlist filter.
         if is_write {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "ok": false,
-                    "error": format!(
-                        "library-scoped token '{name}' must name a 'library' it is scoped to"
-                    ),
-                })),
-            )
-                .into_response());
+            return Some(must_name_library());
         }
         *args = json!({ "libraries": allowed });
-        return Ok(());
+        return None;
     };
 
     if is_write {
         return match obj.get("library").and_then(|v| v.as_str()) {
-            Some(l) if allowed.iter().any(|a| a == l) => Ok(()),
-            Some(l) => Err(scope_denied(name, l)),
-            None => Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "ok": false,
-                    "error": format!(
-                        "library-scoped token '{name}' must name a 'library' it is scoped to"
-                    ),
-                })),
-            )
-                .into_response()),
+            Some(l) if allowed.iter().any(|a| a == l) => None,
+            Some(l) => Some(scope_denied(name, l)),
+            None => Some(must_name_library()),
         };
     }
 
@@ -608,11 +600,11 @@ fn apply_scope(
             "libraries".to_string(),
             Value::Array(allowed.iter().map(|s| Value::String(s.clone())).collect()),
         );
-        return Ok(());
+        return None;
     }
     for lib in &requested {
         if !allowed.contains(lib) {
-            return Err(scope_denied(name, lib));
+            return Some(scope_denied(name, lib));
         }
     }
     // Canonicalize the filter to exactly the validated set and drop the singular
@@ -625,7 +617,7 @@ fn apply_scope(
         "libraries".to_string(),
         Value::Array(requested.iter().map(|s| Value::String(s.clone())).collect()),
     );
-    Ok(())
+    None
 }
 
 /// Route-level fail-closed gate for library-scoped tokens (v2.0). A scoped token
@@ -687,7 +679,7 @@ async fn memory_search(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived);
-    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+    if let Some(resp) = apply_scope(&state, &derived, &mut args, false) {
         return resp;
     }
     // `format: "json"` (the default for agents) returns the structured
@@ -714,7 +706,7 @@ async fn memory_browse(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived);
-    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+    if let Some(resp) = apply_scope(&state, &derived, &mut args, false) {
         return resp;
     }
     match resolve_format(&args) {
@@ -752,7 +744,7 @@ async fn memory_recall(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived);
-    if let Err(resp) = apply_scope(&state, &derived, &mut args, false) {
+    if let Some(resp) = apply_scope(&state, &derived, &mut args, false) {
         return resp;
     }
     // Structured recall: a `{facts, memories, procedures_text}` object so a graph
@@ -786,11 +778,11 @@ async fn memory_add(
         Err(c) => return c.into_response(),
     };
     // Scope before quota so a 403 does not spend the caller's write budget.
-    if let Err(resp) = apply_scope(&state, &derived, &mut args, true) {
+    if let Some(resp) = apply_scope(&state, &derived, &mut args, true) {
         return resp;
     }
     let who = quota_key(&derived);
-    if let Err(resp) = check_write_quota(&state, &who) {
+    if let Some(resp) = check_write_quota(&state, &who) {
         return resp;
     }
     call(&state, "mind_add", with_agent(args, &headers, derived)).await
@@ -806,11 +798,11 @@ async fn memory_ingest(
         Err(c) => return c.into_response(),
     };
     // Scope before quota so a 403 does not spend the caller's write budget.
-    if let Err(resp) = apply_scope(&state, &derived, &mut args, true) {
+    if let Some(resp) = apply_scope(&state, &derived, &mut args, true) {
         return resp;
     }
     let who = quota_key(&derived);
-    if let Err(resp) = check_write_quota(&state, &who) {
+    if let Some(resp) = check_write_quota(&state, &who) {
         return resp;
     }
     call(&state, "mind_ingest", with_agent(args, &headers, derived)).await
@@ -837,19 +829,17 @@ async fn fact_add(
     };
     // Quota after validation so a malformed request does not spend the budget.
     let who = quota_key(&derived);
-    if let Err(resp) = check_write_quota(&state, &who) {
+    if let Some(resp) = check_write_quota(&state, &who) {
         return resp;
     }
     // Facts carry no library, so they are outside the library ACL — attribute to
     // the token-derived author, else the X-Agent hint, else a body `agent` field
     // (the last is honoured only in anonymous mode, matching the old dispatch).
-    let author = derived
-        .or_else(|| agent_of(&headers))
-        .or_else(|| {
-            args.get("agent")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        });
+    let author = derived.or_else(|| agent_of(&headers)).or_else(|| {
+        args.get("agent")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
     match crate::knowledge::add_fact_authored_verdict(
         &state.config,
         subject,
@@ -955,7 +945,7 @@ async fn procedure_learn(
         Err(c) => return c.into_response(),
     };
     let who = quota_key(&derived);
-    if let Err(resp) = check_write_quota(&state, &who) {
+    if let Some(resp) = check_write_quota(&state, &who) {
         return resp;
     }
     call(&state, "mind_learn", with_agent(args, &headers, derived)).await
@@ -1296,7 +1286,7 @@ async fn kv_set(
         Some(k) if !k.is_empty() => k.to_string(),
         _ => return bad_request("kv/set requires a non-empty string `key`"),
     };
-    if !args.get("value").is_some() {
+    if args.get("value").is_none() {
         return bad_request("kv/set requires a `value`");
     }
     let value = args.get("value").cloned().unwrap();
