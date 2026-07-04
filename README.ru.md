@@ -419,7 +419,7 @@ fsync директории), так что краш оставляет либо 
 
 ## Статус и аудит
 
-Текущая версия: **1.0.x** (semver-стабильная с v1.0.0). Поверх
+Текущая версия: **2.1.0** (semver-стабильная с v1.0.0). Поверх
 audit-лога 0.10.x и эфемерного viewer'а, карантина 0.11.x и
 best-effort retrieval, viewer-волны 0.12.x, session liveness 0.13.x и
 procedural-memory дома 0.14.x (LongMemEval baseline + Д6 датасет из

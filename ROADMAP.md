@@ -1,234 +1,224 @@
 # Roadmap
 
 This file is the **public, committed scope** for upcoming releases. It is
-honest about what is decided vs. what is still candidate, and about what
-each version is being measured against. Numbered versions name a release;
-"horizon" names a set of directions that are not yet committed to a
-specific tag.
+honest about what is decided vs. what is still candidate, about what shipped
+vs. what was cut, and about what each version is being measured against.
+Numbered versions name a release; "horizon" names a set of directions that
+are not yet committed to a specific tag.
 
-Discipline carried over from the prior internal roadmap:
+Discipline:
 
-- **Bench-on-the-wall before features.** Each minor release publishes a
-  ΔR@k on `BENCHMARKS.md`. A regression on the headline configuration
-  blocks the release.
+- **Bench-on-the-wall before features.** Each retrieval-affecting release
+  publishes a ΔR@k on `BENCHMARKS.md`. A regression on the headline
+  configuration blocks the release.
 - **The default install path is the headline.** Numbers from an opt-in
   GPU / FP16 / paid-API ablation are reported, but never put in the
   release title.
 - **Critic-checked.** Anything labeled "candidate" has not yet survived a
   full critic round; the v3.0 block below is explicitly a candidate set,
   not a promise.
+- **History is not rewritten.** Shipped blocks are edited to say "shipped
+  in vX.Y"; cut items are marked cut with the reason. Stale promises are
+  removed, not left to rot.
 
-## Where we are — v1.0 (shipped 2026-06-03)
+## Shipped — the v1.x line (v1.0 … v1.7, 2026-06)
 
 The semver-stable line. **R@5 = 98.2% on LongMemEval-S** on the default
-install path (all-MiniLM-L6-v2 INT8 + reranker, CPU). What v1.0 froze:
+install path (all-MiniLM-L6-v2 INT8 + reranker, CPU); the GPU ablation
+(e5-base FP16 + reranker) reads 99.2%. What the v1.x line froze:
 
-- Asymmetric `Qdrant now → md says` diff in `mgimind import md`.
-- `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch + the FP16 GPU recipe.
-- MCP surface (`mind_*`) — 30 tools in v1.0, consolidated to 20
-  user-facing tools in v1.1 (singletons kept as deprecated aliases
-  until v2.0).
-- Procedural memory (`mind_learn` / `mind_recall` /
-  `mind_procedure_outcome`) with the 227-pair Д6 dataset.
-- Quarantine + relevance gate + best-effort active-retrieval policy.
-- Audit log, ephemeral viewer, secret scrub, vault, session liveness.
+- **v1.0** — the frozen contracts: asymmetric `Qdrant now → md says`
+  reconcile diff, the `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch, the
+  MCP surface, procedural memory (`mind_learn` / `mind_recall` /
+  `mind_procedure_outcome`) with the 227-pair Д6 dataset, quarantine +
+  relevance gate + best-effort active retrieval, audit log, ephemeral
+  viewer, secret scrub, vault, session liveness. Breaking any of these
+  required the v2.0 bump.
+- **v1.1** — tool-surface consolidation. 13 single-verb tools replaced by
+  5 action-dispatched verbs (`mind_quarantine` / `mind_vault` /
+  `mind_session` / `mind_fact` / `mind_library`). The 15 singletons stayed
+  live as deprecated aliases, each flagged `"deprecated": true` with a
+  description promising removal at v2.0. **(That removal slipped past v2.0
+  and is being executed at v2.2 — see the v2.x section.)**
+- **v1.2** — encrypted backup, **re-scoped**. The originally-planned S3
+  `backup push`/`pull`, restic-style chunking, and `backup verify`
+  monotonicity were **never built and are cut**. What shipped is a local
+  `mgimind backup [--encrypt]` archive (AES-256-GCM, Argon2id), reusing
+  the `vault.rs` primitives. The security intent survives in two open v2.x
+  gate items: the ciphertext-only assertion on the backup write path, and
+  the key-loss threat model.
+- **v1.3** — REST + portable format, **split by fate**. Shipped: the
+  optional HTTP transport as `mgimind serve-http` with bearer tokens
+  (matured v1.7 → v2.0). **Cut:** OAuth 2.1 / PKCE / Dynamic Client
+  Registration (multi-user remote governance is a v3 Candidate C concern,
+  not v2.x) and the markdown live mirror (the md escape hatch already
+  covers the crisis-edit case; a live mirror flirts with the anti-roadmap
+  "md as source of truth" line). **Deferred:** the `memory.json` portable
+  format → v2.4 candidate; the token-window / AST-aware chunking upgrade →
+  the bench-gated backlog. **Superseded:** procedure auto-confirm, by the
+  typed `mind_outcome` signal in v1.5.
+- **v1.4** — bi-temporal facts + supersession. Facts carry
+  `valid_from` / `valid_until`; `mind_fact_query` accepts `as_of`; a new
+  fact on the same `(subject, predicate)` axis auto-sets the old fact's
+  `valid_until` instead of producing a silent contradiction; `mgimind
+  doctor` surfaces `(s, p)` pairs with more than one active object. No
+  automatic deletion.
+- **v1.5** — decay + signal-driven consolidation. Time-weighted coldness
+  (from `access_count` + `last_accessed_at`) surfaced in browse and via
+  `consolidate --archive-cold`. Decay is a ranking/archival signal, never
+  a delete signal. **Honest delta:** `consolidate --auto` as the default
+  path did **not** land as described; cron remains the setup hint.
+- **v1.6 / v1.7** — hardening and CLI surfacing (batched payload reads,
+  `mind_outcome` CLI, facts/stats inspection, cardinality bulk-apply,
+  Windows stack-overflow fix), then `/kv` blob store, the `/audit`
+  Track-3 trail, and `mgimind reindex` (rebuild the index after an
+  embedding-model switch). v1.7.0 is the last v1.x tag.
 
-Breaking any of the above requires v2.0.
+## Shipped — v2.0.0 (2026-07-04)
 
-## v1.1 — tool surface consolidation (alias phase) — shipped
+v2.0 is a **gate**, not a feature dump: "ready for arbitrary external
+users" once several agents read and write one brain at once. What closed
+in v2.0.0:
 
-Replaces 13 single-verb tools with 5 action-dispatched verbs that match
-the shape competitors converged on (one tool per object, action selects
-the operation). The 13 singletons stay live as deprecated aliases for
-the entire v1.x line and are **removed in v2.0**. No breaking change.
+- **Per-token library ACL.** `--agent-token NAME:TOKEN:lib1,lib2` scopes a
+  token to a library allowlist, enforced **fail-closed**: a scoped token
+  reaches only `/memory/{search,browse,recall,add,ingest}` + `/health` +
+  `/should-search`; every other route is 403. Writes must name an
+  allowlisted library; disallowed reads are 403; unspecified reads get the
+  allowlist injected as their filter.
+- **Per-author write flood control.** `serve-http` caps writes per author
+  over a rolling 60s window (`write_quota_per_min`, default 600); a looping
+  agent hitting `/memory/add` (which skips the ingest gate) now gets 429
+  instead of flooding the pool.
+- **Duel verdict on `/fact/add`** (`recorded` / `won` / `contested` /
+  `quarantined`) + a `/fact/contested` route, so a losing agent no longer
+  reads a bare id as "stored as truth".
+- **Embedding-model stamp + fail-closed startup.** Each point records its
+  `embed_model`; `serve-http` refuses to start on a mismatch, turning a
+  silent dimension-preserving model swap into a clear "run `mgimind
+  reindex`".
+- **BREAKING (serve-http):** `/memory/search` and `/memory/recall` return
+  structured JSON by default instead of the `{ok, result:"<text>"}`
+  envelope.
 
-- `mind_quarantine(action="list"|"show"|"promote")` — replaces
-  `mind_quarantine_list` / `_show` / `_promote`.
-- `mind_vault(action="store"|"get"|"list")` — replaces `mind_vault_store`
-  / `_get` / `_list`.
-- `mind_session(action="start"|"last"|"end")` — replaces
-  `mind_session_start` / `_last` / `_end`.
-- `mind_fact(action="add"|"query"|"invalidate")` — replaces
-  `mind_fact_add` / `_query` / `_invalidate`.
-- `mind_library(action="create"|"list"|"delete")` — replaces
-  `mind_create` / `mind_list` / `mind_delete`.
+## Shipped — v2.1.0 (2026-07-04)
 
-All 15 deprecated entries carry `"deprecated": true` in the JSON schema
-and a description that starts `DEPRECATED — use mind_X(action="Y"). Removed
-in v2.0.`. Well-behaved MCP clients hide deprecated tools; old clients
-keep working unchanged.
+Documentation and recipes on top of the 2.0 surfaces — no server change.
+Two multi-agent orchestrators (Hermes, OpenClaude) can now use mgi-mind as
+their shared memory; per-agent tokens keep a shared pool attributable.
 
-Live surface for the v1.1 user-facing shape: **20 tools**. Counting
-deprecated aliases the `tools/list` returns 35.
+## v2.x — closing the gate
 
-`mind_history` is kept as its own tool — "newest N by time" is a
-different verb from "find relevant by query" and merging them would
-hurt clarity more than it would help surface size. `mind_doctor` and
-`mind_stats` are kept separate for the same reason (broken-state vs
-counts).
+The remaining v2.0-gate items and the near-term minors. None of these
+touch the headline retrieval path, so unless a line says "bench" it ships
+without a new ΔR@k.
 
-## v1.2 — opt-in encrypted backup
+- **v2.1.1 — docs truth-sync.** Bump the current-version markers across
+  `README` (en/ru/zh), `SECURITY.md`, and `AI_INSTRUCTIONS.md`; this
+  roadmap actualization; prune uncited benchmark intermediates and the
+  unused social-preview asset. Docs only.
+- **v2.2.0 — remove the 15 deprecated MCP aliases.** Their own
+  descriptions have promised "Removed in v2.0" since v1.1; v2.0 shipped
+  without doing it. Executed now, early in the public 2.x line, with a
+  changelog note stating plainly it was promised at 2.0 and executed at
+  2.2 after zero public 2.x exposure.
+- **v2.3.0 — finish multi-tenant confinement (Д7).**
+  - Property-test / fuzz the ACL enforcement (`scope_gate` route matching,
+    `apply_scope` body handling, `NAME:TOKEN:libs` parsing). The open
+    "fuzz-testing the enforcement" gate item.
+  - Scoped-token `/memory/ingest` must confine fact/procedure candidates
+    (facts are global, so extraction can currently escape the library
+    scope) — skip-with-counter, honestly reported in the response.
+  - `/memory/by-agent` confinement under scoped tokens (today a blanket
+    403 — the gate asks for confinement, not lockout).
+  - Viewer-path scoping: `mgimind viewer --libraries a,b` binds an
+    allowlist into the per-process token.
+  - Ciphertext-only assertion on the **local backup** write path
+    (`storage::backup_encrypted`, re-scoped from the never-built S3
+    module): a newtype so the file-write only type-checks against
+    ciphertext, plus a no-plaintext-substring round-trip test.
+- **v2.4.0 — audited surfaces + portability (candidate).** Audit-log hash
+  chain + `mgimind audit verify` (SECURITY.md already flags this as a v2.0
+  maybe); the `memory.json` portable export/import format (v1.3 leftover,
+  no cross-tool adoption claims).
+- **v2.5+ — encrypted collection-at-rest.** Qdrant reads its storage dir
+  in plaintext, so real at-rest encryption is its own minor. Ship the
+  **threat model first** (key compromise, key loss, rollback; "at-rest =
+  encrypted backup + OS full-disk-encryption guidance"), implementation
+  after.
+- **Bench-gated backlog (dedicated bench night, not a calendar minor).**
+  Self-editing memory (Д5) — ships only if it does **not** regress R@k on
+  LongMemEval-S and does not raise the v1.4 contradiction rate. Token-
+  window / AST-aware chunking (audit #20) — retrieval-path, **mandatory
+  blocking ΔR@k**. Neither ships without a full headline-config bench.
+- **External security review** of the (re-scoped, local) backup module
+  stays listed as an open pre-launch item, with that module as its input.
 
-The first of the three Obsidian-shaped user requests: **"sync between
-devices"**. Restore-on-another-device is sync. Moved here from v1.1 so
-v1.1 could focus on the surface consolidation.
-
-- `mgimind backup push` / `pull` to an S3-compatible bucket, opt-in
-  per-install.
-- Encryption with the same primitives already in `vault.rs`
-  (AES-256-GCM, Argon2id key derivation). No new crypto protocol.
-- restic / borg pattern: fixed-size encrypted chunks + encrypted
-  manifest. **Threat model documented** (key compromise, rollback/replay,
-  cardinality leak via chunk count).
-- `mgimind backup verify` checks monotonicity (catches replay), not just
-  per-chunk integrity.
-
-**Out of scope for v1.2.** Live multi-device sync (last-writer-wins is the
-wrong default for a memory store); REST server; cloud-hosted mode.
-
-## v1.3 — REST + portable format + reconcile polish
-
-Driven by the second Obsidian-shaped request ("see and edit from a
-non-MCP tool") and by external feedback that md reconcile is currently
-one-way.
-
-- **Optional HTTP MCP transport** alongside stdio. OAuth 2.1 + PKCE +
-  Dynamic Client Registration for the multi-user case (matches the
-  GBrain-style remote-MCP setup). Default install stays stdio-only.
-- **`memory.json` portable format** — a one-page spec in the repo, plus
-  `export memory.json` / `import memory.json`. Positions mgi-mind as a
-  protocol author, not just an implementer. Tracks the proposal phase
-  before claiming any cross-tool adoption.
-- **Markdown live mirror (opt-in)** — keep an `~/mgimind/mirror/` tree
-  in sync with Qdrant for users who want a git-able view. Mirror is a
-  derived view, not a second source of truth (Qdrant remains canonical
-  per the v1.0 contract).
-- **Chunking upgrade**: from character-window to token-window with code-
-  AST awareness on code blocks. Measured on Д6 + on a fresh long-form
-  corpus.
-- **Procedure auto-confirm via test signal** — when a `mind_learn` fix is
-  followed by a CI / `cargo test` exit-0 in the same session window,
-  promote the procedure without a separate `mind_procedure_outcome`
-  call.
-
-## v1.4 — bi-temporal facts + supersession
-
-The "remember where I lived in 2024 vs 2026" problem, named in both the
-Bedrock and the GBrain comparison docs.
-
-- **Bi-temporal facts (Д3).** Each fact carries `valid_from` /
-  `valid_until` in addition to `created_at`. `mind_fact_query` accepts
-  an `as_of` parameter.
-- **Fact supersession (audit #13).** When a new fact contradicts an
-  existing one along the same `(subject, predicate)` axis, the old
-  fact's `valid_until` is set automatically instead of producing a silent
-  contradiction.
-- **Contradiction surfacing.** `mgimind doctor` flags `(s, p)` pairs with
-  more than one active `object`. No automatic deletion — the user
-  decides.
-
-## v1.5 — automatic decay + signal-driven consolidation
-
-Today `mgimind consolidate` is opt-in / cron-driven. The motivation came
-from both comparison docs (GBrain "dream cycles", Bedrock
-"automatic decay by usage"). Builds on the existing access-counter
-infrastructure (Д4) so this is wiring, not a new mechanism.
-
-- Time-weighted decay score combining `access_count` and `last_accessed_at`.
-- `mgimind consolidate --auto` is the default path; `cron` becomes the
-  setup hint, not a required step.
-- Decay is a ranking signal, not a delete signal. Hard delete still
-  requires explicit user action through the audit-log path.
-
-## v2.0 — public-launch gate
-
-Not a feature dump. A gate: v2.0 = "ready for arbitrary external users".
-That means the bar is **action**, not "time has passed without a CVE"
-(absence of CVEs ≠ security, it means absence of attention).
-
-Required to cut v2.0:
-
-- External security review of the backup module from v1.2, with the
-  threat-model from that release as the input document.
-- Static assertion in the bucket-write path that only ciphertext leaves
-  the process.
-- **Self-editing memory (Д5)**, only if it can be shown to not regress
-  R@k on LongMemEval-S and not increase the contradiction rate from
-  v1.4. Otherwise pushed to v2.1.
-- **Multi-tenant isolation (Д7)** — per-token library scoping landed in
-  2.0 (`--agent-token NAME:TOKEN:lib1,lib2`, enforced on the memory
-  read/write routes). Still open before the gate closes: `/memory/by-agent`
-  confinement, the viewer path, and fuzz-testing the enforcement.
-- Optional **encrypted collection-at-rest** with a documented key-loss
-  threat model.
-
-Anything in this block can ship earlier in a minor as a feature, but
-v2.0 itself is the gated event, not just the next number.
+New local-first, no-LLM capability features stolen from the 2026 field
+(pinned memory blocks, an auto-derived profile object, memory TTL, a
+min-confidence retrieval filter, procedures→instructions export, multi-hop
+fact traversal, heuristic temporal query operators, a local Memory-Router
+proxy) are slotted as their own v2.x minors after the gate closes; each
+retrieval-touching one carries a bench. Anything that fundamentally needs
+an LLM call lands on the v3 candidate ledger below, not here.
 
 ## v3.0 horizon — candidate set, not a promise
 
 v3.0 is far enough that committing to a single shape would be dishonest.
-There are several **non-exclusive directions** the project could grow
-into, each gated on signal from real users of v1.0–v2.0. The release
-that gets the v3.0 tag will be whichever of these crosses both a
-critic-checked spec and a measurable user pull. The others stay on this
-list, or fall off it.
+These are **non-exclusive directions**, each gated on signal from real
+users of v1.0–v2.x. Whichever crosses both a critic-checked spec and a
+measurable user pull gets the v3.0 tag; the others stay on this list or
+fall off it.
 
-Candidate A — **Local LLM extractor for write-gate.** Today the
-relevance gate is a heuristic stack (length, novelty, blacklist). A
-small local model (mini-LLM or distilled classifier) deciding "should
-this be a memory" would be the natural next step. Risk: adds a runtime
-dependency on a second model; would have to stay opt-in.
+Candidate A — **Local LLM extractor for the write-gate.** A small local
+model (the `extractor.rs` Qwen2.5-GGUF scaffold, off by default) deciding
+"should this be a memory" / routing ADD-UPDATE-DELETE-NOOP over existing
+similar memories — the shape Mem0 and LangMem build their whole write path
+on. Stays local (GGUF), stays opt-in. Risk: a second runtime model.
 
-Candidate B — **Judge-eval QA mode.** An opt-in path with an
-explicitly-labeled paid-API mode, for like-for-like QA comparison with
-e.g. Mem0 / LangMem. Numbers reported separately from the zero-API R@k
-headline and clearly tagged as "+LLM cost". Closes the "but those other
-systems report QA accuracy" objection without contaminating the core
-metric.
+Candidate B — **Judge-eval QA mode.** An opt-in, explicitly paid-API path
+for like-for-like QA comparison with Mem0 / Zep / LangMem. Numbers
+reported separately from the zero-API R@k headline and tagged "+LLM cost".
+Answers "but those systems report QA accuracy" without contaminating the
+core metric.
 
-Candidate C — **Cross-agent / cross-machine memory.** The REST server
-from v1.3 is the substrate; v3.0-shaped scope here would be the
-governance layer (per-agent scopes, per-library ACLs, a `mind_grant`
-primitive) that turns mgi-mind into a multi-user company brain.
+Candidate C — **Cross-agent / cross-machine governance.** The v2.0 library
+ACL is the first brick; the v3-shaped scope is the governance layer
+(per-agent scopes, a `mind_grant` primitive, OAuth/DCR remote) that turns
+mgi-mind into a multi-user company brain.
 
-Candidate D — **Schema packs / pluggable taxonomy.** GBrain ships
-"schema packs" so the user can teach the system new typed entities
-(Person, Company, Deal) and the agent can evolve them at runtime.
-mgi-mind today has hardcoded types (`memory`, `fact`, `procedure`).
-Pluggable taxonomy would land at v3.0 only with a clear migration
-story.
+Candidate D — **Schema packs / pluggable taxonomy.** Teach the system new
+typed entities (Person, Company, Deal) at runtime, à la GBrain schema
+packs / cognee ontologies. Lands only with a clear migration story.
 
-Candidate E — **Self-wiring graph between memories.** Today the
-knowledge graph holds typed facts (S, P, O); GBrain auto-links related
-markdown pages without an LLM call. A non-LLM auto-link mechanism over
-memories (not just facts) is interesting but unproven on R@k.
-
-These are deliberately listed without ordering or estimated dates. v3.0
-ships when one of these is decided, scoped, critic-checked, and built —
-not on a calendar.
+Candidate E — **Self-wiring graph between memories.** A non-LLM auto-link
+mechanism over memories (not just facts). Research note from the 2026
+competitive sweep: **GLiNER-class zero-shot NER runs in ONNX**, so entity
+extraction + shared-entity auto-linking could ride the existing ONNX
+runtime with no LLM — cheaper than this candidate originally assumed. Still
+unproven on R@k and squarely on the hot path → a bench-first spike, still
+v3.
 
 ## Anti-roadmap (things we are explicitly not doing)
 
-Carried over from the internal roadmap unchanged:
-
-- Obsidian plugin / live Obsidian sync. The three Obsidian-shaped
-  requests are covered separately ("see" → viewer, "edit in a crisis" →
-  md escape hatch in v1.0, "sync between devices" → v1.2 backup).
-- Markdown as a live source of truth. Qdrant is canonical; md is
-  export + reconcile + (in v1.3) opt-in mirror.
-- A 50+ MCP-tool sprawl. The 31-tool v1.0 surface is the target shape.
-  New tools come from a real gap, not from "we could add this".
+- Obsidian plugin / live Obsidian sync. The three Obsidian-shaped requests
+  are covered separately ("see" → viewer, "edit in a crisis" → md escape
+  hatch, "sync between devices" → encrypted backup).
+- Markdown as a live source of truth. Qdrant is canonical; md is export +
+  reconcile.
+- OAuth / DCR multi-user remote is **not** a v2.x item — it is v3
+  Candidate C.
+- A 50+ MCP-tool sprawl. New tools come from a real gap, not from "we
+  could add this".
 - Cloud-hosted mode where mgi-mind sees user data. The local-first
   contract is non-negotiable through at least v3.0.
-- Sales / marketing pumps for the project itself. Discoverability comes
-  from publishing measurable artifacts (releases, benchmarks, an arXiv
-  preprint), not from outreach campaigns.
+- Sales / marketing pumps. Discoverability comes from measurable artifacts
+  (releases, benchmarks, an eventual preprint), not outreach.
 
 ## How this file gets updated
 
-A release that ships a v1.x feature edits its own block to say "shipped
-in vX.Y", with a link to the tag. v3.0-horizon candidates either earn a
-promotion to a numbered version (with a critic-checked spec) or
-silently fall off the list once the project decides against them. The
-file should never grow stale promises.
+A release that ships a scoped feature edits its block to say "shipped in
+vX.Y" with the tag. Cut items are marked cut with the reason. v3.0
+candidates either earn promotion to a numbered version (with a
+critic-checked spec) or fall off the list. The file should never grow
+stale promises.
