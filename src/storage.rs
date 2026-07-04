@@ -2623,6 +2623,79 @@ pub async fn list_procedures_for_backfill(config: &MindConfig) -> Result<Vec<(St
     Ok(out)
 }
 
+/// Scroll every VERIFIED procedure with its full trigger/fix payload, for the
+/// `mgimind export instructions` render. Mirrors `list_procedures_for_backfill`'s
+/// pagination, then overrides the legacy core-point `verified`/counts with the
+/// live `_mod_procstats` row (ADR 0006) before keeping only verified ones,
+/// most-proven first. Existence-guarded: an absent collection yields an empty
+/// list, never an error.
+pub async fn list_verified_procedures(config: &MindConfig) -> Result<Vec<ProcedureHit>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let filter = Filter {
+        must: vec![Condition::matches("type", "procedure".to_string())],
+        ..Default::default()
+    };
+
+    let mut all: Vec<ProcedureHit> = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let p = &point.payload;
+            all.push(ProcedureHit {
+                id: point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                trigger_error: extract_string(p, "trigger_error").unwrap_or_default(),
+                trigger_context: extract_string(p, "trigger_context").unwrap_or_default(),
+                fix: extract_string(p, "fix").unwrap_or_default(),
+                provenance: extract_string(p, "provenance"),
+                // Legacy core-point seed; overridden by _mod_procstats below.
+                verified: extract_string(p, "verified").as_deref() == Some("true"),
+                success_count: extract_int(p, "success_count").unwrap_or(0),
+                fail_count: extract_int(p, "fail_count").unwrap_or(0),
+                score: 0.0,
+            });
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    // The side-collection row, when present, is the live source of truth — it
+    // overrides the legacy seed, exactly as `recall_procedures` does.
+    let ids: Vec<String> = all.iter().map(|h| h.id.clone()).collect();
+    let stats = procstats_for(&client, &ids).await;
+    for hit in &mut all {
+        let Some(s) = stats.get(&hit.id) else {
+            continue;
+        };
+        if s.success_count != 0 || s.fail_count != 0 || s.verified {
+            hit.success_count = s.success_count;
+            hit.fail_count = s.fail_count;
+            hit.verified = s.verified;
+        }
+    }
+
+    all.retain(|h| h.verified);
+    all.sort_by_key(|h| std::cmp::Reverse(h.success_count));
+    Ok(all)
+}
+
 /// v1.5 Phase 6 step 6.2: scroll every procedure and return its
 /// `last_used` timestamp (RFC3339), if present. The install-mode
 /// detector counts procedures with `last_used` inside a recent

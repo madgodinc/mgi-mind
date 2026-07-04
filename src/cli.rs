@@ -177,10 +177,10 @@ pub enum Commands {
 
     /// Export data
     Export {
-        /// Format: json or md
+        /// Format: json, md, or instructions
         #[arg(long, default_value = "json")]
         format: String,
-        /// Output directory
+        /// Output directory (json/md) or file path (instructions); stdout if omitted for instructions
         #[arg(long)]
         output: Option<String>,
     },
@@ -2930,11 +2930,74 @@ async fn cmd_export(format: &str, output: Option<&str>) -> Result<()> {
 
 pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<String> {
     let config = crate::config::load_cached()?;
+    // `instructions`: render verified error→fix procedures as an agent-ready
+    // markdown block (the LangMem "learned procedures become instructions"
+    // shape, but local and LLM-free — outcomes are already typed-verified).
+    // To stdout by default, or to a file when --output names a path.
+    if format == "instructions" {
+        let procs = crate::storage::list_verified_procedures(&config).await?;
+        let md = render_instructions(&procs);
+        if let Some(path) = output {
+            std::fs::write(path, &md).with_context(|| format!("writing instructions to {path}"))?;
+            return Ok(format!(
+                "Wrote {} verified procedure(s) to {path}",
+                procs.len()
+            ));
+        }
+        return Ok(md);
+    }
     let out = output.unwrap_or("./mgimind-export");
     let count = crate::storage::export_all(&config, format, out).await?;
     Ok(format!(
         "Exporting as {format} to {out}...\nExported {count} entries to {out}/"
     ))
+}
+
+/// The first non-empty line of `context`, falling back to `fallback` (then to
+/// the raw string) — used as a short human title per procedure.
+fn instr_title<'a>(context: &'a str, fallback: &'a str) -> &'a str {
+    let c = context.trim();
+    let src = if c.is_empty() { fallback.trim() } else { c };
+    src.lines().next().map(str::trim).unwrap_or(src)
+}
+
+/// Render verified procedures as a portable, deterministic markdown block.
+/// Pure (no store / no clock) so it is unit-tested directly.
+fn render_instructions(procs: &[crate::storage::ProcedureHit]) -> String {
+    let mut out = String::from("# Learned procedures (mgi-mind)\n\n");
+    if procs.is_empty() {
+        out.push_str(
+            "_No verified procedures yet. Confirm a fix with a test / exit-0 signal \
+             (mind_procedure_outcome) and it will appear here._\n",
+        );
+        return out;
+    }
+    out.push_str(&format!(
+        "{} verified error→fix procedure(s), most-proven first. Prefer these before \
+         re-deriving a fix.\n\n",
+        procs.len()
+    ));
+    for (i, p) in procs.iter().enumerate() {
+        out.push_str(&format!(
+            "## {}. {}\n",
+            i + 1,
+            instr_title(&p.trigger_context, &p.trigger_error)
+        ));
+        if !p.trigger_error.trim().is_empty() {
+            out.push_str(&format!("- Error signature: `{}`\n", p.trigger_error.trim()));
+        }
+        if !p.fix.trim().is_empty() {
+            out.push_str(&format!("- Fix: {}\n", p.fix.trim()));
+        }
+        if let Some(prov) = p.provenance.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            out.push_str(&format!("- Where: {prov}\n"));
+        }
+        out.push_str(&format!(
+            "- Proven: {} success / {} fail\n\n",
+            p.success_count, p.fail_count
+        ));
+    }
+    out
 }
 
 // --- Import ---
@@ -3921,6 +3984,65 @@ async fn cmd_extractor_batch_from_library(
         eprintln!("\n(dry_run: no facts written. Re-run without --dry-run to persist.)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod export_instructions_tests {
+    use super::render_instructions;
+    use crate::storage::ProcedureHit;
+
+    fn proc(
+        ctx: &str,
+        err: &str,
+        fix: &str,
+        prov: Option<&str>,
+        succ: i64,
+        fail: i64,
+    ) -> ProcedureHit {
+        ProcedureHit {
+            id: "id".into(),
+            trigger_error: err.into(),
+            trigger_context: ctx.into(),
+            fix: fix.into(),
+            provenance: prov.map(str::to_string),
+            verified: true,
+            success_count: succ,
+            fail_count: fail,
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn empty_renders_a_hint_not_a_blank_file() {
+        let out = render_instructions(&[]);
+        assert!(out.contains("# Learned procedures"));
+        assert!(out.contains("No verified procedures yet"));
+    }
+
+    #[test]
+    fn renders_a_procedure_with_all_fields() {
+        let out = render_instructions(&[proc(
+            "building on Windows",
+            "STATUS_STACK_OVERFLOW",
+            "raise the main-thread stack size",
+            Some("src/main.rs"),
+            3,
+            0,
+        )]);
+        assert!(out.contains("1 verified error→fix procedure"));
+        assert!(out.contains("## 1. building on Windows"));
+        assert!(out.contains("Error signature: `STATUS_STACK_OVERFLOW`"));
+        assert!(out.contains("Fix: raise the main-thread stack size"));
+        assert!(out.contains("Where: src/main.rs"));
+        assert!(out.contains("Proven: 3 success / 0 fail"));
+    }
+
+    #[test]
+    fn title_falls_back_to_error_and_omits_absent_provenance() {
+        let out = render_instructions(&[proc("", "ERR_XYZ", "do the thing", None, 1, 0)]);
+        assert!(out.contains("## 1. ERR_XYZ"));
+        assert!(!out.contains("Where:"));
+    }
 }
 
 #[cfg(test)]
