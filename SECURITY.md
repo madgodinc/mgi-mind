@@ -13,12 +13,12 @@ versions are not patched.
 
 | Version | Supported |
 |---------|-----------|
-| 1.6.x | ✅ |
-| 1.5.x | ✅ (one cycle) |
-| ≤ 1.4 | ❌ |
+| 2.1.x | ✅ |
+| 2.0.x | ✅ (one cycle) |
+| ≤ 1.x | ❌ |
 
-The version drops out of support when 1.7.0 ships and 1.5.x has had
-at least one minor of grace. If you have a 1.4.x-or-earlier vault
+The version drops out of support when the next minor ships and the
+prior minor has had at least one cycle of grace. If you have a 1.x-or-earlier vault
 that needs migrating, open an Issue — there's a path even though
 the build itself is unsupported.
 

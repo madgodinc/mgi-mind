@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Последний релиз: v1.6.4](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.4)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Последний релиз: v2.1.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.1.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Локальная долговременная память для ИИ-ассистентов. Один бинарник на Rust,
 локальная векторная БД Qdrant, локальные ONNX-модели. Говорит по MCP, так
@@ -137,7 +137,7 @@ vault для секретов).
 ### Флаги инсталлятора
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — поставить не в `~/.local/bin`.
-- `MGIMIND_TAG=v1.0.1 curl ... | sh` — закрепить релиз вместо `latest`.
+- `MGIMIND_TAG=v2.1.0 curl ... | sh` — закрепить релиз вместо `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh` — только положить бинарник; `init` + `doctor --fix` потом сам.
 
 ### Ручная установка (без скрипта)
