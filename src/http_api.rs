@@ -100,44 +100,12 @@ pub async fn run(
         tokens.insert(token.clone(), None);
         generated = Some(token);
     } else {
-        // Per-agent tokens: identity is derived from the token, X-Agent ignored.
-        // Optional third segment scopes the token to a library allowlist
-        // (NAME:TOKEN:lib1,lib2); a two-part token stays unscoped (full access).
-        // TOKEN must be colon-free (generated tokens are UUIDs): splitn(3) puts
-        // everything after the second ':' into the allowlist segment, so a ':'
-        // inside a token would mis-split.
-        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for pair in &agent_tokens {
-            let mut parts = pair.splitn(3, ':');
-            let name = parts.next().unwrap_or("");
-            let tok = parts.next().unwrap_or("");
-            let libs = parts.next();
-            if name.is_empty() || tok.is_empty() {
-                anyhow::bail!("--agent-token must be NAME:TOKEN[:lib1,lib2], got '{pair}'");
-            }
-            if !seen_names.insert(name.to_string()) {
-                // Two tokens sharing a name would merge scopes ambiguously (scopes
-                // is keyed by name); reject rather than silently pick one.
-                anyhow::bail!("--agent-token NAME '{name}' is used more than once");
-            }
-            tokens.insert(tok.to_string(), Some(name.to_string()));
-            if let Some(libs) = libs {
-                let list: Vec<String> = libs
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if list.is_empty() {
-                    // A present-but-empty scope (`NAME:TOKEN:` or `NAME:TOKEN:,`)
-                    // must not silently fall through to full access.
-                    anyhow::bail!(
-                        "--agent-token '{name}' has an empty library scope; drop the \
-                         trailing ':' for full access or name at least one library"
-                    );
-                }
-                scopes.insert(name.to_string(), list);
-            }
-        }
+        // Per-agent tokens: parse NAME:TOKEN[:lib1,lib2]. Extracted into a pure
+        // function so the fail-closed parsing (empty segments, duplicate names,
+        // present-but-empty scope) is unit-testable without binding a socket.
+        let (t, s) = parse_agent_tokens(&agent_tokens)?;
+        tokens = t;
+        scopes = s;
     }
 
     // Sorted agent names for the startup banner (computed before `state` moves
@@ -233,6 +201,59 @@ pub async fn run(
         .context("http-api server error")?;
     eprintln!("  http-api stopped.");
     Ok(())
+}
+
+/// Parse `--agent-token NAME:TOKEN[:lib1,lib2]` entries into the (token→name)
+/// and (name→allowlist) maps. Fail-closed: an empty NAME or TOKEN, a duplicate
+/// NAME, or a present-but-empty library scope (`NAME:TOKEN:` / `NAME:TOKEN:,`)
+/// is an error rather than a silent fall-through to full access. TOKEN must be
+/// colon-free (generated tokens are UUIDs): `splitn(3, ':')` folds everything
+/// after the second ':' into the allowlist segment, so a ':' inside a token
+/// would mis-split — documented, not defended, because tokens are UUIDs.
+#[allow(clippy::type_complexity)]
+fn parse_agent_tokens(
+    agent_tokens: &[String],
+) -> Result<(
+    std::collections::HashMap<String, Option<String>>,
+    std::collections::HashMap<String, Vec<String>>,
+)> {
+    let mut tokens: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut scopes: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pair in agent_tokens {
+        let mut parts = pair.splitn(3, ':');
+        let name = parts.next().unwrap_or("");
+        let tok = parts.next().unwrap_or("");
+        let libs = parts.next();
+        if name.is_empty() || tok.is_empty() {
+            anyhow::bail!("--agent-token must be NAME:TOKEN[:lib1,lib2], got '{pair}'");
+        }
+        if !seen_names.insert(name.to_string()) {
+            // Two tokens sharing a name would merge scopes ambiguously (scopes
+            // is keyed by name); reject rather than silently pick one.
+            anyhow::bail!("--agent-token NAME '{name}' is used more than once");
+        }
+        tokens.insert(tok.to_string(), Some(name.to_string()));
+        if let Some(libs) = libs {
+            let list: Vec<String> = libs
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if list.is_empty() {
+                // A present-but-empty scope (`NAME:TOKEN:` or `NAME:TOKEN:,`)
+                // must not silently fall through to full access.
+                anyhow::bail!(
+                    "--agent-token '{name}' has an empty library scope; drop the \
+                     trailing ':' for full access or name at least one library"
+                );
+            }
+            scopes.insert(name.to_string(), list);
+        }
+    }
+    Ok((tokens, scopes))
 }
 
 async fn shutdown_signal() {
@@ -548,36 +569,67 @@ fn apply_scope(
 ) -> Option<Response> {
     let name = derived.as_ref()?;
     let allowed = state.scopes.get(name)?;
-    let must_name_library = || -> Response {
-        (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "error": format!(
-                    "library-scoped token '{name}' must name a 'library' it is scoped to"
-                ),
-            })),
-        )
-            .into_response()
-    };
+    match scope_libs(allowed, args, is_write) {
+        Ok(()) => None,
+        Err(ScopeReject::MustNameLibrary) => Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "error": format!(
+                        "library-scoped token '{name}' must name a 'library' it is scoped to"
+                    ),
+                })),
+            )
+                .into_response(),
+        ),
+        Err(ScopeReject::NotAllowed(lib)) => Some(scope_denied(name, &lib)),
+    }
+}
 
+/// Why a scoped request was rejected. Kept transport-free so the decision core
+/// (`scope_libs`) is unit-testable without constructing an `AppState` or an axum
+/// `Response`; `apply_scope` maps each variant to the exact same JSON body the
+/// v2.0 contract locked.
+enum ScopeReject {
+    /// A write that did not name a `library` it is scoped to.
+    MustNameLibrary,
+    /// A read or write that named a library outside the allowlist (carried).
+    NotAllowed(String),
+}
+
+/// Pure ACL decision for a library-scoped token: given the token's `allowed`
+/// libraries, validate `args` and canonicalize its library filter in place, or
+/// reject. No `AppState`, no `Response` — this is the entire enforcement logic,
+/// separated so it can be exhaustively tested against adversarial bodies
+/// (`{}`, `[]`, non-string entries, unicode, singular-vs-plural precedence).
+///
+/// A write commits to exactly one `library` and the write path ignores a
+/// `libraries` filter, so a scoped write MUST name an allowlisted library
+/// explicitly. A read that names no library has the allowlist injected as its
+/// `libraries` filter; a read naming a disallowed library is rejected. The read
+/// filter is always canonicalized to exactly the validated set with the singular
+/// `library` dropped — otherwise a degenerate `libraries` (`[]`, `[123]`) left
+/// present in the body would be read downstream (where `libraries` takes
+/// precedence) as "all libraries", escaping the allowlist.
+fn scope_libs(allowed: &[String], args: &mut Value, is_write: bool) -> Result<(), ScopeReject> {
     let Value::Object(obj) = args else {
         // A scoped token with a non-object body must fail closed, NOT pass through:
         // `/memory/browse` accepts a bare/degenerate body (no `query` required) and
         // would otherwise list every library. A write can not name its library, so
-        // 403; a read is coerced to the allowlist filter.
+        // reject; a read is coerced to the allowlist filter.
         if is_write {
-            return Some(must_name_library());
+            return Err(ScopeReject::MustNameLibrary);
         }
         *args = json!({ "libraries": allowed });
-        return None;
+        return Ok(());
     };
 
     if is_write {
         return match obj.get("library").and_then(|v| v.as_str()) {
-            Some(l) if allowed.iter().any(|a| a == l) => None,
-            Some(l) => Some(scope_denied(name, l)),
-            None => Some(must_name_library()),
+            Some(l) if allowed.iter().any(|a| a == l) => Ok(()),
+            Some(l) => Err(ScopeReject::NotAllowed(l.to_string())),
+            None => Err(ScopeReject::MustNameLibrary),
         };
     }
 
@@ -600,24 +652,19 @@ fn apply_scope(
             "libraries".to_string(),
             Value::Array(allowed.iter().map(|s| Value::String(s.clone())).collect()),
         );
-        return None;
+        return Ok(());
     }
     for lib in &requested {
         if !allowed.contains(lib) {
-            return Some(scope_denied(name, lib));
+            return Err(ScopeReject::NotAllowed(lib.clone()));
         }
     }
-    // Canonicalize the filter to exactly the validated set and drop the singular
-    // `library`. Otherwise a degenerate `libraries` (e.g. `[]`, `[123]`) that
-    // reduces to nothing here but stays PRESENT in the body would be read
-    // downstream (memory_filter_from_args gives `libraries` precedence) as "all
-    // libraries", escaping the allowlist even though a valid `library` was named.
     obj.remove("library");
     obj.insert(
         "libraries".to_string(),
         Value::Array(requested.iter().map(|s| Value::String(s.clone())).collect()),
     );
-    None
+    Ok(())
 }
 
 /// Route-level fail-closed gate for library-scoped tokens (v2.0). A scoped token
@@ -627,11 +674,12 @@ fn apply_scope(
 /// share a global namespace (kv, sessions), or administer libraries — none of
 /// which the library ACL can confine yet, so they are denied rather than leaked.
 /// Unscoped and anonymous tokens pass through; auth still runs in each handler.
-async fn scope_gate(
-    State(state): State<AppState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+/// The only routes a library-scoped token may reach (v2.0). Pure so the
+/// fail-closed allowlist is unit-testable without a live request: every route
+/// NOT in this set must 403 for a scoped token, because it either spans all
+/// libraries (by-agent, facts, quarantine, consolidate, audit), shares a global
+/// namespace (kv, sessions), or administers libraries.
+fn scoped_route_allowed(path: &str) -> bool {
     const ALLOWED_FOR_SCOPED: &[&str] = &[
         "/health",
         "/should-search",
@@ -641,6 +689,14 @@ async fn scope_gate(
         "/memory/add",
         "/memory/ingest",
     ];
+    ALLOWED_FOR_SCOPED.contains(&path)
+}
+
+async fn scope_gate(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     let scoped = req
         .headers()
         .get("authorization")
@@ -649,7 +705,7 @@ async fn scope_gate(
         .and_then(|t| state.tokens.get(t))
         .and_then(|name| name.as_ref())
         .is_some_and(|name| state.scopes.contains_key(name));
-    if scoped && !ALLOWED_FOR_SCOPED.contains(&req.uri().path()) {
+    if scoped && !scoped_route_allowed(req.uri().path()) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({
@@ -1346,8 +1402,15 @@ fn bind_is_allowed(host: &str, agent_tokens: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Format, bind_is_allowed, resolve_format};
+    use super::{
+        Format, ScopeReject, bind_is_allowed, parse_agent_tokens, resolve_format, scope_libs,
+        scoped_route_allowed,
+    };
     use serde_json::json;
+
+    fn libs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn format_defaults_to_json_and_rejects_unknown() {
@@ -1396,5 +1459,221 @@ mod tests {
         assert!(!bind_is_allowed("192.168.1.5", &[]));
         // ...but is allowed once a real token is set.
         assert!(bind_is_allowed("0.0.0.0", &["u:tok".to_string()]));
+    }
+
+    // ---- scoped_route_allowed (fail-closed route gate) ----
+
+    #[test]
+    fn scoped_gate_allows_only_the_seven_memory_routes() {
+        for ok in [
+            "/health",
+            "/should-search",
+            "/memory/search",
+            "/memory/browse",
+            "/memory/recall",
+            "/memory/add",
+            "/memory/ingest",
+        ] {
+            assert!(scoped_route_allowed(ok), "{ok} should be reachable");
+        }
+        // Everything that spans libraries, shares a global namespace, or
+        // administers libraries must be denied to a scoped token.
+        for denied in [
+            "/memory/by-agent",
+            "/fact/add",
+            "/fact/query",
+            "/fact/contested",
+            "/procedure/learn",
+            "/consolidate",
+            "/quarantine/list",
+            "/quarantine/promote",
+            "/memory/restore",
+            "/session/start",
+            "/session/context",
+            "/stats/activity",
+            "/audit",
+            "/kv/set",
+            "/kv/get",
+            "/library/create",
+            "/library/list",
+            "/",
+            "/memory",
+            "/memory/search/", // trailing slash is a different path — deny
+            "/MEMORY/SEARCH",  // case-sensitive — deny
+            "",
+        ] {
+            assert!(!scoped_route_allowed(denied), "{denied} must be denied");
+        }
+    }
+
+    // ---- scope_libs (per-library ACL decision) ----
+
+    #[test]
+    fn scope_read_with_no_library_injects_the_allowlist() {
+        let allow = libs(&["a", "b"]);
+        let mut args = json!({ "query": "x" });
+        assert!(scope_libs(&allow, &mut args, false).is_ok());
+        assert_eq!(args["libraries"], json!(["a", "b"]));
+        assert!(args.get("library").is_none());
+    }
+
+    #[test]
+    fn scope_read_canonicalizes_a_valid_singular_library() {
+        let allow = libs(&["a", "b"]);
+        let mut args = json!({ "library": "a", "query": "x" });
+        assert!(scope_libs(&allow, &mut args, false).is_ok());
+        // singular dropped, filter is exactly the validated set
+        assert!(args.get("library").is_none());
+        assert_eq!(args["libraries"], json!(["a"]));
+    }
+
+    #[test]
+    fn scope_read_rejects_a_disallowed_library() {
+        let allow = libs(&["a"]);
+        let mut args = json!({ "library": "secret" });
+        assert!(matches!(
+            scope_libs(&allow, &mut args, false),
+            Err(ScopeReject::NotAllowed(l)) if l == "secret"
+        ));
+    }
+
+    #[test]
+    fn scope_read_rejects_if_any_requested_library_is_disallowed() {
+        let allow = libs(&["a", "b"]);
+        let mut args = json!({ "libraries": ["a", "secret"] });
+        assert!(matches!(
+            scope_libs(&allow, &mut args, false),
+            Err(ScopeReject::NotAllowed(l)) if l == "secret"
+        ));
+    }
+
+    #[test]
+    fn scope_read_checks_both_singular_and_plural_together() {
+        // A valid `library` must not launder a disallowed `libraries` entry.
+        let allow = libs(&["a"]);
+        let mut args = json!({ "library": "a", "libraries": ["secret"] });
+        assert!(matches!(
+            scope_libs(&allow, &mut args, false),
+            Err(ScopeReject::NotAllowed(l)) if l == "secret"
+        ));
+    }
+
+    #[test]
+    fn scope_read_empty_plural_array_is_not_all_libraries() {
+        // `[]` reduces to no requested libs → must fall back to the allowlist,
+        // never to an unfiltered (all-libraries) read.
+        let allow = libs(&["a", "b"]);
+        let mut args = json!({ "libraries": [] });
+        assert!(scope_libs(&allow, &mut args, false).is_ok());
+        assert_eq!(args["libraries"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn scope_read_ignores_non_string_entries() {
+        let allow = libs(&["a", "b"]);
+        // Only "a" is a real request; 123/null/object are ignored.
+        let mut args = json!({ "libraries": [123, null, {"x":1}, "a"] });
+        assert!(scope_libs(&allow, &mut args, false).is_ok());
+        assert_eq!(args["libraries"], json!(["a"]));
+        // A plural of ONLY non-strings collapses to empty → allowlist fallback,
+        // not "all libraries".
+        let mut only_junk = json!({ "libraries": [123, null] });
+        assert!(scope_libs(&allow, &mut only_junk, false).is_ok());
+        assert_eq!(only_junk["libraries"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn scope_read_non_object_body_is_coerced_to_the_allowlist() {
+        let allow = libs(&["a"]);
+        for mut body in [json!(null), json!([1, 2, 3]), json!("string"), json!(7)] {
+            assert!(scope_libs(&allow, &mut body, false).is_ok());
+            assert_eq!(body, json!({ "libraries": ["a"] }));
+        }
+    }
+
+    #[test]
+    fn scope_read_matches_unicode_exactly() {
+        let allow = libs(&["проекты"]);
+        let mut ok = json!({ "library": "проекты" });
+        assert!(scope_libs(&allow, &mut ok, false).is_ok());
+        assert_eq!(ok["libraries"], json!(["проекты"]));
+        let mut no = json!({ "library": "Проекты" }); // different first codepoint
+        assert!(matches!(
+            scope_libs(&allow, &mut no, false),
+            Err(ScopeReject::NotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn scope_write_must_name_an_allowlisted_library() {
+        let allow = libs(&["a", "b"]);
+        // named + allowed → ok
+        assert!(scope_libs(&allow, &mut json!({ "library": "a", "content": "x" }), true).is_ok());
+        // named + disallowed → reject with the offending name
+        assert!(matches!(
+            scope_libs(&allow, &mut json!({ "library": "z" }), true),
+            Err(ScopeReject::NotAllowed(l)) if l == "z"
+        ));
+        // unnamed → must-name
+        assert!(matches!(
+            scope_libs(&allow, &mut json!({ "content": "x" }), true),
+            Err(ScopeReject::MustNameLibrary)
+        ));
+        // a `libraries` filter does NOT satisfy a write — it commits to one lib
+        assert!(matches!(
+            scope_libs(&allow, &mut json!({ "libraries": ["a"] }), true),
+            Err(ScopeReject::MustNameLibrary)
+        ));
+        // non-object write → must-name
+        assert!(matches!(
+            scope_libs(&allow, &mut json!(null), true),
+            Err(ScopeReject::MustNameLibrary)
+        ));
+    }
+
+    // ---- parse_agent_tokens (fail-closed token parser) ----
+
+    #[test]
+    fn parse_tokens_two_part_is_unscoped() {
+        let (tokens, scopes) = parse_agent_tokens(&["alice:tok123".to_string()]).unwrap();
+        assert_eq!(tokens.get("tok123"), Some(&Some("alice".to_string())));
+        assert!(scopes.is_empty(), "a two-part token has full (unscoped) access");
+    }
+
+    #[test]
+    fn parse_tokens_three_part_scopes_and_trims() {
+        let (_t, scopes) =
+            parse_agent_tokens(&["bob:tok: projects , avtokvartal ".to_string()]).unwrap();
+        assert_eq!(scopes.get("bob").unwrap(), &libs(&["projects", "avtokvartal"]));
+    }
+
+    #[test]
+    fn parse_tokens_rejects_empty_name_or_token() {
+        assert!(parse_agent_tokens(&[":tok".to_string()]).is_err());
+        assert!(parse_agent_tokens(&["name:".to_string()]).is_err());
+        assert!(parse_agent_tokens(&["".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_tokens_rejects_duplicate_names() {
+        let err = parse_agent_tokens(&["a:t1".to_string(), "a:t2".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("more than once"));
+    }
+
+    #[test]
+    fn parse_tokens_rejects_present_but_empty_scope() {
+        // Trailing ':' or an all-empty list must NOT fall through to full access.
+        assert!(parse_agent_tokens(&["a:t:".to_string()]).is_err());
+        assert!(parse_agent_tokens(&["a:t:,".to_string()]).is_err());
+        assert!(parse_agent_tokens(&["a:t: , ".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_tokens_colon_in_token_mis_splits_by_design() {
+        // Documented limitation: splitn(3) folds everything after the 2nd ':'
+        // into the scope segment. Tokens are UUIDs (colon-free), so this is
+        // locked as known behavior, not defended against.
+        let (_t, scopes) = parse_agent_tokens(&["a:t:x:y".to_string()]).unwrap();
+        assert_eq!(scopes.get("a").unwrap(), &libs(&["x:y"]));
     }
 }
