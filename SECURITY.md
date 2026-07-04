@@ -89,7 +89,8 @@ Out of scope:
   the user has to delete, that's a quality issue.
 - The audit log is append-only on the filesystem, not
   cryptographically chained. A local attacker with file system
-  access can tamper. v2.0 may add a hash-chain; not in v1.x.
+  access can tamper. A hash-chain (`mgimind audit verify`) is scoped for
+  v2.4 — see ROADMAP.md.
 - No rate-limiting on MCP tool calls. A malicious client can
   exhaust the background loop's BACKGROUND_PER_TICK_CAP. The §10
   q5 guarantees mean foreground MCP latency stays bounded; the
@@ -97,5 +98,5 @@ Out of scope:
 
 ## Past disclosures
 
-None yet. As of v1.6.3 no security advisories have been published.
+None yet. As of v2.1.1 no security advisories have been published.
 This file exists so future researchers have a path.

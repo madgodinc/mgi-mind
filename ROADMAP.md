@@ -34,7 +34,7 @@ install path (all-MiniLM-L6-v2 INT8 + reranker, CPU); the GPU ablation
   relevance gate + best-effort active retrieval, audit log, ephemeral
   viewer, secret scrub, vault, session liveness. Breaking any of these
   required the v2.0 bump.
-- **v1.1** — tool-surface consolidation. 13 single-verb tools replaced by
+- **v1.1** — tool-surface consolidation. 15 single-verb tools replaced by
   5 action-dispatched verbs (`mind_quarantine` / `mind_vault` /
   `mind_session` / `mind_fact` / `mind_library`). The 15 singletons stayed
   live as deprecated aliases, each flagged `"deprecated": true` with a
@@ -49,7 +49,8 @@ install path (all-MiniLM-L6-v2 INT8 + reranker, CPU); the GPU ablation
   the key-loss threat model.
 - **v1.3** — REST + portable format, **split by fate**. Shipped: the
   optional HTTP transport as `mgimind serve-http` with bearer tokens
-  (matured v1.7 → v2.0). **Cut:** OAuth 2.1 / PKCE / Dynamic Client
+  (landed in the v1.7 window, matured through v2.0). **Cut:** OAuth 2.1 /
+  PKCE / Dynamic Client
   Registration (multi-user remote governance is a v3 Candidate C concern,
   not v2.x) and the markdown live mirror (the md escape hatch already
   covers the crisis-edit case; a live mirror flirts with the anti-roadmap
@@ -57,22 +58,28 @@ install path (all-MiniLM-L6-v2 INT8 + reranker, CPU); the GPU ablation
   format → v2.4 candidate; the token-window / AST-aware chunking upgrade →
   the bench-gated backlog. **Superseded:** procedure auto-confirm, by the
   typed `mind_outcome` signal in v1.5.
-- **v1.4** — bi-temporal facts + supersession. Facts carry
-  `valid_from` / `valid_until`; `mind_fact_query` accepts `as_of`; a new
-  fact on the same `(subject, predicate)` axis auto-sets the old fact's
-  `valid_until` instead of producing a silent contradiction; `mgimind
-  doctor` surfaces `(s, p)` pairs with more than one active object. No
-  automatic deletion.
-- **v1.5** — decay + signal-driven consolidation. Time-weighted coldness
-  (from `access_count` + `last_accessed_at`) surfaced in browse and via
-  `consolidate --archive-cold`. Decay is a ranking/archival signal, never
-  a delete signal. **Honest delta:** `consolidate --auto` as the default
-  path did **not** land as described; cron remains the setup hint.
+- **v1.4** — bi-temporal facts + supersession. Each fact carries a
+  `valid_until` alongside its `created_at`, so its active interval is
+  `[created_at, valid_until)`; a new fact on the same `(subject, predicate)`
+  axis auto-sets the prior fact's `valid_until` instead of producing a
+  silent contradiction; `mgimind doctor` surfaces `(s, p)` pairs with more
+  than one active object. No automatic deletion. (The `as_of` reader on
+  `mind_fact_query` that actually consults these timestamps landed later,
+  in the v1.7 window — PR #57; v1.4 only wrote the interval.)
+- **v1.5** — install-mode profiles, typed `mind_outcome` outcome signals,
+  and the active re-test pass. **Honest delta:** the decay / consolidation
+  work motivated in the comparison docs — time-weighted coldness in browse
+  and `consolidate --archive-cold` — actually landed later, in the v1.7
+  window (PR #56 / #59); `consolidate --auto` as a default path did **not**
+  ship, and cron remains the setup hint. Decay is a ranking/archival
+  signal, never a delete signal.
 - **v1.6 / v1.7** — hardening and CLI surfacing (batched payload reads,
   `mind_outcome` CLI, facts/stats inspection, cardinality bulk-apply,
-  Windows stack-overflow fix), then `/kv` blob store, the `/audit`
-  Track-3 trail, and `mgimind reindex` (rebuild the index after an
-  embedding-model switch). v1.7.0 is the last v1.x tag.
+  Windows stack-overflow fix, the bi-temporal `as_of` fact reader, and
+  time-weighted coldness in browse + `consolidate --archive-cold`), then
+  `/kv` blob store, the `/audit` Track-3 trail, and `mgimind reindex`
+  (rebuild the index after an embedding-model switch). v1.7.0 is the last
+  v1.x tag.
 
 ## Shipped — v2.0.0 (2026-07-04)
 
@@ -113,19 +120,22 @@ The remaining v2.0-gate items and the near-term minors. None of these
 touch the headline retrieval path, so unless a line says "bench" it ships
 without a new ΔR@k.
 
-- **v2.1.1 — docs truth-sync.** Bump the current-version markers across
-  `README` (en/ru/zh), `SECURITY.md`, and `AI_INSTRUCTIONS.md`; this
-  roadmap actualization; prune uncited benchmark intermediates and the
-  unused social-preview asset. Docs only.
+- **v2.1.1 — docs truth-sync + ACL test hardening.** Bump the version to
+  2.1.1 across `Cargo.toml`, `README` (en/ru/zh), `SECURITY.md`, and
+  `AI_INSTRUCTIONS.md`; this roadmap actualization; prune uncited benchmark
+  intermediates and the unused social-preview asset. Also extracts the v2.0
+  library-ACL decision into pure, transport-free cores (`scope_libs`,
+  `scoped_route_allowed`, `parse_agent_tokens`) with an adversarial test
+  suite — the Д7 "fuzz-testing the enforcement" gate item. No behavior
+  change; the locked v2.0 HTTP contract still passes.
 - **v2.2.0 — remove the 15 deprecated MCP aliases.** Their own
   descriptions have promised "Removed in v2.0" since v1.1; v2.0 shipped
   without doing it. Executed now, early in the public 2.x line, with a
   changelog note stating plainly it was promised at 2.0 and executed at
-  2.2 after zero public 2.x exposure.
-- **v2.3.0 — finish multi-tenant confinement (Д7).**
-  - Property-test / fuzz the ACL enforcement (`scope_gate` route matching,
-    `apply_scope` body handling, `NAME:TOKEN:libs` parsing). The open
-    "fuzz-testing the enforcement" gate item.
+  2.2 after minimal 2.x exposure.
+- **v2.3.0 — finish multi-tenant confinement (Д7).** The ACL enforcement
+  is already unit-covered (v2.1.1); v2.3 adds the missing confinement
+  behavior on top of it:
   - Scoped-token `/memory/ingest` must confine fact/procedure candidates
     (facts are global, so extraction can currently escape the library
     scope) — skip-with-counter, honestly reported in the response.

@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.1.1 — docs truth-sync + ACL test hardening
+
+A docs-and-tests patch; no runtime behavior change (the locked v2.0 HTTP
+contract still passes).
+
+- **Docs truth-sync.** Version markers bumped to 2.1.x across README
+  (en/ru/zh), `SECURITY.md`, and `AI_INSTRUCTIONS.md` — the translations had
+  drifted as far back as 1.0.x. `ROADMAP.md` actualized: shipped v1.x blocks
+  collapsed with honest per-feature attribution (the `as_of` reader and
+  coldness/`--archive-cold` correctly placed in the v1.7 window, not v1.4/1.5),
+  the never-built S3 backup / OAuth-DCR / markdown-mirror items marked **cut**,
+  and a "v2.x — closing the gate" section added.
+- **ACL test hardening (Д7).** The v2.0 library-ACL decision is extracted into
+  pure, transport-free cores — `scope_libs`, `scoped_route_allowed`,
+  `parse_agent_tokens` — with a 17-case adversarial suite (empty / `[]` /
+  non-string / unicode library filters, singular-vs-plural precedence,
+  empty-array ≠ all-libraries, non-object coercion, write must-name-library,
+  duplicate names, present-but-empty scope). Closes the ROADMAP "fuzz-testing
+  the enforcement" gate item; `apply_scope` is now a thin wrapper mapping
+  rejections to the identical JSON bodies.
+- **Repo prune.** Removed the uncited
+  `benchmark/results/2026-06-02-procedural-bootstrap/` run and the unused
+  948 KB `docs/social-preview.png`.
+
 ## 2.1.0 — connect Hermes and OpenClaude to a shared brain
 
 Two multi-agent orchestrators can now use mgi-mind as their shared memory.
