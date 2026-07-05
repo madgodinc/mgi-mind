@@ -114,7 +114,60 @@ Documentation and recipes on top of the 2.0 surfaces — no server change.
 Two multi-agent orchestrators (Hermes, OpenClaude) can now use mgi-mind as
 their shared memory; per-agent tokens keep a shared pool attributable.
 
+## Shipped — v2.1.1 (2026-07-04)
+
+Docs truth-sync (version markers to 2.1.1 across README en/ru/zh, SECURITY,
+AI_INSTRUCTIONS; this roadmap actualization; cruft prune) plus ACL test
+hardening: the v2.0 library-ACL decision extracted into pure cores
+(`scope_libs`, `scoped_route_allowed`, `parse_agent_tokens`) with an
+adversarial suite — the Д7 "fuzz-testing the enforcement" gate item. No
+behavior change.
+
+## Shipped — v2.2.0 (2026-07-05) — local feature parity, batch 1
+
+Two capabilities stolen from the 2026 memory-layer field and rebuilt local
+and LLM-free (additive; no behavior change):
+
+- **Pinned memory blocks (Letta-style core memory).** `mgimind block
+  set|get|list|rm` + MCP `mind_block` manage a few small named notes
+  (persona / user / project) in `blocks.json`, injected at the top of every
+  context render — always-true context, not ranked retrieval — with 4 KB /
+  32-block caps.
+- **Procedures → instructions export (LangMem-style).** `mgimind export
+  --format instructions` renders verified error→fix procedures as a portable,
+  agent-ready markdown block; deterministic and LLM-free (outcomes are
+  already typed-verified).
+
+Further steal-list items (auto-derived profile, min-confidence filter, memory
+TTL, multi-hop fact traversal, local Memory-Router) land as later v2.x
+minors; retrieval-touching ones carry a ΔR@k bench. Anything needing an LLM
+call stays on the v3 candidate ledger.
+
 ## v2.x — closing the gate
+
+The remaining v2.0-gate items and the near-term minors. None of these
+touch the headline retrieval path, so unless a line says "bench" it ships
+without a new ΔR@k.
+
+- **Deferred — remove the 15 deprecated MCP aliases.** Their own
+  descriptions have promised "Removed in v2.0" since v1.1; v2.0/v2.1 shipped
+  without doing it. This is a breaking change that also disrupts existing
+  local tooling, so it is **held pending an explicit go/no-go** and will take
+  the next free minor when scheduled (was pencilled for v2.2, which instead
+  shipped the additive feature batch above).
+- **v2.3.0 — finish multi-tenant confinement (Д7).** The ACL enforcement
+  is already unit-covered (v2.1.1); v2.3 adds the missing confinement
+  behavior on top of it:
+  - Scoped-token `/memory/ingest` must confine fact/procedure candidates
+    (facts are global, so extraction can currently escape the library
+    scope) — skip-with-counter, honestly reported in the response.
+  - `/memory/by-agent` confinement under scoped tokens (today a blanket
+    403 — the gate asks for confinement, not lockout).
+  - Viewer-path scoping: `mgimind viewer --libraries a,b` binds an
+    allowlist into the per-process token.
+  - Ciphertext-only assertion on the **local backup** write path
+    (`storage::backup_encrypted`, re-scoped from the never-built S3
+    module): a newtype so the file-write only type-checks against
 
 The remaining v2.0-gate items and the near-term minors. None of these
 touch the headline retrieval path, so unless a line says "bench" it ships

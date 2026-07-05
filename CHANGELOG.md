@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.0 — local feature parity: pinned blocks + procedures→instructions
+
+Two capabilities stolen from the 2026 memory-layer field and rebuilt local and
+LLM-free. Both are additive; no behavior change to existing surfaces.
+
+- **Pinned memory blocks (Letta-style core memory).** `mgimind block set|get|
+  list|rm` and an MCP `mind_block(action=…)` tool manage a few small named notes
+  (persona / user / current-project) stored in `blocks.json`. They are injected
+  at the TOP of every context render — always-true context the agent never has
+  to search for — with 4 KB / 32-block caps so the always-on injection stays
+  cheap. Not a second store; searchable knowledge still goes to `mind_add`.
+- **Procedures → instructions export (LangMem-style).** `mgimind export --format
+  instructions` renders every verified error→fix procedure as a portable,
+  agent-ready markdown block (error signature, fix, provenance, proven-counts),
+  most-proven first. Deterministic and LLM-free — the procedures are already
+  verified by typed outcome signals — so learned fixes survive sessions where the
+  agent forgets to call `mind_recall`.
+
+Tool surface: 43 (was 42) — `mind_block` added.
+
 ## 2.1.1 — docs truth-sync + ACL test hardening
 
 A docs-and-tests patch; no runtime behavior change (the locked v2.0 HTTP
