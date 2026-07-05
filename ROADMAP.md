@@ -162,32 +162,28 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it. This is a breaking change that also disrupts existing local tooling, so
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
-- **Security minor (next, unnumbered) — finish multi-tenant confinement (Д7).**
-  The ACL enforcement is already unit-covered (v2.1.1); most of the confinement
-  behavior has now landed on `main` (untagged — the gate is tagged only when
-  fully closed):
-  - ✅ **Shipped (on main):** scoped-token `/memory/ingest` confines
-    fact/procedure candidates — they would land in the GLOBAL stores, escaping
-    the library allowlist — skip-with-counter, honestly reported (closed a real
-    ACL bypass, not just a gap). This made the "fail-closed per-token ACL" claim
-    true.
-  - ✅ **Shipped (on main):** `/memory/by-agent` is now confined to the token's
-    allowlist (library filter injected server-side) instead of a blanket 403 —
-    the gate asks for confinement, not lockout. Falsifiable contract test added.
-  - ⏳ **Open:** viewer-path scoping — `mgimind viewer --libraries a,b` binds an
-    allowlist into the per-process token and filters every read endpoint. Larger
-    surface (10+ endpoints, incl. the global facts/graph view) for a local,
-    single-user, ephemeral tool → deferred to its own pass; the gate does NOT
-    tag until this lands.
-  - ✅ **Shipped (on main):** ciphertext-only newtype on the **local backup**
-    write path (`storage::backup_encrypted`, re-scoped from the never-built S3
-    module) — the sole writer accepts only sealed `Ciphertext`, so a static read
-    proves no plaintext leaves the process; the existing round-trip test proves
-    it dynamically (no-plaintext-substring + wrong-passphrase rejection).
-- **v2.4.0 — audited surfaces + portability (candidate).** Audit-log hash
-  chain + `mgimind audit verify` (SECURITY.md already flags this as a v2.0
-  maybe); the `memory.json` portable export/import format (v1.3 leftover,
-  no cross-tool adoption claims).
+- **✅ Shipped — v2.4.0 (2026-07-05) — multi-tenant confinement gate closed
+  (Д7) + tamper-evident audit.** The full confinement set landed; the ACL
+  enforcement is now confined, not just unit-covered:
+  - Scoped-token `/memory/ingest` confines fact/procedure candidates
+    (skip-with-counter) — they would otherwise land in the GLOBAL stores,
+    escaping the library allowlist. **Closed a real ACL bypass**; the
+    "fail-closed per-token ACL" claim is now true.
+  - `/memory/by-agent` confined to the token's allowlist (server-injected
+    library filter) instead of a blanket 403 — confinement, not lockout;
+    falsifiable contract test.
+  - Ciphertext-only newtype on the local backup write path — the sole writer
+    accepts only sealed `Ciphertext`.
+  - Viewer `--libraries` confinement — memory views filtered to the allowlist;
+    endpoints that span all libraries or the global fact graph (audit, graph,
+    pulse, ingest feed, consolidate preview, node-by-id) and all mutations are
+    fail-closed (403) when confined.
+  - Tamper-evidence **audit-log hash-chain** + `mgimind audit verify` (BLAKE3
+    prev-hash chained through the single-writer path; SECURITY.md promise →
+    shipped).
+- **v2.5 — portability + Memory-Router (candidate).** The `memory.json`
+  portable export/import format (v1.3 leftover); the local Memory-Router
+  OpenAI-compatible proxy (biggest adoption lever, no ranking change).
 - **v2.5+ — encrypted collection-at-rest.** Qdrant reads its storage dir
   in plaintext, so real at-rest encryption is its own minor. Ship the
   **threat model first** (key compromise, key loss, rollback; "at-rest =

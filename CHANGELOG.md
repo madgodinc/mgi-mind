@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.4.0 — multi-tenant confinement gate closed (Д7) + tamper-evident audit
+
+Closes the Д7 confinement gate and hardens the audit log. All security work, off
+the retrieval path (no ΔR@k change).
+
+- **Scoped-token ingest confinement — a real ACL bypass, fixed.** A
+  library-scoped HTTP token's `/memory/ingest` wrote fact/procedure candidates to
+  the GLOBAL knowledge/procedure stores, escaping its library allowlist — the
+  v2.0 "fail-closed per-token ACL" claim was an overclaim. Candidates are now
+  skip-with-counter for scoped tokens (`skipped_scope_facts` / `_procedures`,
+  reported in the response); the flag is server-set and unwidenable from the body.
+- **`/memory/by-agent` confinement.** Returns results confined to the token's
+  allowlist (server-injected library filter) instead of a blanket 403 —
+  confinement, not lockout. Falsifiable contract test added.
+- **Ciphertext-only backup write path.** A `Ciphertext` newtype makes it a type
+  error to hand the backup writer anything but sealed bytes.
+- **Viewer `--libraries` confinement.** `mgimind viewer --libraries a,b`
+  restricts memory views to the allowlist; endpoints spanning all libraries or
+  the global fact graph (audit, graph, pulse, ingest feed, consolidate preview,
+  node-by-id) and every mutation are fail-closed (403) when confined.
+- **Audit-log hash-chain + `mgimind audit verify`.** Each entry now carries a
+  BLAKE3 hash of the previous line, chained through the single-writer path;
+  `audit verify` walks the log and reports the first break (exit non-zero).
+  Detects in-place tampering of the append-only log (SECURITY.md promise →
+  shipped).
+
 ## 2.3.0 — local feature parity, batch 2: fact-graph traversal + profile
 
 Two more capabilities stolen from the 2026 memory-layer field, local and

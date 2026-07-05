@@ -289,4 +289,4 @@ which the user wires into their AI client once; it starts Qdrant automatically.
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v2.3.0 | Apache-2.0 | Mad God Inc
+MGI-Mind v2.4.0 | Apache-2.0 | Mad God Inc
