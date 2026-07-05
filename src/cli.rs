@@ -447,6 +447,12 @@ pub enum Commands {
         /// knows the URL). Random per-process if omitted.
         #[arg(long)]
         token: Option<String>,
+        /// Confine this viewer to a comma-separated library allowlist. Memory
+        /// views are restricted to these libraries; endpoints that span all
+        /// libraries (graph, audit, pulse, cross-library ingest feed) and all
+        /// mutations are fail-closed (403). Omit for an unrestricted viewer.
+        #[arg(long, value_delimiter = ',')]
+        libraries: Vec<String>,
     },
     /// Open the 3D memory visualization in your browser (alias for `viewer`).
     Brain,
@@ -1084,10 +1090,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             no_open,
             port,
             token,
+            libraries,
         } => {
             let config = crate::config::MindConfig::load()
                 .context("Failed to load config — run `mgimind init` first")?;
-            crate::viewer::run_on(config, !no_open, port, token).await
+            crate::viewer::run_on(config, !no_open, port, token, libraries).await
         }
         Commands::Brain => {
             // Friendly alias for `viewer` — opens the 3D memory visualization.

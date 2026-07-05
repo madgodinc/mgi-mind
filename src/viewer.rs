@@ -42,11 +42,41 @@ struct AppState {
     /// `Authorization: Bearer <token>` or as `?token=<token>` for browser
     /// links. The token is generated per-process and printed once at startup.
     token: Arc<String>,
+    /// Library allowlist (v2.4). Empty = unrestricted. When non-empty the viewer
+    /// is confined: memory views are filtered to these libraries and endpoints
+    /// that span all libraries or mutate are fail-closed (403).
+    libraries: Arc<Vec<String>>,
+}
+
+impl AppState {
+    /// A confined viewer restricts what it will serve.
+    fn confined(&self) -> bool {
+        !self.libraries.is_empty()
+    }
+    /// True if `lib` is reachable for this viewer (always true when unconfined).
+    fn lib_ok(&self, lib: &str) -> bool {
+        self.libraries.is_empty() || self.libraries.iter().any(|l| l == lib)
+    }
+    /// Fail-closed guard for endpoints a confined viewer must not serve at all
+    /// (they span all libraries or mutate). `Ok(())` when unconfined. The `Err`
+    /// is an axum `Response` (large by nature) so it can `?` straight out of a
+    /// handler — the same shape those handlers already return.
+    #[allow(clippy::result_large_err)]
+    fn allow_broad(&self) -> Result<(), Response> {
+        if self.confined() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "not available in a library-confined viewer (--libraries)",
+            )
+                .into_response());
+        }
+        Ok(())
+    }
 }
 
 /// Entry point used by `Commands::Viewer`.
 pub async fn run(config: MindConfig, open_browser: bool) -> Result<()> {
-    run_on(config, open_browser, None, None).await
+    run_on(config, open_browser, None, None, Vec::new()).await
 }
 
 /// Run the viewer, optionally on a fixed `port` and with a caller-supplied
@@ -58,11 +88,14 @@ pub async fn run_on(
     open_browser: bool,
     port: Option<u16>,
     token: Option<String>,
+    libraries: Vec<String>,
 ) -> Result<()> {
     let token = token.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let confined = !libraries.is_empty();
     let state = AppState {
         config: Arc::new(config),
         token: Arc::new(token.clone()),
+        libraries: Arc::new(libraries),
     };
 
     let app = Router::new()
@@ -95,6 +128,9 @@ pub async fn run_on(
     eprintln!("  mgimind viewer  •  audit window over the memory store");
     eprintln!("  ───────────────────────────────────────────────────────");
     eprintln!("  open:  {url}");
+    if confined {
+        eprintln!("  scope: library-confined (--libraries) — memory views only");
+    }
     eprintln!("  stop:  Ctrl-C");
     eprintln!();
 
@@ -176,6 +212,12 @@ async fn api_libraries(
     let libs = storage::list_libraries(&state.config)
         .await
         .map_err(internal)?;
+    // Confined viewer only lists its allowlisted libraries.
+    let libs = if state.confined() {
+        libs.into_iter().filter(|l| state.lib_ok(l)).collect()
+    } else {
+        libs
+    };
     Ok(Json(libs))
 }
 
@@ -205,6 +247,11 @@ async fn api_memories(
     if library.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "library param required").into_response());
     }
+    if !state.lib_ok(&library) {
+        return Err(
+            (StatusCode::FORBIDDEN, "library not in the viewer allowlist").into_response(),
+        );
+    }
     let rows = storage::list_memories(&state.config, &library, q.limit)
         .await
         .map_err(internal)?
@@ -227,6 +274,7 @@ async fn api_audit(
     headers: HeaderMap,
 ) -> Result<Json<Vec<audit::AuditEvent>>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // audit spans all libraries — off in a confined viewer
     // Return most recent 200 — enough for an audit overview, bounded for the
     // browser. If a user needs more, they can grep audit.log directly.
     let events = audit::recent(200).map_err(internal)?;
@@ -240,6 +288,7 @@ async fn api_delete_memory(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // no mutations from a confined (read-only) viewer
     // library arg is kept only for CLI/MCP signature parity; the id is the
     // authoritative key. "viewer" tags the audit actor so the trail shows
     // *where* the delete came from.
@@ -280,6 +329,14 @@ async fn api_quarantine_list(
         token: q.token.clone(),
     };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    // Confined viewer must name an allowlisted library (no all-library scan).
+    if state.confined() && !q.library.as_deref().is_some_and(|l| state.lib_ok(l)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "confined viewer: name an allowlisted library",
+        )
+            .into_response());
+    }
     let page = storage::quarantine_list_page(
         &state.config,
         q.library.as_deref(),
@@ -337,6 +394,7 @@ async fn api_ingest_recent(
         token: q.token.clone(),
     };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // spans all libraries — off in a confined viewer
     // Empty `since` means "no lower bound" — pass an ISO sentinel that sorts
     // before any real timestamp. "0000-..." lexicographically precedes any
     // RFC3339 string we'd ever write.
@@ -376,6 +434,7 @@ async fn api_consolidate_dry_run(
         token: q.token.clone(),
     };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // consolidate preview spans libraries — off when confined
     let opts = crate::consolidate::Options {
         apply: false,
         library: q.library,
@@ -398,6 +457,7 @@ async fn api_quarantine_promote(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // no mutations from a confined (read-only) viewer
     let promoted = storage::promote_from_quarantine(&state.config, &id)
         .await
         .map_err(internal)?;
@@ -441,6 +501,7 @@ async fn api_graph(
         token: q.token.clone(),
     };
     check_auth(&state, &headers, &auth).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // the graph spans all libraries + global facts
     let cfg = &state.config;
     let per_lib = q.limit;
 
@@ -541,6 +602,7 @@ async fn api_node(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // a node id can be from any library — fail closed
     let cfg = &state.config;
 
     if let Some(mem_id) = id.strip_prefix("mem:") {
@@ -599,6 +661,7 @@ async fn api_edit_node(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // no mutations from a confined (read-only) viewer
     let Some(mem_id) = id.strip_prefix("mem:") else {
         return Err((StatusCode::BAD_REQUEST, "only mem: cores are editable").into_response());
     };
@@ -624,6 +687,7 @@ async fn api_pulse(
     headers: HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, Response> {
     check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?; // the live pulse spans all libraries
     let rx = crate::pulse::subscribe();
     // futures_util::stream::unfold drives the broadcast receiver without adding
     // a new dependency (no async-stream / tokio-stream crate needed).
@@ -666,4 +730,34 @@ struct QuarantineRow {
     source: Option<String>,
     reason: String,
     created_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(libs: &[&str]) -> AppState {
+        AppState {
+            config: Arc::new(MindConfig::default()),
+            token: Arc::new("t".to_string()),
+            libraries: Arc::new(libs.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn confinement_helpers_gate_correctly() {
+        let open = state(&[]);
+        assert!(!open.confined());
+        assert!(open.lib_ok("anything"), "unconfined viewer allows any library");
+        assert!(open.allow_broad().is_ok(), "unconfined viewer serves broad routes");
+
+        let scoped = state(&["a", "b"]);
+        assert!(scoped.confined());
+        assert!(scoped.lib_ok("a"));
+        assert!(!scoped.lib_ok("secret"), "disallowed library must be rejected");
+        assert!(
+            scoped.allow_broad().is_err(),
+            "confined viewer fail-closes broad/mutating routes"
+        );
+    }
 }
