@@ -185,6 +185,12 @@ pub enum Commands {
         output: Option<String>,
     },
 
+    /// Pinned memory blocks (core memory — always surfaced in context)
+    Block {
+        #[command(subcommand)]
+        action: BlockAction,
+    },
+
     /// Secure vault for passwords and secrets
     Vault {
         #[command(subcommand)]
@@ -790,6 +796,29 @@ pub enum VaultAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum BlockAction {
+    /// Set (create or overwrite) a pinned block: block set <name> <content...>
+    Set {
+        /// Block name ([a-z0-9_-], e.g. persona, user, project)
+        name: String,
+        /// Block content (remaining words are joined with spaces)
+        content: Vec<String>,
+    },
+    /// Print a block's content
+    Get {
+        /// Block name
+        name: String,
+    },
+    /// List all pinned blocks (first line of each)
+    List,
+    /// Remove a pinned block
+    Rm {
+        /// Block name
+        name: String,
+    },
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     // Audit log lives under mind_home so it follows MGIMIND_HOME isolation
     // automatically (tests + bench instances each get their own log without
@@ -918,6 +947,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Backup { output, encrypt } => cmd_backup(&output, encrypt).await,
         Commands::Restore { input, encrypt } => cmd_restore(&input, encrypt).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
+        Commands::Block { action } => cmd_block(action).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
@@ -2544,6 +2574,19 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         );
     }
     let _ = writeln!(out);
+    // Pinned blocks (core memory) ride at the top, right under the operating
+    // rule — they are the user's always-true context, not ranked retrieval.
+    let blocks = crate::storage::load_blocks();
+    if !blocks.is_empty() {
+        let _ = writeln!(out, "[Pinned Blocks]");
+        for (name, content) in &blocks {
+            let _ = writeln!(out, "  <{name}>");
+            for line in content.lines() {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
+        let _ = writeln!(out);
+    }
     let _ = writeln!(out, "[Last Session]");
     // Only include the first 10 lines of the session.
     for line in session.lines().take(10) {
@@ -2925,6 +2968,41 @@ async fn cmd_restore(input: &str, encrypt: bool) -> Result<()> {
 
 async fn cmd_export(format: &str, output: Option<&str>) -> Result<()> {
     println!("{}", run_export(format, output).await?);
+    Ok(())
+}
+
+async fn cmd_block(action: BlockAction) -> Result<()> {
+    match action {
+        BlockAction::Set { name, content } => {
+            let text = content.join(" ");
+            let n = crate::storage::set_block(&name, &text)?;
+            println!("Pinned block '{n}' set ({} bytes).", text.len());
+        }
+        BlockAction::Get { name } => {
+            let key = crate::storage::normalize_block_name(&name)?;
+            match crate::storage::load_blocks().get(&key) {
+                Some(c) => println!("{c}"),
+                None => println!("(no block '{key}')"),
+            }
+        }
+        BlockAction::List => {
+            let blocks = crate::storage::load_blocks();
+            if blocks.is_empty() {
+                println!("(no pinned blocks)");
+            } else {
+                for (n, c) in &blocks {
+                    println!("[{n}] {}", c.lines().next().unwrap_or(""));
+                }
+            }
+        }
+        BlockAction::Rm { name } => {
+            if crate::storage::remove_block(&name)? {
+                println!("Removed block '{name}'.");
+            } else {
+                println!("(no block '{name}')");
+            }
+        }
+    }
     Ok(())
 }
 

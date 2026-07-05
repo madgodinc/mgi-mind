@@ -454,6 +454,55 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let advice = crate::retrieval_policy::classify(query, &libs);
             Ok(crate::retrieval_policy::render(&advice))
         }
+        "mind_block" => {
+            // Pinned core-memory blocks (Letta-style). File-backed, no Qdrant —
+            // works even before `init`. Always surfaced at the top of context.
+            let action = arg_str(args, "action").unwrap_or("list");
+            match action {
+                "set" => {
+                    let name =
+                        arg_str(args, "name").ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
+                    let content = arg_str(args, "content")
+                        .ok_or_else(|| anyhow::anyhow!("missing 'content'"))?;
+                    let n = crate::storage::set_block(name, content)?;
+                    Ok(format!("Pinned block '{n}' set."))
+                }
+                "get" => {
+                    let name =
+                        arg_str(args, "name").ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
+                    let key = crate::storage::normalize_block_name(name)?;
+                    Ok(crate::storage::load_blocks()
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| format!("(no block '{key}')")))
+                }
+                "list" => {
+                    let blocks = crate::storage::load_blocks();
+                    if blocks.is_empty() {
+                        Ok("(no pinned blocks)".to_string())
+                    } else {
+                        let mut out = String::new();
+                        for (n, c) in &blocks {
+                            out.push_str(&format!("<{n}>\n{c}\n\n"));
+                        }
+                        Ok(out.trim_end().to_string())
+                    }
+                }
+                "remove" => {
+                    let name =
+                        arg_str(args, "name").ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
+                    let existed = crate::storage::remove_block(name)?;
+                    Ok(if existed {
+                        format!("Removed block '{name}'.")
+                    } else {
+                        format!("(no block '{name}')")
+                    })
+                }
+                other => Err(anyhow::anyhow!(
+                    "unknown action '{other}' (use set|get|list|remove)"
+                )),
+            }
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -1577,6 +1626,19 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["action"]
             }
         }),
+        json!({
+            "name": "mind_block",
+            "description": "Pinned core-memory blocks (persona / user / current-project): a few small, named notes that are ALWAYS injected at the top of the session context, not ranked retrieval. Use for stable, always-relevant facts the agent must not have to search for. action=set overwrites, get/list read, remove deletes. Content is capped (4KB/block, 32 blocks); this is core memory, not a second store — put searchable knowledge in mind_add instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["set", "get", "list", "remove"], "description": "Operation (default: list)" },
+                    "name": { "type": "string", "description": "Block name [a-z0-9_-]; required for set/get/remove" },
+                    "content": { "type": "string", "description": "Block content; required for action=set" }
+                },
+                "required": ["action"]
+            }
+        }),
     ];
 
     // Mark the 13 singletons as deprecated and rewrite their description with
@@ -1653,8 +1715,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            42,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) = 42"
+            43,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) + 1 (mind_block) = 43"
         );
         let deprecated = tools
             .iter()
@@ -1666,8 +1728,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 27,
-            "non-deprecated surface is 27 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore)"
+            live_surface, 28,
+            "non-deprecated surface is 28 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore + mind_block)"
         );
     }
 
@@ -1780,11 +1842,12 @@ mod tests {
         // 30 legacy v1.0 singletons (15 deprecated, alias phase) + 5
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
         // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
-        // + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) = 42 total.
-        // Removal of the 15 deprecated singletons is scheduled for v2.0.
+        // + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore)
+        // + 1 (mind_block) = 43 total.
+        // Removal of the 15 deprecated singletons is deferred (see ROADMAP v2.x).
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 42);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 43);
     }
 
     #[tokio::test]

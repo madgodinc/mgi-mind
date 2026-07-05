@@ -488,6 +488,82 @@ fn unregister_library(name: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Pinned memory blocks (Letta-style core memory) -------------------------
+//
+// A small, ordered set of named blocks (persona / user / current-project) that
+// the user or agent edits explicitly and that are injected at the TOP of every
+// context render — core memory, NOT a second searchable store. Kept in a plain
+// JSON file (blocks are tiny and edited rarely, so no cache / no Qdrant). Caps
+// keep the always-on injection cheap.
+
+/// Max bytes of a single block's content; it rides every context render.
+pub const MAX_BLOCK_BYTES: usize = 4096;
+/// Max number of pinned blocks.
+pub const MAX_BLOCKS: usize = 32;
+
+fn blocks_path() -> std::path::PathBuf {
+    crate::config::mind_home().join("blocks.json")
+}
+
+/// Normalize + validate a block name: trimmed, lowercased, 1–64 chars of
+/// `[a-z0-9_-]` (a tag, same spirit as a library name). Returns the canonical
+/// form used as the map key.
+pub fn normalize_block_name(name: &str) -> Result<String> {
+    let n = name.trim().to_lowercase();
+    if n.is_empty()
+        || n.len() > 64
+        || !n
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!("block name must be 1-64 chars of [a-z0-9_-], got '{name}'");
+    }
+    Ok(n)
+}
+
+/// Load the pinned-blocks map (name → content). A missing or corrupt file reads
+/// as empty — a bad blocks file must never wedge a context render.
+pub fn load_blocks() -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(blocks_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_blocks(blocks: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    crate::util::atomic_write_str(&blocks_path(), &serde_json::to_string_pretty(blocks)?)
+}
+
+/// Create or overwrite a pinned block, enforcing the size and count caps.
+/// Returns the canonical block name.
+pub fn set_block(name: &str, content: &str) -> Result<String> {
+    let name = normalize_block_name(name)?;
+    if content.len() > MAX_BLOCK_BYTES {
+        anyhow::bail!(
+            "block '{name}' is {} bytes; cap is {MAX_BLOCK_BYTES}",
+            content.len()
+        );
+    }
+    let mut blocks = load_blocks();
+    if !blocks.contains_key(&name) && blocks.len() >= MAX_BLOCKS {
+        anyhow::bail!("too many pinned blocks ({MAX_BLOCKS} max); remove one first");
+    }
+    blocks.insert(name.clone(), content.to_string());
+    save_blocks(&blocks)?;
+    Ok(name)
+}
+
+/// Remove a pinned block; returns whether it existed.
+pub fn remove_block(name: &str) -> Result<bool> {
+    let name = normalize_block_name(name)?;
+    let mut blocks = load_blocks();
+    let existed = blocks.remove(&name).is_some();
+    if existed {
+        save_blocks(&blocks)?;
+    }
+    Ok(existed)
+}
+
 // --- Collection setup -------------------------------------------------------
 
 /// True if a `create_collection` failure is just "collection already exists".
@@ -4044,6 +4120,20 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_name_normalizes_and_rejects_bad_input() {
+        // trimmed + lowercased
+        assert_eq!(normalize_block_name("  Persona ").unwrap(), "persona");
+        assert_eq!(normalize_block_name("current-project_1").unwrap(), "current-project_1");
+        // rejects empty, whitespace-only, too long, and disallowed chars
+        assert!(normalize_block_name("").is_err());
+        assert!(normalize_block_name("   ").is_err());
+        assert!(normalize_block_name(&"x".repeat(65)).is_err());
+        assert!(normalize_block_name("has space").is_err());
+        assert!(normalize_block_name("slash/name").is_err());
+        assert!(normalize_block_name("emoji😀").is_err());
+    }
 
     #[test]
     fn rerank_override_resolves_against_config() {
