@@ -25,8 +25,9 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Operations we record. Everything that mutates the store goes through one
 /// of these variants. Read operations are NOT audited (they go through
@@ -118,6 +119,12 @@ pub struct AuditEvent {
     /// "merged N near-dups" without ballooning a single line per affected id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Tamper-evidence: BLAKE3 hex of the PREVIOUS log line's exact bytes (v2.4).
+    /// Set at write time by `record`, chaining each entry to the last. `None` for
+    /// the first entry and for legacy lines written before the chain existed —
+    /// `audit verify` treats a run of `None`s as an unverified legacy prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
 }
 
 fn default_actor() -> String {
@@ -135,6 +142,7 @@ impl AuditEvent {
             before: None,
             after: None,
             note: None,
+            prev_hash: None,
         }
     }
 
@@ -185,7 +193,29 @@ fn current_path() -> Option<&'static PathBuf> {
 /// operation has already succeeded by the time we're here, and refusing to
 /// return success because we couldn't write a log line would be the wrong
 /// tradeoff.
-pub fn record(event: AuditEvent) {
+/// Chain tip: BLAKE3 hex of the last line written this process, so the next
+/// `record` chains to it without re-reading the file. Seeded once from the file
+/// tail on the first write. Only ever touched while holding `AUDIT_LOCK`.
+static LAST_HASH: Mutex<Option<String>> = Mutex::new(None);
+static LAST_HASH_SEEDED: AtomicBool = AtomicBool::new(false);
+
+/// BLAKE3 hex of a log line's exact bytes (the string as written, no newline).
+fn hash_line(line: &str) -> String {
+    blake3::hash(line.as_bytes()).to_hex().to_string()
+}
+
+/// Hash of the last non-empty line already in `path`, or None if empty/absent.
+/// Read once to continue the chain across process restarts.
+fn seed_last_hash(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(hash_line)
+}
+
+pub fn record(mut event: AuditEvent) {
     // Emit a live pulse for the viewer's graph, independent of whether the
     // audit FILE is enabled — the visual feed should pulse even on a system
     // that has audit logging turned off.
@@ -194,21 +224,28 @@ pub fn record(event: AuditEvent) {
     let Some(path) = current_path() else {
         return; // disabled
     };
-    let line = match serde_json::to_string(&event) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("audit: failed to serialize event: {e}");
-            return;
-        }
-    };
 
-    // Single-writer through the global mutex. Open-append-write-close per
-    // event keeps state simple (no persistent file handle to deal with on
-    // shutdown/test-isolation) and OS-level append-mode handles concurrent
+    // Single-writer through the global mutex; `LAST_HASH` is only touched here,
+    // so the same lock serializes the chain-tip update. Open-append-write-close
+    // per event keeps state simple and OS-level append-mode handles concurrent
     // process safety if it ever matters.
     let _guard = match AUDIT_LOCK.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(), // poisoned mutex: still write, audit is best-effort
+    };
+    let mut last = LAST_HASH.lock().unwrap_or_else(|p| p.into_inner());
+    if !LAST_HASH_SEEDED.swap(true, Ordering::SeqCst) {
+        *last = seed_last_hash(path);
+    }
+    // Chain this entry to the previous line (tamper-evidence, v2.4).
+    event.prev_hash = last.clone();
+
+    let line = match serde_json::to_string(&event) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("audit: failed to serialize event: {e}");
+            return; // chain tip unchanged — nothing was written
+        }
     };
     let mut file = match OpenOptions::new().create(true).append(true).open(path) {
         Ok(f) => f,
@@ -219,7 +256,57 @@ pub fn record(event: AuditEvent) {
     };
     if let Err(e) = writeln!(file, "{line}") {
         tracing::warn!("audit: failed to write line: {e}");
+        return; // do NOT advance the chain tip on a failed write
     }
+    *last = Some(hash_line(&line));
+}
+
+/// Result of `audit verify`: hash-chain integrity over the log file.
+#[derive(Debug)]
+pub struct AuditVerifyReport {
+    /// Total lines in the log.
+    pub total: usize,
+    /// Lines that carry a `prev_hash` (the chained suffix — legacy lines don't).
+    pub chained: usize,
+    /// 1-based line number of the first chain break, or None if intact.
+    pub broken_at: Option<usize>,
+}
+
+/// Verify the hash-chain of the configured audit log.
+pub fn verify() -> Result<AuditVerifyReport> {
+    let path = current_path().ok_or_else(|| anyhow::anyhow!("audit logging is disabled"))?;
+    verify_path(path)
+}
+
+/// Verify a specific audit file's chain (pure over the file; used by tests).
+/// Every entry that carries `prev_hash` must equal the BLAKE3 of the previous
+/// line's exact bytes; entries without it (the legacy prefix) are counted but
+/// not checked. Reports the 1-based line number of the first break.
+pub fn verify_path(path: &Path) -> Result<AuditVerifyReport> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut chained = 0;
+    for i in 1..lines.len() {
+        let ev: AuditEvent = match serde_json::from_str(lines[i]) {
+            Ok(e) => e,
+            Err(_) => continue, // unparseable line — can't check its own link
+        };
+        if let Some(ph) = ev.prev_hash.as_deref() {
+            chained += 1;
+            if ph != hash_line(lines[i - 1]) {
+                return Ok(AuditVerifyReport {
+                    total: lines.len(),
+                    chained,
+                    broken_at: Some(i + 1),
+                });
+            }
+        }
+    }
+    Ok(AuditVerifyReport {
+        total: lines.len(),
+        chained,
+        broken_at: None,
+    })
 }
 
 /// Map an audit event to a live graph pulse. Writes (Add/FactAdd/...) are
@@ -333,6 +420,45 @@ mod tests {
             .open(path)
             .unwrap();
         writeln!(file, "{line}").unwrap();
+    }
+
+    #[test]
+    fn hash_chain_verifies_and_detects_tampering() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+
+        // Build a 3-line chain by hand the way `record` does: each line's
+        // prev_hash = BLAKE3 of the previous line's exact bytes.
+        let e0 = AuditEvent::new(AuditOp::Add, "lib", "a");
+        let l0 = serde_json::to_string(&e0).unwrap();
+        let mut e1 = AuditEvent::new(AuditOp::Add, "lib", "b");
+        e1.prev_hash = Some(hash_line(&l0));
+        let l1 = serde_json::to_string(&e1).unwrap();
+        let mut e2 = AuditEvent::new(AuditOp::Delete, "lib", "b");
+        e2.prev_hash = Some(hash_line(&l1));
+        let l2 = serde_json::to_string(&e2).unwrap();
+        std::fs::write(&path, format!("{l0}\n{l1}\n{l2}\n")).unwrap();
+
+        let report = verify_path(&path).unwrap();
+        assert!(
+            report.broken_at.is_none(),
+            "intact chain must verify, got {report:?}"
+        );
+        assert_eq!(report.chained, 2, "two chained entries (l1, l2)");
+
+        // Tamper l1's bytes → l2.prev_hash (hash of the ORIGINAL l1) no longer
+        // matches → the break surfaces at l2 (line 3), not at the edited line.
+        let mut e1_evil = AuditEvent::new(AuditOp::Add, "lib", "EVIL");
+        e1_evil.prev_hash = Some(hash_line(&l0));
+        let l1_bad = serde_json::to_string(&e1_evil).unwrap();
+        std::fs::write(&path, format!("{l0}\n{l1_bad}\n{l2}\n")).unwrap();
+
+        let report = verify_path(&path).unwrap();
+        assert!(
+            report.broken_at.is_some(),
+            "tampered chain must fail, got {report:?}"
+        );
+        assert_eq!(report.broken_at, Some(3), "break detected at line 3 (l2)");
     }
 
     fn read_events(path: &PathBuf) -> Vec<AuditEvent> {

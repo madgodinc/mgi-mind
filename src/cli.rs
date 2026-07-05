@@ -696,6 +696,10 @@ pub enum AuditAction {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Verify the audit log's tamper-evidence hash-chain and report the first
+    /// break (if any). Exits non-zero on a break. Legacy lines written before
+    /// the chain existed are counted but not checked.
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -1074,6 +1078,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             AuditAction::Writes { since_hours, limit } => {
                 cmd_audit_writes(since_hours, limit).await
             }
+            AuditAction::Verify => cmd_audit_verify().await,
         },
         Commands::Viewer {
             no_open,
@@ -1287,6 +1292,27 @@ async fn cmd_audit_list(
     }
     println!("\n{} event(s).", events.len());
     Ok(())
+}
+
+async fn cmd_audit_verify() -> Result<()> {
+    let report = crate::audit::verify()?;
+    match report.broken_at {
+        None => {
+            println!(
+                "audit chain intact: {} line(s), {} chained (any earlier legacy lines unverified).",
+                report.total, report.chained
+            );
+            Ok(())
+        }
+        Some(n) => {
+            println!(
+                "AUDIT CHAIN BROKEN at line {n} of {} ({} chained): the log was altered at or \
+                 before this line.",
+                report.total, report.chained
+            );
+            anyhow::bail!("audit chain verification failed at line {n}")
+        }
+    }
 }
 
 async fn cmd_audit_show(id: &str) -> Result<()> {
