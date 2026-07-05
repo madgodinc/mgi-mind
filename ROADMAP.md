@@ -163,19 +163,27 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
 - **Security minor (next, unnumbered) — finish multi-tenant confinement (Д7).**
-  The ACL enforcement is already unit-covered (v2.1.1); this adds the missing
-  confinement behavior on top of it:
-  - Scoped-token `/memory/ingest` must confine fact/procedure candidates
-    (facts are global, so extraction can currently escape the library scope) —
-    skip-with-counter, honestly reported in the response.
-  - `/memory/by-agent` confinement under scoped tokens (today a blanket 403 —
-    the gate asks for confinement, not lockout).
-  - Viewer-path scoping: `mgimind viewer --libraries a,b` binds an allowlist
-    into the per-process token.
-  - Ciphertext-only assertion on the **local backup** write path
-    (`storage::backup_encrypted`, re-scoped from the never-built S3 module): a
-    newtype so the file-write only type-checks against ciphertext, plus a
-    no-plaintext-substring round-trip test.
+  The ACL enforcement is already unit-covered (v2.1.1); most of the confinement
+  behavior has now landed on `main` (untagged — the gate is tagged only when
+  fully closed):
+  - ✅ **Shipped (on main):** scoped-token `/memory/ingest` confines
+    fact/procedure candidates — they would land in the GLOBAL stores, escaping
+    the library allowlist — skip-with-counter, honestly reported (closed a real
+    ACL bypass, not just a gap). This made the "fail-closed per-token ACL" claim
+    true.
+  - ✅ **Shipped (on main):** `/memory/by-agent` is now confined to the token's
+    allowlist (library filter injected server-side) instead of a blanket 403 —
+    the gate asks for confinement, not lockout. Falsifiable contract test added.
+  - ⏳ **Open:** viewer-path scoping — `mgimind viewer --libraries a,b` binds an
+    allowlist into the per-process token and filters every read endpoint. Larger
+    surface (10+ endpoints, incl. the global facts/graph view) for a local,
+    single-user, ephemeral tool → deferred to its own pass; the gate does NOT
+    tag until this lands.
+  - ✅ **Shipped (on main):** ciphertext-only newtype on the **local backup**
+    write path (`storage::backup_encrypted`, re-scoped from the never-built S3
+    module) — the sole writer accepts only sealed `Ciphertext`, so a static read
+    proves no plaintext leaves the process; the existing round-trip test proves
+    it dynamically (no-plaintext-substring + wrong-passphrase rejection).
 - **v2.4.0 — audited surfaces + portability (candidate).** Audit-log hash
   chain + `mgimind audit verify` (SECURITY.md already flags this as a v2.0
   maybe); the `memory.json` portable export/import format (v1.3 leftover,
