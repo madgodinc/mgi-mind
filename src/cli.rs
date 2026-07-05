@@ -222,6 +222,15 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Walk the fact graph outward from an entity (subject/object match)
+    Graph {
+        /// Entity name (case-insensitive)
+        entity: String,
+        /// Max hops to traverse
+        #[arg(long, default_value_t = 2)]
+        hops: usize,
+    },
+
     /// Start bundled Qdrant server
     Serve,
 
@@ -944,6 +953,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             apply,
         } => cmd_import(&source, &path, &library, apply).await,
         Commands::Stats { json } => cmd_stats(json).await,
+        Commands::Graph { entity, hops } => cmd_graph(&entity, hops).await,
         Commands::Backup { output, encrypt } => cmd_backup(&output, encrypt).await,
         Commands::Restore { input, encrypt } => cmd_restore(&input, encrypt).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
@@ -3003,6 +3013,13 @@ async fn cmd_block(action: BlockAction) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+async fn cmd_graph(entity: &str, hops: usize) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let facts = crate::knowledge::list_all_facts(&config).await?;
+    print!("{}", crate::knowledge::walk_facts(&facts, entity, hops));
     Ok(())
 }
 

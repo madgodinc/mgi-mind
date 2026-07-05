@@ -1384,9 +1384,85 @@ pub async fn count_pending_conflicts(config: &MindConfig) -> Result<(u64, u64)> 
 // completes in well under 10ms. These tests are the spec the duel rule
 // in Phase 2 will be calibrated against; if any of them fails or has
 // to be edited later, the duel rule was built against the wrong axis.
+/// Walk the fact graph outward from `start` (matched case-insensitively against
+/// any subject or object), rendering an indented tree of directed edges
+/// `-[predicate]-> object` up to `max_hops` deep. A local, LLM-free answer to
+/// the "knowledge-graph traversal" competitors build on Neo4j — here it is a
+/// plain BFS over the facts already in Qdrant. Cycle-safe: each entity is
+/// expanded at most once. Pure over a fact slice so it is unit-tested directly.
+pub fn walk_facts(facts: &[Fact], start: &str, max_hops: usize) -> String {
+    let start_n = start.trim().to_lowercase();
+    let display = facts
+        .iter()
+        .flat_map(|f| [f.subject.as_str(), f.object.as_str()])
+        .find(|e| e.trim().to_lowercase() == start_n);
+    let Some(display) = display else {
+        return format!("(no facts mention '{start}')\n");
+    };
+    let mut out = format!("{display}\n");
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    visited.insert(start_n.clone());
+    walk_facts_rec(facts, &start_n, max_hops, 1, &mut visited, &mut out);
+    out
+}
+
+fn walk_facts_rec(
+    facts: &[Fact],
+    current: &str,
+    max_hops: usize,
+    depth: usize,
+    visited: &mut std::collections::BTreeSet<String>,
+    out: &mut String,
+) {
+    if depth > max_hops {
+        return;
+    }
+    let indent = "  ".repeat(depth);
+    for f in facts
+        .iter()
+        .filter(|f| f.valid && f.subject.trim().to_lowercase() == current)
+    {
+        out.push_str(&format!("{indent}-[{}]-> {}\n", f.predicate, f.object));
+        let obj_n = f.object.trim().to_lowercase();
+        if visited.insert(obj_n.clone()) {
+            walk_facts_rec(facts, &obj_n, max_hops, depth + 1, visited, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_facts_builds_a_bounded_directed_tree() {
+        let f = |s: &str, p: &str, o: &str| Fact {
+            id: format!("{s}-{p}-{o}"),
+            subject: s.into(),
+            predicate: p.into(),
+            object: o.into(),
+            created_at: None,
+            valid_until: None,
+            status: None,
+            valid: true,
+        };
+        let facts = vec![
+            f("Aurora", "deployed_on", "srv-3"),
+            f("srv-3", "located_in", "Hetzner"),
+            f("Hetzner", "in_country", "Germany"),
+            f("Aurora", "owned_by", "Mad"),
+        ];
+        let out = walk_facts(&facts, "aurora", 2);
+        assert!(out.starts_with("Aurora\n"));
+        assert!(out.contains("-[deployed_on]-> srv-3"));
+        assert!(out.contains("-[located_in]-> Hetzner"));
+        assert!(out.contains("-[owned_by]-> Mad"));
+        assert!(
+            !out.contains("Germany"),
+            "hop 3 must be excluded at max_hops=2"
+        );
+        assert!(walk_facts(&facts, "nobody", 3).contains("no facts mention"));
+    }
 
     #[test]
     fn fact_valid_at_is_half_open_interval() {
