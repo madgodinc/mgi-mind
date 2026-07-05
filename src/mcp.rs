@@ -612,7 +612,17 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let agent = arg_str(args, "agent")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'agent'"))?;
             let limit = arg_u64(args, "limit", 20) as usize;
-            let results = crate::storage::by_author(cfg, agent, limit).await?;
+            // Server-set by the HTTP scope gate for a library-scoped token: confine
+            // the by-agent read to its allowlist. Absent on the trusted stdio path.
+            let scope_libs: Option<Vec<String>> = args.get("_scope_libs").and_then(|v| {
+                v.as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+            });
+            let results =
+                crate::storage::by_author(cfg, agent, limit, scope_libs.as_deref()).await?;
             Ok(crate::cli::render_search(&results))
         }
         "mind_quarantine_list" => {

@@ -3597,15 +3597,27 @@ pub async fn by_author(
     config: &MindConfig,
     agent: &str,
     limit: usize,
+    libs: Option<&[String]>,
 ) -> Result<Vec<SearchResult>> {
     let client = get_client(config).await?;
     ensure_memories_collection(&client, config.vector_size).await?;
 
-    let filter = Filter {
+    let mut filter = Filter {
         must: vec![Condition::matches("author", agent.to_string())],
         must_not: vec![Condition::matches("quarantined", true)],
         ..Default::default()
     };
+    // v2.4 confinement: a library-scoped token sees only its allowlist's
+    // libraries, even when asking "what did agent X write". Same one→`must`,
+    // many→`should` (OR) pattern as the memory filter. None/empty = unscoped.
+    if let Some(libs) = libs.filter(|l| !l.is_empty()) {
+        match libs {
+            [one] => filter.must.push(Condition::matches("library", one.clone())),
+            many => filter.must.push(
+                Filter::should(many.iter().map(|l| Condition::matches("library", l.clone()))).into(),
+            ),
+        }
+    }
     let order = OrderBy {
         key: "created_at".to_string(),
         direction: Some(Direction::Desc as i32),

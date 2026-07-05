@@ -608,7 +608,8 @@ fn http_v2_acl_flood_verdict_contract() {
     // 2) scope_gate is fail-closed: bob (scoped) is 403 on every route NOT in
     //    ALLOWED_FOR_SCOPED (http_api.rs), and 200 on /should-search.
     for path in [
-        "/memory/by-agent",
+        // /memory/by-agent is NOT here anymore: v2.4 confines it (allowlist
+        // injected) instead of blanket-denying — asserted positively below.
         "/fact/add",
         "/fact/query",
         "/fact/invalidate",
@@ -770,6 +771,26 @@ fn http_v2_acl_flood_verdict_contract() {
         .0,
         403,
         "bob naming a non-allowlisted library must 403"
+    );
+    // v2.4 by-agent confinement: bob asking "what did admin write" gets 200 but
+    // MUST NOT surface admin's canary in lib_priv (bob is scoped to lib_a). This
+    // is the falsifiable proof the route is confined, not merely reachable.
+    let (code, out) = post(&h_bob, "/memory/by-agent", "{\"agent\":\"admin\"}");
+    assert_eq!(
+        code, 200,
+        "scoped by-agent must 200 (confined, not 403), got {code}: {out}"
+    );
+    assert!(
+        !out.contains("plum-otter-seventine"),
+        "scoped by-agent must not surface another library's content, got: {out}"
+    );
+    // Positive control: bob's OWN by-agent surfaces his lib_a write, so the
+    // canary-absence above can't pass on an empty/broken read.
+    let (code, out) = post(&h_bob, "/memory/by-agent", "{}");
+    assert_eq!(code, 200, "bob own by-agent should 200, got {code}: {out}");
+    assert!(
+        out.contains("standup"),
+        "bob's own by-agent must surface his lib_a write (positive control), got: {out}"
     );
     let (code, out) = post(&h_bob, "/memory/browse", "{}");
     assert_eq!(code, 200, "bob browse should 200, got {code}: {out}");

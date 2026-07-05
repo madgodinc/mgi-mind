@@ -688,6 +688,9 @@ fn scoped_route_allowed(path: &str) -> bool {
         "/memory/recall",
         "/memory/add",
         "/memory/ingest",
+        // v2.4: by-agent is now confined (library allowlist injected) rather than
+        // blanket-denied — the gate asks for confinement, not lockout.
+        "/memory/by-agent",
     ];
     ALLOWED_FOR_SCOPED.contains(&path)
 }
@@ -1169,14 +1172,22 @@ async fn memory_by_agent(
         Err(c) => return c.into_response(),
     };
     note_read(&state, &derived);
+    // v2.4 confinement: a library-scoped token's by-agent read is restricted to
+    // its own allowlist (computed before `derived` is moved into with_agent).
+    // Server-set so it can't be widened from the request body.
+    let scope_libs: Option<Vec<String>> =
+        derived.as_ref().and_then(|n| state.scopes.get(n)).cloned();
     // For by-agent, the body `agent` (explicit target) wins; fall back to the
     // caller's own derived/header identity ("what did I write").
     let has_explicit = args.get("agent").and_then(|v| v.as_str()).is_some();
-    let merged = if has_explicit {
+    let mut merged = if has_explicit {
         args
     } else {
         with_agent(args, &headers, derived)
     };
+    if let (Some(libs), Value::Object(obj)) = (&scope_libs, &mut merged) {
+        obj.insert("_scope_libs".to_string(), json!(libs));
+    }
     call(&state, "mind_by_agent", merged).await
 }
 
@@ -1474,7 +1485,7 @@ mod tests {
     // ---- scoped_route_allowed (fail-closed route gate) ----
 
     #[test]
-    fn scoped_gate_allows_only_the_seven_memory_routes() {
+    fn scoped_gate_allows_only_the_eight_memory_routes() {
         for ok in [
             "/health",
             "/should-search",
@@ -1483,13 +1494,14 @@ mod tests {
             "/memory/recall",
             "/memory/add",
             "/memory/ingest",
+            // v2.4: by-agent is confined (allowlist injected), no longer denied.
+            "/memory/by-agent",
         ] {
             assert!(scoped_route_allowed(ok), "{ok} should be reachable");
         }
         // Everything that spans libraries, shares a global namespace, or
         // administers libraries must be denied to a scoped token.
         for denied in [
-            "/memory/by-agent",
             "/fact/add",
             "/fact/query",
             "/fact/contested",
