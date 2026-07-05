@@ -177,7 +177,7 @@ pub enum Commands {
 
     /// Export data
     Export {
-        /// Format: json, md, or instructions
+        /// Format: json, md, instructions, or profile
         #[arg(long, default_value = "json")]
         format: String,
         /// Output directory (json/md) or file path (instructions); stdout if omitted for instructions
@@ -3041,11 +3041,66 @@ pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<Str
         }
         return Ok(md);
     }
+    // `profile`: a compact, always-fresh, prompt-ready snapshot (Supermemory's
+    // "Profiles", but computed locally from data we already stamp — pinned
+    // blocks + current facts + verified procedures; no LLM summarization).
+    if format == "profile" {
+        let blocks = crate::storage::load_blocks();
+        let facts = crate::knowledge::list_all_facts(&config)
+            .await
+            .unwrap_or_default();
+        let procs = crate::storage::list_verified_procedures(&config)
+            .await
+            .unwrap_or_default();
+        let md = render_profile(&blocks, &facts, &procs);
+        if let Some(path) = output {
+            std::fs::write(path, &md).with_context(|| format!("writing profile to {path}"))?;
+            return Ok(format!("Wrote profile to {path}"));
+        }
+        return Ok(md);
+    }
     let out = output.unwrap_or("./mgimind-export");
     let count = crate::storage::export_all(&config, format, out).await?;
     Ok(format!(
         "Exporting as {format} to {out}...\nExported {count} entries to {out}/"
     ))
+}
+
+/// Render a compact, prompt-ready profile: pinned core memory + current facts +
+/// verified procedures. Pure (no store / no clock) so it is unit-tested directly.
+fn render_profile(
+    blocks: &std::collections::BTreeMap<String, String>,
+    facts: &[crate::knowledge::Fact],
+    procs: &[crate::storage::ProcedureHit],
+) -> String {
+    let mut out = String::from("# Profile (mgi-mind)\n\n");
+    if !blocks.is_empty() {
+        out.push_str("## Core memory\n");
+        for (n, c) in blocks {
+            out.push_str(&format!("- **{n}**: {}\n", c.lines().next().unwrap_or("").trim()));
+        }
+        out.push('\n');
+    }
+    let current: Vec<&crate::knowledge::Fact> = facts.iter().filter(|f| f.valid).collect();
+    if !current.is_empty() {
+        out.push_str(&format!("## Facts ({})\n", current.len()));
+        for f in current.iter().take(40) {
+            out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+        }
+        out.push('\n');
+    }
+    if !procs.is_empty() {
+        out.push_str(&format!("## Verified procedures ({})\n", procs.len()));
+        for p in procs.iter().take(15) {
+            let title = instr_title(&p.trigger_context, &p.trigger_error);
+            out.push_str(&format!("- {title} → {}\n", p.fix.trim()));
+        }
+        out.push('\n');
+    }
+    if out.trim() == "# Profile (mgi-mind)" {
+        out.push_str("_Empty profile — no blocks, facts, or verified procedures yet._\n");
+    }
+    out
 }
 
 /// The first non-empty line of `context`, falling back to `fallback` (then to
@@ -4083,7 +4138,8 @@ async fn cmd_extractor_batch_from_library(
 
 #[cfg(test)]
 mod export_instructions_tests {
-    use super::render_instructions;
+    use super::{render_instructions, render_profile};
+    use crate::knowledge::Fact;
     use crate::storage::ProcedureHit;
 
     fn proc(
@@ -4137,6 +4193,33 @@ mod export_instructions_tests {
         let out = render_instructions(&[proc("", "ERR_XYZ", "do the thing", None, 1, 0)]);
         assert!(out.contains("## 1. ERR_XYZ"));
         assert!(!out.contains("Where:"));
+    }
+
+    #[test]
+    fn profile_composes_blocks_facts_and_procedures() {
+        let mut blocks = std::collections::BTreeMap::new();
+        blocks.insert("persona".to_string(), "Mad — terse".to_string());
+        let fact = Fact {
+            id: "f".into(),
+            subject: "Mad".into(),
+            predicate: "builds".into(),
+            object: "mgi-mind".into(),
+            created_at: None,
+            valid_until: None,
+            status: None,
+            valid: true,
+        };
+        let procs = [proc("windows build", "STACK_OVERFLOW", "raise stack", None, 2, 0)];
+        let out = render_profile(&blocks, &[fact], &procs);
+        assert!(out.contains("## Core memory"));
+        assert!(out.contains("**persona**: Mad — terse"));
+        assert!(out.contains("## Facts (1)"));
+        assert!(out.contains("Mad builds mgi-mind"));
+        assert!(out.contains("## Verified procedures (1)"));
+        assert!(out.contains("→ raise stack"));
+
+        let empty = render_profile(&std::collections::BTreeMap::new(), &[], &[]);
+        assert!(empty.contains("Empty profile"));
     }
 }
 
