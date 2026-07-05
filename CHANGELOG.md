@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.0 — local feature parity, batch 2: fact-graph traversal + profile
+
+Two more capabilities stolen from the 2026 memory-layer field, local and
+LLM-free. Additive; no behavior change to existing surfaces.
+
+- **Multi-hop fact-graph traversal (Graphiti / Memary-style).** `mgimind graph
+  <entity> --hops N` walks the facts already in Qdrant outward from an entity
+  (subject/object match), rendering a bounded, cycle-safe, indented tree of
+  directed `-[predicate]-> object` edges — the "knowledge graph" competitors
+  build on Neo4j, here a plain BFS with no extra store.
+- **Local profile snapshot (Supermemory-style).** `mgimind export --format
+  profile` renders a compact, prompt-ready snapshot — pinned core-memory blocks
+  + current facts + verified procedures — computed locally from data already
+  stamped, with no LLM summarization.
+
 ## 2.2.0 — local feature parity: pinned blocks + procedures→instructions
 
 Two capabilities stolen from the 2026 memory-layer field and rebuilt local and
