@@ -81,6 +81,12 @@ pub struct IngestReport {
     /// Re-asserting it is a no-op — counted here, NOT as a store, so the tally
     /// stays honest about what was actually written.
     pub reasserted: usize,
+    /// Fact candidate NOT written because a library-scoped token cannot reach the
+    /// global fact store (v2.4 ACL confinement). Skipped, not an error — honestly
+    /// reported so the caller knows extraction was confined, not silently dropped.
+    pub skipped_scope_facts: usize,
+    /// Procedure candidate NOT written for the same reason (global procedure store).
+    pub skipped_scope_procedures: usize,
 }
 
 impl IngestReport {
@@ -123,6 +129,14 @@ impl IngestReport {
             s.push_str(&format!(
                 "\nRe-asserted {} already-stored memory/memories (kept live, no new write).",
                 self.reasserted
+            ));
+        }
+        let scoped_skips = self.skipped_scope_facts + self.skipped_scope_procedures;
+        if scoped_skips > 0 {
+            s.push_str(&format!(
+                "\nConfined {} fact/procedure candidate(s): a library-scoped token \
+                 cannot write the global fact/procedure stores.",
+                scoped_skips
             ));
         }
         s
@@ -203,17 +217,25 @@ pub async fn run_ingest(
     candidates: Vec<Candidate>,
     library: &str,
 ) -> Result<IngestReport> {
-    run_ingest_authored(config, raw, candidates, library, None).await
+    run_ingest_authored(config, raw, candidates, library, None, false).await
 }
 
 /// Like `run_ingest` but tags every written memory/fact with the asserting
 /// agent (multi-agent HTTP path). The plain `run_ingest` stays unattributed.
+///
+/// `confine`: when true (a library-scoped HTTP token), fact and procedure
+/// candidates are NOT written — they would land in the GLOBAL fact/procedure
+/// stores, escaping the token's library allowlist (the v2.0 per-token ACL only
+/// confines the memory store, which is library-tagged). They are counted in
+/// `skipped_scope_*` and reported honestly, not silently dropped. Memory
+/// candidates are unaffected (already confined by `library`).
 pub async fn run_ingest_authored(
     config: &MindConfig,
     raw: Option<&str>,
     candidates: Vec<Candidate>,
     library: &str,
     author: Option<&str>,
+    confine: bool,
 ) -> Result<IngestReport> {
     let candidates = if candidates.is_empty() {
         match raw {
@@ -451,6 +473,12 @@ pub async fn run_ingest_authored(
                 predicate,
                 object,
             } => {
+                // A library-scoped token cannot write to the global fact store —
+                // confine the candidate (skip-with-counter) instead of leaking it.
+                if confine {
+                    report.skipped_scope_facts += 1;
+                    continue;
+                }
                 // A fact value that is itself a secret must not be stored as a fact.
                 if crate::secrets::scan(&object).is_some() {
                     report.skipped_secret += 1;
@@ -465,6 +493,11 @@ pub async fn run_ingest_authored(
                 fix,
                 context,
             } => {
+                // Same confinement as facts: the procedure store is global.
+                if confine {
+                    report.skipped_scope_procedures += 1;
+                    continue;
+                }
                 if trigger_error.trim().is_empty() || fix.trim().is_empty() {
                     continue;
                 }
@@ -574,5 +607,35 @@ mod tests {
         let s = r.render();
         assert!(s.contains("1 memory"));
         assert!(s.contains("near-duplicate"));
+    }
+
+    #[tokio::test]
+    async fn scoped_ingest_confines_facts_and_procedures() {
+        // A library-scoped token (confine=true): fact + procedure candidates are
+        // skip-with-counter, never written to the global stores. Both candidates
+        // are confined before any storage call, so this needs no live Qdrant.
+        let cfg = crate::config::MindConfig::default();
+        let candidates = vec![
+            Candidate::Fact {
+                subject: "Aurora".into(),
+                predicate: "runs_on".into(),
+                object: "srv-3".into(),
+            },
+            Candidate::Procedure {
+                trigger_error: "boom".into(),
+                fix: "raise stack".into(),
+                context: "windows".into(),
+            },
+        ];
+        let report =
+            run_ingest_authored(&cfg, None, candidates, "projects", Some("agent-x"), true)
+                .await
+                .unwrap();
+        assert_eq!(report.considered, 2);
+        assert_eq!(report.stored_facts, 0);
+        assert_eq!(report.stored_procedures, 0);
+        assert_eq!(report.skipped_scope_facts, 1);
+        assert_eq!(report.skipped_scope_procedures, 1);
+        assert!(report.render().contains("Confined 2"));
     }
 }

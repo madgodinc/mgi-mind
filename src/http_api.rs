@@ -857,6 +857,16 @@ async fn memory_ingest(
     if let Some(resp) = apply_scope(&state, &derived, &mut args, true) {
         return resp;
     }
+    // A library-scoped token's ingest must confine fact/procedure candidates (they
+    // would land in the GLOBAL stores, escaping the library allowlist). Set the
+    // flag server-side — overwrite any client value so it can't be bypassed from
+    // the request body.
+    if let Value::Object(ref mut obj) = args {
+        obj.insert(
+            "_confine_extraction".to_string(),
+            Value::Bool(is_scoped(&state, &derived)),
+        );
+    }
     let who = quota_key(&derived);
     if let Some(resp) = check_write_quota(&state, &who) {
         return resp;

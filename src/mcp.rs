@@ -587,8 +587,16 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 anyhow::bail!("mind_ingest needs either 'raw' text or a 'candidates' array");
             }
             let author = arg_str(args, "agent");
+            // Server-set by the HTTP scope gate for a library-scoped token: confine
+            // extraction candidates (facts/procedures) so they can't leak to the
+            // global stores. Absent on the trusted stdio path → no confinement.
+            let confine = args
+                .get("_confine_extraction")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let report =
-                crate::ingest::run_ingest_authored(cfg, raw, candidates, library, author).await?;
+                crate::ingest::run_ingest_authored(cfg, raw, candidates, library, author, confine)
+                    .await?;
             Ok(report.render())
         }
         "mind_history" => {
