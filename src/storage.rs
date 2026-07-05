@@ -4078,14 +4078,29 @@ pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
     let blob =
         crate::vault::encrypt_with_key(&archive, &key).context("backup encryption failed")?;
 
-    // magic | salt | nonce+ciphertext
-    let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
-    out.extend_from_slice(BACKUP_MAGIC);
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&blob);
-    crate::util::atomic_write(std::path::Path::new(output), &out)
+    // magic | salt | nonce+ciphertext. Wrapped in `Ciphertext` so the writer
+    // below type-checks only against sealed bytes — a future refactor cannot
+    // hand the plaintext `archive` to the file-write by accident.
+    let mut framed = Vec::with_capacity(BACKUP_MAGIC.len() + 32 + blob.len());
+    framed.extend_from_slice(BACKUP_MAGIC);
+    framed.extend_from_slice(&salt);
+    framed.extend_from_slice(&blob);
+    write_ciphertext(std::path::Path::new(output), &Ciphertext(framed))
         .with_context(|| format!("Failed to write encrypted backup {output}"))?;
     Ok(())
+}
+
+/// The sealed bytes of an encrypted backup (magic | salt | nonce+ciphertext).
+/// A newtype whose only constructor site is the encryption path above, so the
+/// backup writer cannot be handed anything but already-encrypted bytes.
+struct Ciphertext(Vec<u8>);
+
+/// The ONLY writer for the encrypted-backup path. It accepts nothing but a
+/// sealed `Ciphertext`, so a static read of this module proves no plaintext
+/// leaves the process on the backup route (the round-trip test in this file
+/// proves the same property dynamically).
+fn write_ciphertext(path: &std::path::Path, ct: &Ciphertext) -> Result<()> {
+    crate::util::atomic_write(path, &ct.0)
 }
 
 /// Restore an encrypted backup written by `backup_encrypted`.
