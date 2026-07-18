@@ -1,0 +1,58 @@
+mgi-mind
+Copyright 2026 Mad God Inc
+
+This product includes software developed by Mad God Inc.
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+================================================================================
+Third-party components
+================================================================================
+
+The mgi-mind binary distributed from GitHub Releases contains no third-party
+runtime components: Qdrant, the ONNX Runtime and the embedding models are
+fetched at runtime by `mgimind doctor --fix`.
+
+The published Docker image, however, bakes those components into the image and
+therefore redistributes them. Their notices follow.
+
+--------------------------------------------------------------------------------
+Qdrant
+--------------------------------------------------------------------------------
+Vector database used as the storage engine.
+Copyright Qdrant Solutions GmbH and contributors.
+Licensed under the Apache License, Version 2.0.
+https://github.com/qdrant/qdrant
+
+--------------------------------------------------------------------------------
+ONNX Runtime
+--------------------------------------------------------------------------------
+Inference runtime used for local embedding and reranking.
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT License.
+https://github.com/microsoft/onnxruntime
+
+--------------------------------------------------------------------------------
+multilingual-e5-base
+--------------------------------------------------------------------------------
+Default embedding model weights.
+Copyright the model authors.
+Licensed under the MIT License.
+https://huggingface.co/intfloat/multilingual-e5-base
+
+--------------------------------------------------------------------------------
+bge-reranker-base
+--------------------------------------------------------------------------------
+Default reranking model weights.
+Copyright Beijing Academy of Artificial Intelligence (BAAI).
+Licensed under the MIT License.
+https://huggingface.co/BAAI/bge-reranker-base
+
+--------------------------------------------------------------------------------
+Rust crates
+--------------------------------------------------------------------------------
+mgi-mind links a number of Rust crates, predominantly under the MIT and
+Apache-2.0 licenses. The authoritative list for a given build is Cargo.lock;
+`cargo license` or `cargo about` will render it with per-crate terms.
+
+Notable direct dependencies include tokenizers and qdrant-client
+(Apache-2.0), and ort, the Rust bindings for ONNX Runtime (MIT/Apache-2.0).
