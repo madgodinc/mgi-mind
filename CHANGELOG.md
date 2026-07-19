@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **`vault store --stdin`.** The secret was a positional argument only, so
+  storing one wrote it into shell history and exposed it in the process list
+  for the duration of the command. `--stdin` reads it from a pipe instead. The
+  master-password prompt reads the terminal directly, not stdin, so the two do
+  not collide.
+
 ## 2.5.0 — macOS actually installs
 
 Every macOS failure found in an end-to-end audit of the install path. No

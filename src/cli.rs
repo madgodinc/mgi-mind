@@ -789,8 +789,12 @@ pub enum VaultAction {
     Store {
         /// Unique key name (e.g., "ssh-server-1", "github-token")
         key: String,
-        /// Secret value
-        value: String,
+        /// Secret value. Omit it and pass --stdin to keep the secret out of
+        /// your shell history and out of the process list.
+        value: Option<String>,
+        /// Read the secret from stdin instead of the command line
+        #[arg(long, conflicts_with = "value")]
+        stdin: bool,
         /// Category: password, ssh, api-key, token, other
         #[arg(long, default_value = "other")]
         category: String,
@@ -949,9 +953,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             VaultAction::Store {
                 key,
                 value,
+                stdin,
                 category,
                 desc,
-            } => cmd_vault_store(&key, &value, &category, &desc).await,
+            } => {
+                let secret = match (value, stdin) {
+                    (Some(v), _) => v,
+                    (None, true) => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        // A piped secret almost always arrives with a trailing
+                        // newline; storing it would break every later use.
+                        buf.trim_end_matches(['\n', '\r']).to_string()
+                    }
+                    (None, false) => anyhow::bail!(
+                        "no secret given: pass it as an argument, or use --stdin to keep it \
+                         out of your shell history"
+                    ),
+                };
+                cmd_vault_store(&key, &secret, &category, &desc).await
+            }
             VaultAction::Get { key, yes } => cmd_vault_get(&key, yes).await,
             VaultAction::List => cmd_vault_list().await,
             VaultAction::Delete { key } => cmd_vault_delete(&key).await,
