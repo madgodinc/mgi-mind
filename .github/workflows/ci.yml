@@ -88,7 +88,12 @@ jobs:
           ORT_DYLIB_PATH: ${{ github.workspace }}/target/release/libonnxruntime.so
         run: |
           export MGIMIND_IT_MODELS="$HOME/mgimind/models"
-          cargo test --test cli_integration -- --nocapture
+          # --test-threads=1: the suite shares Qdrant collection names, so tests
+          # running in parallel drop and recreate collections out from under each
+          # other. That is what the "_mod_procstats already exists" gRPC errors in
+          # the log are, and why a near-dup quarantine row can vanish before the
+          # assertion reads it.
+          cargo test --test cli_integration -- --nocapture --test-threads=1
 
   integration-windows:
     name: integration (windows, bundled Qdrant)
@@ -133,7 +138,8 @@ jobs:
           ORT_DYLIB_PATH: ${{ github.workspace }}/target/release/onnxruntime.dll
         run: |
           $env:MGIMIND_IT_MODELS = "$HOME/mgimind/models"
-          cargo test --test cli_integration -- --nocapture
+          # Serialized for the same collection-name collision as the Linux job.
+          cargo test --test cli_integration -- --nocapture --test-threads=1
 
   audit:
     name: cargo-audit (vulnerabilities)
