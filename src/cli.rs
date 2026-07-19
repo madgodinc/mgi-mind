@@ -3982,7 +3982,7 @@ async fn cmd_facts_list(
                 "{:>3} {:>4} {:<36} {:<28} {:<22} {:<30}",
                 i + 1,
                 dep,
-                &f.id,
+                f.id,
                 s,
                 p,
                 o
