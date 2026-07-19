@@ -162,6 +162,17 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it. This is a breaking change that also disrupts existing local tooling, so
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
+- **✅ Shipped — v2.5.0 (2026-07-19) — macOS install path fixed end to end.**
+  An audit of every step from `install.sh` to a warm embedder, prompted by an
+  install that failed on someone else's MacBook. Intel Macs are back in the
+  release matrix (cross-compiled from the arm64 runner) and pin ONNX Runtime
+  1.23.0, the last release shipping `osx-x86_64`; the binary now asks for C
+  API 23, which both runtimes serve. Two latent extractor bugs on the Intel
+  path fixed (leading `./` in tar members, `libonnxruntime.dylib` being a
+  symlink there). The installer writes `~/.local/bin` into the shell profile,
+  since zsh does not carry it and the old warning scrolled away under the
+  model download. Still open: releases are ad-hoc signed, not notarized, so a
+  browser-downloaded binary needs a Gatekeeper override.
 - **✅ Shipped — v2.4.0 (2026-07-05) — multi-tenant confinement gate closed
   (Д7) + tamper-evident audit.** The full confinement set landed; the ACL
   enforcement is now confined, not just unit-covered:

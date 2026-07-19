@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.5.0 — macOS actually installs
+
+Every macOS failure found in an end-to-end audit of the install path. No
+retrieval or storage changes.
+
+- **Intel Macs get a binary.** `x86_64-apple-darwin` is back in the release
+  matrix, cross-compiled from the arm64 runner instead of waiting on the
+  retiring `macos-13` image. Before this, `install.sh` on an Intel Mac died at
+  the download step and the README's "build from source" advice did not help,
+  because `doctor --fix` then failed too.
+- **Intel Macs get an ONNX Runtime.** 1.24 dropped `osx-x86_64` from both the
+  GitHub assets and the PyPI wheels, so the URL `doctor --fix` built for Intel
+  had never existed. Intel now pins 1.23.0, the last release that ships it.
+- **C API 23 instead of 24.** `ORT_API_VERSION` is what the binary passes to
+  `GetApi()`, and a runtime returns NULL for anything newer than itself, so
+  asking for 24 would have hard-failed against the 1.23.0 an Intel Mac
+  installs. 1.24.2 serves API 23, verified against the shipped runtime, so no
+  other platform changes.
+- **Archive members match with or without a leading `./`.** The `osx-x86_64`
+  tarball prefixes paths, the `osx-arm64` one does not, and the extractor
+  compared exact strings, so it would have reported the library as missing on
+  Intel. Also, `libonnxruntime.dylib` is a symlink in the Intel archive, so the
+  resolved versioned name is requested instead (the 0-byte-file trap already
+  known from linux-aarch64).
+- **PATH on macOS.** zsh does not carry `~/.local/bin`, so the installer now
+  writes the `export PATH` line into the shell profile and repeats it in the
+  final message. The old warning printed before a ~600 MB model download and
+  scrolled away, leaving an install that looked fine until `mgimind` came back
+  "command not found". `MGIMIND_NO_PROFILE=1` opts out.
+- **Docs.** ONNX Runtime and the Qdrant binary land next to the `mgimind`
+  binary, not in `~/mgimind/` as the README claimed. Gatekeeper note updated:
+  releases are ad-hoc signed, not notarized, and right-click → Open stopped
+  working for command-line binaries in Sequoia.
+
 ## 2.4.0 — multi-tenant confinement gate closed (Д7) + tamper-evident audit
 
 Closes the Д7 confinement gate and hardens the audit log. All security work, off

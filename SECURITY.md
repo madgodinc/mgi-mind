@@ -100,5 +100,5 @@ Out of scope:
 
 ## Past disclosures
 
-None yet. As of v2.4.0 no security advisories have been published.
+None yet. As of v2.5.0 no security advisories have been published.
 This file exists so future researchers have a path.

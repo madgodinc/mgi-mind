@@ -1,6 +1,6 @@
 [package]
 name = "mgi-mind"
-version = "2.4.0"
+version = "2.5.0"
 edition = "2024"
 authors = ["Mad God Inc <mad.god.inc@gmail.com>"]
 description = "AI-native second brain. Self-hosted, token-optimized memory for AI assistants."
@@ -41,7 +41,23 @@ qdrant-client = "1"
 # Default build uses load-dynamic + CPU. The `cuda` cargo feature switches the
 # embedder/reranker to register the CUDA execution provider at runtime (still
 # opt-in via MGIMIND_USE_CUDA=1). The Dockerfile in docker/cuda/ builds with it.
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+#
+# Features mirror ort's defaults except for the API level: `api-23` instead of
+# the default `api-24`. `ORT_API_VERSION` is what the binary passes to
+# `GetApi()`, and a runtime returns NULL for anything newer than itself. Intel
+# macOS can only get ONNX Runtime 1.23.0 (Microsoft dropped osx-x86_64 in 1.24),
+# so asking for 24 would hard-fail there. 1.24.2 still serves API 23, so every
+# other platform keeps its current runtime.
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-23",
+    "load-dynamic",
+] }
 
 # Tokenizer for embedding models
 tokenizers = "0.21"

@@ -118,7 +118,30 @@ case ":$PATH:" in
     *) on_path=no ;;
 esac
 
-if [ "$on_path" = "no" ]; then
+# macOS zsh does not add ~/.local/bin to PATH the way most Linux distros do, so
+# on a Mac this branch is the common case, not the edge case. Printing a warning
+# here was not enough: the ~600 MB model download below scrolls it off screen,
+# and the install then looks successful right up until `mgimind` reports
+# "command not found". Write the export into the shell profile instead, and
+# repeat it in the final message.
+profile_updated=""
+if [ "$on_path" = "no" ] && [ -z "${MGIMIND_NO_PROFILE:-}" ]; then
+    case "${SHELL:-}" in
+        */zsh)  profile="$HOME/.zshrc" ;;
+        */bash) [ "$os" = "Darwin" ] && profile="$HOME/.bash_profile" || profile="$HOME/.bashrc" ;;
+        *)      profile="$HOME/.profile" ;;
+    esac
+    marker="# added by the mgi-mind installer"
+    if ! grep -qF "$marker" "$profile" 2>/dev/null; then
+        printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$INSTALL_DIR" >> "$profile" \
+            && profile_updated="$profile"
+    fi
+    # Make the rest of THIS script (init, doctor) see the binary too.
+    PATH="$INSTALL_DIR:$PATH"
+    export PATH
+fi
+
+if [ "$on_path" = "no" ] && [ -z "$profile_updated" ]; then
     warn "$INSTALL_DIR is not on PATH. Add this to your shell profile:"
     printf '    export PATH="%s:$PATH"\n' "$INSTALL_DIR" >&2
 fi
@@ -135,6 +158,22 @@ else
 fi
 
 # --- final message -----------------------------------------------------------
+
+if [ -n "$profile_updated" ]; then
+    cat <<EOF
+
+Added $INSTALL_DIR to PATH in $profile_updated.
+Open a new terminal (or run: export PATH="$INSTALL_DIR:\$PATH") before typing 'mgimind'.
+EOF
+elif [ "$on_path" = "no" ]; then
+    cat <<EOF
+
+NOTE: $INSTALL_DIR is not on your PATH, so typing 'mgimind' will not find it.
+Add this to your shell profile, then open a new terminal:
+
+    export PATH="$INSTALL_DIR:\$PATH"
+EOF
+fi
 
 cat <<EOF
 

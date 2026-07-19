@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Последний релиз: v2.4.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.4.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Последний релиз: v2.5.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.5.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Локальная долговременная память для ИИ-ассистентов. Один бинарник на Rust,
 локальная векторная БД Qdrant, локальные ONNX-модели. Говорит по MCP, так
@@ -129,15 +129,17 @@ claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
 знал протокол (логировать сессию, искать перед ответом, использовать
 vault для секретов).
 
-`doctor --fix` качает в `~/mgimind/`: ONNX Runtime (библиотеку, которую
-грузит эмбеддер), бинарник Qdrant, модель эмбеддингов
+`doctor --fix` качает в `~/mgimind/` модели: эмбеддер
 (multilingual-e5-base, квантованный ONNX, ~270 МБ) и реранкер
-(bge-reranker-base, квантованный ONNX, ~280 МБ).
+(bge-reranker-base, квантованный ONNX, ~280 МБ). ONNX Runtime и бинарник
+Qdrant ложатся рядом с самим бинарником `mgimind`, так что если `doctor`
+жалуется на отсутствующую библиотеку — речь про каталог установки, а не
+про `~/mgimind/`.
 
 ### Флаги инсталлятора
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — поставить не в `~/.local/bin`.
-- `MGIMIND_TAG=v2.4.0 curl ... | sh` — закрепить релиз вместо `latest`.
+- `MGIMIND_TAG=v2.5.0 curl ... | sh` — закрепить релиз вместо `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh` — только положить бинарник; `init` + `doctor --fix` потом сам.
 
 ### Ручная установка (без скрипта)
@@ -162,15 +164,21 @@ mgimind search "как достучаться до deploy-сервера"
 
 ### Заметки по платформам
 
-- **Linux x86_64, macOS arm64 (Apple Silicon), Windows x86_64** —
-  собранные бинарники в каждом релизе. Инсталлятор берёт правильный.
-- **macOS Intel (x86_64)** — собранного бинарника нет. Хостинговый
-  раннер `macos-13` от GitHub сидит в очереди по 20-30+ минут и
-  выводится из употребления, так что он исключён из релизной матрицы.
-  Собирай из исходников (следующая секция); занимает несколько минут.
-- **Карантин при первом запуске macOS** — скачанному бинарнику может
-  понадобиться `xattr -d com.apple.quarantine /path/to/mgimind`, или
-  правый клик → Open один раз в Finder.
+- **Linux x86_64, macOS arm64 и x86_64, Windows x86_64** — собранные
+  бинарники в каждом релизе. Инсталлятор берёт правильный.
+- **PATH на macOS** — zsh не держит `~/.local/bin` в PATH, поэтому
+  инсталлятор дописывает строчку `export PATH` в `~/.zshrc` и сообщает
+  об этом. Открой новый терминал, прежде чем набирать `mgimind`.
+  `MGIMIND_NO_PROFILE=1` запрещает инсталлятору трогать твои дотфайлы.
+- **macOS Intel и ONNX Runtime** — в 1.24 сборку `osx-x86_64` убрали,
+  поэтому Intel-макам достаётся ONNX Runtime 1.23.0, а всем остальным
+  1.24.2. Бинарник запрашивает C API 23, его отдают обе версии.
+- **Карантин при первом запуске macOS** — инсталлятор его снимает, но
+  бинарнику, скачанному браузером, нужен
+  `xattr -d com.apple.quarantine /path/to/mgimind`. Релизы подписаны
+  ad-hoc и не нотаризованы; начиная с Sequoia правый клик → Open для
+  консольных бинарников уже не работает, так что либо `xattr`, либо
+  один раз разрешить в System Settings → Privacy & Security.
 - **Windows** — SmartScreen может ругаться на неподписанный
   `mgimind.exe` («Windows protected your PC») — выбери **More info →
   Run anyway**. Антивирус может также карантинить бинарник или модели,
@@ -419,7 +427,7 @@ fsync директории), так что краш оставляет либо 
 
 ## Статус и аудит
 
-Текущая версия: **2.4.0** (semver-стабильная с v1.0.0). Поверх
+Текущая версия: **2.5.0** (semver-стабильная с v1.0.0). Поверх
 audit-лога 0.10.x и эфемерного viewer'а, карантина 0.11.x и
 best-effort retrieval, viewer-волны 0.12.x, session liveness 0.13.x и
 procedural-memory дома 0.14.x (LongMemEval baseline + Д6 датасет из

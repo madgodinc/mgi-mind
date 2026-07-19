@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v2.4.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.4.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Latest release: v2.5.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.5.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
@@ -247,15 +247,16 @@ assistant at [`AI_INSTRUCTIONS.md`](AI_INSTRUCTIONS.md) once so it knows
 the protocol (log a session, search before answering, use the vault for
 secrets).
 
-`doctor --fix` downloads into `~/mgimind/`: ONNX Runtime (the library the
-embedder loads), the Qdrant binary, the embedding model
+`doctor --fix` downloads the models into `~/mgimind/`: the embedder
 (multilingual-e5-base, quantized ONNX, ~270 MB) and the reranker
-(bge-reranker-base, quantized ONNX, ~280 MB).
+(bge-reranker-base, quantized ONNX, ~280 MB). ONNX Runtime and the Qdrant
+binary land next to the `mgimind` binary itself, so a `doctor` that reports
+a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh` — install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.4.0 curl ... | sh` — pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v2.5.0 curl ... | sh` — pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh` — just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -280,15 +281,21 @@ mgimind search "how do I reach the deploy box"
 
 ### Per-OS notes
 
-- **Linux x86_64, macOS arm64 (Apple Silicon), Windows x86_64** — prebuilt
+- **Linux x86_64, macOS arm64 and x86_64, Windows x86_64** — prebuilt
   binaries in every release. The installer picks the right one.
-- **macOS Intel (x86_64)** — no prebuilt binary. GitHub's hosted
-  `macos-13` runner sits in queue for 20-30+ minutes and is being phased
-  out, so it's omitted from the release matrix. Build from source (next
-  section); takes a few minutes.
-- **macOS first-run quarantine** — a downloaded binary may need
-  `xattr -d com.apple.quarantine /path/to/mgimind`, or right-click → Open
-  once in Finder.
+- **macOS PATH** — zsh does not include `~/.local/bin`, so the installer
+  appends the `export PATH` line to your `~/.zshrc` and tells you it did.
+  Open a new terminal before typing `mgimind`. Set `MGIMIND_NO_PROFILE=1`
+  to keep the installer out of your dotfiles and add the line yourself.
+- **macOS Intel and ONNX Runtime** — 1.24 dropped `osx-x86_64`, so Intel
+  Macs get ONNX Runtime 1.23.0 while everything else gets 1.24.2. The
+  binary requests C API 23, which both runtimes serve.
+- **macOS first-run quarantine** — the installer clears it, but a binary
+  downloaded through a browser needs `xattr -d com.apple.quarantine
+  /path/to/mgimind`. Releases are ad-hoc signed, not notarized; on Sequoia
+  and later the right-click → Open trick no longer works for command-line
+  binaries, so use `xattr`, or approve it once under System Settings →
+  Privacy & Security.
 - **Windows** — SmartScreen may warn on the unsigned `mgimind.exe`
   ("Windows protected your PC"); choose **More info → Run anyway**.
   Antivirus can also quarantine the binary or the models it downloads; if
@@ -571,7 +578,7 @@ memories must be re-embedded:
 
 ## Status and audit
 
-Current version: **2.4.0** (semver-stable since v1.0.0). The 0.x line built
+Current version: **2.5.0** (semver-stable since v1.0.0). The 0.x line built
 the foundation: the audit log and ephemeral viewer (0.10), the quarantine
 layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
 session liveness (0.13), and procedural memory (0.14, benchmarked on

@@ -518,6 +518,13 @@ pub async fn download_model(config: &MindConfig) -> Result<()> {
 
 const ORT_VERSION: &str = "1.24.2";
 
+/// Intel macOS is frozen on 1.23.0: it is the last ONNX Runtime release that
+/// ships an `osx-x86_64` build (1.24 dropped Intel Mac from both the GitHub
+/// assets and the PyPI wheels). The binary asks for C API 23 (see the `api-23`
+/// feature on `ort` in Cargo.toml), which 1.23.0 and 1.24.2 both serve, so the
+/// two versions stay interchangeable at runtime.
+const ORT_VERSION_MACOS_X64: &str = "1.23.0";
+
 fn ort_lib_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "onnxruntime.dll"
@@ -556,7 +563,10 @@ pub fn extract_member_tar_gz(archive: &Path, member: &str, dest: &Path) -> Resul
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().to_string();
-        if path == member {
+        // Archives are not consistent about the leading "./": the ONNX Runtime
+        // osx-arm64 tarball omits it, osx-x86_64 includes it. Compare on the
+        // stripped form so one member string matches both.
+        if path.trim_start_matches("./") == member.trim_start_matches("./") {
             let etype = entry.header().entry_type();
             if matches!(etype, EntryType::Symlink | EntryType::Link) {
                 let target = entry
@@ -600,51 +610,69 @@ pub async fn download_ort_runtime() -> Result<()> {
     }
 
     let is_x64 = cfg!(target_arch = "x86_64");
-    let (os_name, archive_ext, lib_path_in_archive, expected) = if cfg!(target_os = "windows") {
-        let a = if is_x64 { "win-x64" } else { "win-arm64" };
-        (
-            format!("onnxruntime-{a}-{ORT_VERSION}"),
-            "zip",
-            format!("onnxruntime-{a}-{ORT_VERSION}/lib/onnxruntime.dll"),
-            None,
-        )
-    } else if cfg!(target_os = "macos") {
-        let a = if cfg!(target_arch = "aarch64") {
-            "osx-arm64"
+    let (version, os_name, archive_ext, lib_path_in_archive, expected) =
+        if cfg!(target_os = "windows") {
+            let a = if is_x64 { "win-x64" } else { "win-arm64" };
+            (
+                ORT_VERSION,
+                format!("onnxruntime-{a}-{ORT_VERSION}"),
+                "zip",
+                format!("onnxruntime-{a}-{ORT_VERSION}/lib/onnxruntime.dll"),
+                None,
+            )
+        } else if cfg!(target_os = "macos") {
+            if cfg!(target_arch = "aarch64") {
+                // Apple Silicon: `libonnxruntime.dylib` is a real 35 MB file in this
+                // archive, so the unversioned name is safe to ask for.
+                (
+                    ORT_VERSION,
+                    format!("onnxruntime-osx-arm64-{ORT_VERSION}"),
+                    "tgz",
+                    format!("onnxruntime-osx-arm64-{ORT_VERSION}/lib/libonnxruntime.dylib"),
+                    None,
+                )
+            } else {
+                // Intel: here `libonnxruntime.dylib` IS a symlink to the versioned
+                // file, the same trap as the linux-aarch64 archive below. Ask for
+                // the resolved name.
+                let v = ORT_VERSION_MACOS_X64;
+                (
+                    v,
+                    format!("onnxruntime-osx-x86_64-{v}"),
+                    "tgz",
+                    format!("onnxruntime-osx-x86_64-{v}/lib/libonnxruntime.{v}.dylib"),
+                    None,
+                )
+            }
+        } else if cfg!(target_arch = "aarch64") {
+            // The archive ships `libonnxruntime.so` as a SYMLINK to the versioned
+            // file (`libonnxruntime.so.1.24.2`). Extracting a tar symlink with
+            // `std::io::copy(&mut entry, &mut out)` yields a **0-byte regular
+            // file**, because tar symlinks have no body — only metadata in the
+            // header. `dlopen` then attempts the empty file and hangs forever on
+            // some platforms (Ubuntu 24.04 RunPod containers, observed
+            // 2026-06-02). Pull the actual versioned file by exact name.
+            (
+                ORT_VERSION,
+                format!("onnxruntime-linux-aarch64-{ORT_VERSION}"),
+                "tgz",
+                format!(
+                    "onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"
+                ),
+                None,
+            )
         } else {
-            "osx-x86_64"
+            (
+                ORT_VERSION,
+                format!("onnxruntime-linux-x64-{ORT_VERSION}"),
+                "tgz",
+                format!("onnxruntime-linux-x64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"),
+                integrity::pin(integrity::ORT_LINUX_X64_1_24_2),
+            )
         };
-        (
-            format!("onnxruntime-{a}-{ORT_VERSION}"),
-            "tgz",
-            format!("onnxruntime-{a}-{ORT_VERSION}/lib/libonnxruntime.dylib"),
-            None,
-        )
-    } else if cfg!(target_arch = "aarch64") {
-        // The archive ships `libonnxruntime.so` as a SYMLINK to the versioned
-        // file (`libonnxruntime.so.1.24.2`). Extracting a tar symlink with
-        // `std::io::copy(&mut entry, &mut out)` yields a **0-byte regular
-        // file**, because tar symlinks have no body — only metadata in the
-        // header. `dlopen` then attempts the empty file and hangs forever on
-        // some platforms (Ubuntu 24.04 RunPod containers, observed
-        // 2026-06-02). Pull the actual versioned file by exact name.
-        (
-            format!("onnxruntime-linux-aarch64-{ORT_VERSION}"),
-            "tgz",
-            format!("onnxruntime-linux-aarch64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"),
-            None,
-        )
-    } else {
-        (
-            format!("onnxruntime-linux-x64-{ORT_VERSION}"),
-            "tgz",
-            format!("onnxruntime-linux-x64-{ORT_VERSION}/lib/libonnxruntime.so.{ORT_VERSION}"),
-            integrity::pin(integrity::ORT_LINUX_X64_1_24_2),
-        )
-    };
 
     let url = format!(
-        "https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/{os_name}.{archive_ext}"
+        "https://github.com/microsoft/onnxruntime/releases/download/v{version}/{os_name}.{archive_ext}"
     );
 
     let tmp_dir = std::env::temp_dir().join("mgimind_ort_download");
@@ -656,7 +684,7 @@ pub async fn download_ort_runtime() -> Result<()> {
             "  [warn] no pinned checksum for this platform's ONNX Runtime - integrity not verified"
         );
     }
-    eprintln!("  Downloading ONNX Runtime v{ORT_VERSION}...");
+    eprintln!("  Downloading ONNX Runtime v{version}...");
     crate::util::download_file(&url, &archive_path, expected).await?;
 
     eprintln!("  Extracting...");
@@ -734,5 +762,38 @@ mod tests {
         let cpu = model_file_pin("multilingual-e5-base", ModelVariant::Cpu, "tokenizer.json");
         let gpu = model_file_pin("multilingual-e5-base", ModelVariant::Gpu, "tokenizer.json");
         assert_eq!(cpu, gpu);
+    }
+
+    /// The ONNX Runtime osx-x86_64 tarball stores entries as `./dir/file` while
+    /// osx-arm64 stores them as `dir/file`. An exact-string match found the
+    /// member on Apple Silicon and silently missed it on Intel.
+    #[test]
+    fn tar_member_matches_across_leading_dot_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar.gz");
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(&archive).unwrap(),
+                Default::default(),
+            );
+            let mut builder = tar::Builder::new(enc);
+            let payload = b"payload";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "./pkg/lib/libonnxruntime.1.23.0.dylib",
+                    &payload[..],
+                )
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let dest = dir.path().join("out.dylib");
+        extract_member_tar_gz(&archive, "pkg/lib/libonnxruntime.1.23.0.dylib", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
     }
 }
