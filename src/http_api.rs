@@ -1659,14 +1659,20 @@ mod tests {
     fn parse_tokens_two_part_is_unscoped() {
         let (tokens, scopes) = parse_agent_tokens(&["alice:tok123".to_string()]).unwrap();
         assert_eq!(tokens.get("tok123"), Some(&Some("alice".to_string())));
-        assert!(scopes.is_empty(), "a two-part token has full (unscoped) access");
+        assert!(
+            scopes.is_empty(),
+            "a two-part token has full (unscoped) access"
+        );
     }
 
     #[test]
     fn parse_tokens_three_part_scopes_and_trims() {
         let (_t, scopes) =
             parse_agent_tokens(&["bob:tok: projects , avtokvartal ".to_string()]).unwrap();
-        assert_eq!(scopes.get("bob").unwrap(), &libs(&["projects", "avtokvartal"]));
+        assert_eq!(
+            scopes.get("bob").unwrap(),
+            &libs(&["projects", "avtokvartal"])
+        );
     }
 
     #[test]

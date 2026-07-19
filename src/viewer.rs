@@ -248,9 +248,7 @@ async fn api_memories(
         return Err((StatusCode::BAD_REQUEST, "library param required").into_response());
     }
     if !state.lib_ok(&library) {
-        return Err(
-            (StatusCode::FORBIDDEN, "library not in the viewer allowlist").into_response(),
-        );
+        return Err((StatusCode::FORBIDDEN, "library not in the viewer allowlist").into_response());
     }
     let rows = storage::list_memories(&state.config, &library, q.limit)
         .await
@@ -748,13 +746,22 @@ mod tests {
     fn confinement_helpers_gate_correctly() {
         let open = state(&[]);
         assert!(!open.confined());
-        assert!(open.lib_ok("anything"), "unconfined viewer allows any library");
-        assert!(open.allow_broad().is_ok(), "unconfined viewer serves broad routes");
+        assert!(
+            open.lib_ok("anything"),
+            "unconfined viewer allows any library"
+        );
+        assert!(
+            open.allow_broad().is_ok(),
+            "unconfined viewer serves broad routes"
+        );
 
         let scoped = state(&["a", "b"]);
         assert!(scoped.confined());
         assert!(scoped.lib_ok("a"));
-        assert!(!scoped.lib_ok("secret"), "disallowed library must be rejected");
+        assert!(
+            !scoped.lib_ok("secret"),
+            "disallowed library must be rejected"
+        );
         assert!(
             scoped.allow_broad().is_err(),
             "confined viewer fail-closes broad/mutating routes"

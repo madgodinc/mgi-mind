@@ -3614,7 +3614,11 @@ pub async fn by_author(
         match libs {
             [one] => filter.must.push(Condition::matches("library", one.clone())),
             many => filter.must.push(
-                Filter::should(many.iter().map(|l| Condition::matches("library", l.clone()))).into(),
+                Filter::should(
+                    many.iter()
+                        .map(|l| Condition::matches("library", l.clone())),
+                )
+                .into(),
             ),
         }
     }
@@ -4152,7 +4156,10 @@ mod tests {
     fn block_name_normalizes_and_rejects_bad_input() {
         // trimmed + lowercased
         assert_eq!(normalize_block_name("  Persona ").unwrap(), "persona");
-        assert_eq!(normalize_block_name("current-project_1").unwrap(), "current-project_1");
+        assert_eq!(
+            normalize_block_name("current-project_1").unwrap(),
+            "current-project_1"
+        );
         // rejects empty, whitespace-only, too long, and disallowed chars
         assert!(normalize_block_name("").is_err());
         assert!(normalize_block_name("   ").is_err());

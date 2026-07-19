@@ -3132,7 +3132,10 @@ fn render_profile(
     if !blocks.is_empty() {
         out.push_str("## Core memory\n");
         for (n, c) in blocks {
-            out.push_str(&format!("- **{n}**: {}\n", c.lines().next().unwrap_or("").trim()));
+            out.push_str(&format!(
+                "- **{n}**: {}\n",
+                c.lines().next().unwrap_or("").trim()
+            ));
         }
         out.push('\n');
     }
@@ -3189,12 +3192,20 @@ fn render_instructions(procs: &[crate::storage::ProcedureHit]) -> String {
             instr_title(&p.trigger_context, &p.trigger_error)
         ));
         if !p.trigger_error.trim().is_empty() {
-            out.push_str(&format!("- Error signature: `{}`\n", p.trigger_error.trim()));
+            out.push_str(&format!(
+                "- Error signature: `{}`\n",
+                p.trigger_error.trim()
+            ));
         }
         if !p.fix.trim().is_empty() {
             out.push_str(&format!("- Fix: {}\n", p.fix.trim()));
         }
-        if let Some(prov) = p.provenance.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(prov) = p
+            .provenance
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(&format!("- Where: {prov}\n"));
         }
         out.push_str(&format!(
@@ -4264,7 +4275,14 @@ mod export_instructions_tests {
             status: None,
             valid: true,
         };
-        let procs = [proc("windows build", "STACK_OVERFLOW", "raise stack", None, 2, 0)];
+        let procs = [proc(
+            "windows build",
+            "STACK_OVERFLOW",
+            "raise stack",
+            None,
+            2,
+            0,
+        )];
         let out = render_profile(&blocks, &[fact], &procs);
         assert!(out.contains("## Core memory"));
         assert!(out.contains("**persona**: Mad — terse"));

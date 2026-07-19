@@ -627,10 +627,9 @@ mod tests {
                 context: "windows".into(),
             },
         ];
-        let report =
-            run_ingest_authored(&cfg, None, candidates, "projects", Some("agent-x"), true)
-                .await
-                .unwrap();
+        let report = run_ingest_authored(&cfg, None, candidates, "projects", Some("agent-x"), true)
+            .await
+            .unwrap();
         assert_eq!(report.considered, 2);
         assert_eq!(report.stored_facts, 0);
         assert_eq!(report.stored_procedures, 0);
