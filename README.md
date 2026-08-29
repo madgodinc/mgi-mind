@@ -9,9 +9,9 @@ vector database, local ONNX models. Speaks MCP, so Claude Code and other
 assistants read and write memory on their own. Also a normal CLI.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Store a fact, then recall it by meaning — a query with no shared keywords still finds it" width="900">
+  <img src="docs/demo.gif" alt="Store a fact, then recall it by meaning: a query with no shared keywords still finds it" width="900">
   <br>
-  <em>Store a fact in plain words, recall it with a query that shares none of them — semantic search matches intent. Your assistant runs the same <code>mind_search</code> on its own over MCP. Regenerate with <code>vhs docs/demo.tape</code>.</em>
+  <em>Store a fact in plain words, recall it with a query that shares none of them. Semantic search matches intent. Your assistant runs the same <code>mind_search</code> on its own over MCP. Regenerate with <code>vhs docs/demo.tape</code>.</em>
 </p>
 
 The same exchange inside an assistant:
@@ -25,8 +25,8 @@ Assistant (calls mind_search "deploy server"):
 You:  right, thanks
 ```
 
-Nothing leaves the box — embeddings, search, reranking, vault are all
-local. No cloud account, no API key, no telemetry.
+Nothing leaves the box. Embeddings, search, reranking and the vault are
+all local. No cloud account, no API key, no telemetry.
 
 ---
 
@@ -64,7 +64,7 @@ Retrieval, not just storage:
   contains that exact token through the sparse arm.
 - **Cross-encoder reranking.** Fused top candidates are re-scored by
   bge-reranker-base, which reads the query and each passage together and
-  is more accurate than comparing vectors. On by default, English-tuned —
+  is more accurate than comparing vectors. On by default and English-tuned;
   see [Languages and the reranker](#languages-and-the-reranker) for the
   trade-off on other languages.
 - **One warm process.** `mgimind mcp` is the MCP server itself: it runs
@@ -128,7 +128,7 @@ never belong in the same table.
 
 An assistant without memory asks for the same context every session and
 can't build on yesterday's work. The usual workaround is you keeping
-notes, tags, and folders — which the assistant still can't read by
+notes, tags, and folders, which the assistant still can't read by
 meaning.
 
 The thing MGI-Mind does that Obsidian and Notion don't: **the system
@@ -153,7 +153,7 @@ How it compares to the obvious alternatives:
 
 MGI-Mind is the assembled local version: hybrid + reranked retrieval, the
 relevance gate, dedup, facts, sessions, procedural memory ("error → fix"
-playbooks), and a terminal-only vault — behind one binary you run
+playbooks), and a terminal-only vault, all behind one binary you run
 yourself.
 
 A note on evaluating it. [BENCHMARKS.md](BENCHMARKS.md) reports **retrieval
@@ -255,9 +255,9 @@ a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 
 ### Installer flags
 
-- `INSTALL_DIR=/opt/mgimind curl ... | sh` — install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.5.0 curl ... | sh` — pin a specific release instead of `latest`.
-- `SKIP_DOCTOR=1 curl ... | sh` — just drop the binary; run `init` + `doctor --fix` yourself later.
+- `INSTALL_DIR=/opt/mgimind curl ... | sh`: install somewhere other than `~/.local/bin`.
+- `MGIMIND_TAG=v2.5.0 curl ... | sh`: pin a specific release instead of `latest`.
+- `SKIP_DOCTOR=1 curl ... | sh`: just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
 
@@ -281,22 +281,22 @@ mgimind search "how do I reach the deploy box"
 
 ### Per-OS notes
 
-- **Linux x86_64, macOS arm64 and x86_64, Windows x86_64** — prebuilt
+- **Linux x86_64, macOS arm64 and x86_64, Windows x86_64**: prebuilt
   binaries in every release. The installer picks the right one.
-- **macOS PATH** — zsh does not include `~/.local/bin`, so the installer
+- **macOS PATH**: zsh does not include `~/.local/bin`, so the installer
   appends the `export PATH` line to your `~/.zshrc` and tells you it did.
   Open a new terminal before typing `mgimind`. Set `MGIMIND_NO_PROFILE=1`
   to keep the installer out of your dotfiles and add the line yourself.
-- **macOS Intel and ONNX Runtime** — 1.24 dropped `osx-x86_64`, so Intel
+- **macOS Intel and ONNX Runtime**: 1.24 dropped `osx-x86_64`, so Intel
   Macs get ONNX Runtime 1.23.0 while everything else gets 1.24.2. The
   binary requests C API 23, which both runtimes serve.
-- **macOS first-run quarantine** — the installer clears it, but a binary
+- **macOS first-run quarantine**: the installer clears it, but a binary
   downloaded through a browser needs `xattr -d com.apple.quarantine
   /path/to/mgimind`. Releases are ad-hoc signed, not notarized; on Sequoia
   and later the right-click → Open trick no longer works for command-line
   binaries, so use `xattr`, or approve it once under System Settings →
   Privacy & Security.
-- **Windows** — SmartScreen may warn on the unsigned `mgimind.exe`
+- **Windows**: SmartScreen may warn on the unsigned `mgimind.exe`
   ("Windows protected your PC"); choose **More info → Run anyway**.
   Antivirus can also quarantine the binary or the models it downloads; if
   `mgimind doctor` reports a file as downloaded but missing, allow
@@ -382,7 +382,7 @@ and regions, wired by the links between them, pulsing as the store changes.
 It runs locally and is read-only over the same data.
 
 <p align="center">
-  <img src="https://github.com/madgodinc/mgi-mind/releases/download/media-assets/brain-demo.gif" alt="Memory rendered as a brain — glowing cores wired by neurons" width="760">
+  <img src="https://github.com/madgodinc/mgi-mind/releases/download/media-assets/brain-demo.gif" alt="Memory rendered as a brain, glowing cores wired by neurons" width="760">
 </p>
 
 ## How it works
@@ -404,7 +404,7 @@ It runs locally and is read-only over the same data.
 on each point separates namespaces (work, personal, a project), and a
 query can filter to one library or search across all. A point's ID is a
 UUIDv5 of `library + content`, so adding the same text twice overwrites
-the same point — no duplicates, no race. A `created_at` datetime index
+the same point, with no duplicates and no race. A `created_at` datetime index
 lets `history` return the newest N directly without scanning.
 
 **Embeddings.** Text is embedded locally through ONNX Runtime. Default is
@@ -423,7 +423,7 @@ given, applies to both arms.
 
 **Safety.** Downloads check against pinned SHA-256 hashes (fail-closed).
 Qdrant binds to loopback only and can require an API key. The vault is
-terminal-only — the master password and decrypted secrets never travel
+terminal-only, and the master password and decrypted secrets never travel
 over the MCP channel. File writes are atomic (temp file, fsync, rename,
 fsync the directory), so a crash leaves the old file or the new one,
 never a corrupt one.
@@ -479,7 +479,7 @@ never a corrupt one.
 | Command | What it does |
 |---|---|
 | `mgimind mcp` | Run as the MCP server over stdio (what your assistant connects to). One warm process; starts Qdrant automatically. |
-| `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant by hand (rarely needed — `mcp` does it for you). |
+| `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant by hand (rarely needed, `mcp` does it for you). |
 | `mgimind migrate [--purge]` | Re-embed legacy per-library collections into the single `memories` collection. Idempotent. `--purge` deletes the old collections afterward. |
 | `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar of the whole data directory. |
 | `mgimind export [--format json\|md] [--output <dir>]` | Export memories to files. |
@@ -522,7 +522,7 @@ A few honest details:
   set `rerank_enabled = false`. Hybrid dense+sparse search on its own
   ranks those languages well; the English-tuned reranker is what hurts
   them. Or swap in a stronger multilingual reranker.
-- Reranking costs cross-encoder inference per query — roughly one to two
+- Reranking costs cross-encoder inference per query: roughly one to two
   seconds for 20 candidates on a CPU-only box. Lower `rerank_top_k` or
   turn reranking off for snappier search.
 
@@ -543,24 +543,31 @@ memories must be re-embedded:
 
 ## Troubleshooting
 
-- **"Model not found ... run doctor --fix"** — the model is not in
+- **"Model not found ... run doctor --fix"**: the model is not in
   `~/mgimind/models/`. Run `mgimind doctor --fix`.
-- **"invalid expand shape" / inference errors** — usually an input far
+- **"invalid expand shape" / inference errors**: usually an input far
   over 512 tokens. `add` chunks automatically; if you call the library
   directly, chunk first.
-- **Searches are slow** — that's the reranker on CPU. Lower
+- **Searches are slow**: that's the reranker on CPU. Lower
   `rerank_top_k`, or set `rerank_enabled = false`. Models stay warm for
   the life of the `mgimind mcp` process, so only the first lookup of a
   session pays the load cost.
-- **A tool fails right after install** — run `mgimind doctor` (the
+- **A tool fails right after install**: run `mgimind doctor` (the
   assistant can call `mind_doctor`); it reports exactly what's missing
   (Qdrant not running, a model not downloaded, ONNX Runtime absent, a
   file quarantined by AV) and `--fix` downloads what it can.
-- **Dimension mismatch warning** — a collection's vectors don't match
+- **Dimension mismatch warning**: a collection's vectors don't match
   `vector_size`, usually after a model change. Re-embed with
   `mgimind migrate`.
-- **Russian results feel off** — set `rerank_enabled = false` (see the
+- **Russian results feel off**: set `rerank_enabled = false` (see the
   language note above).
+- **A VPN, tunnel or proxy breaks while mgimind is running**: run
+  `mgimind doctor` and read the network footprint. Every mgimind port is
+  loopback-bound, and mgimind changes no route, DNS or firewall setting, so
+  it cannot pull traffic out of a tunnel. Look at what starts alongside it:
+  Docker Desktop and WSL2 add virtual adapters of their own, and TUN clients
+  with strict routing can drop the tunnel when an adapter appears or
+  disappears.
 
 ## Security
 
@@ -569,12 +576,33 @@ memories must be re-embedded:
   Other platforms and custom models warn instead of trusting blindly.
 - Qdrant binds to `127.0.0.1` only and supports an API key.
 - The vault is AES-256-GCM with an Argon2id-derived key (parameters
-  pinned so a library upgrade can't lock you out). Terminal-only — the
+  pinned so a library upgrade can't lock you out). Terminal-only, so the
   master password and decrypted secrets never travel over the MCP
   channel. The `mind_vault_*` MCP tools return terminal instructions,
   never the secret value.
-- File writes are atomic and directory-fsynced — a crash leaves the old
+- File writes are atomic and directory-fsynced, so a crash leaves the old
   file or the new one, never a corrupt one.
+
+### Network footprint
+
+Every socket mgi-mind opens is bound to loopback:
+
+| Component | Port | Bind |
+|---|---|---|
+| Qdrant HTTP | 6333 | `127.0.0.1` |
+| Qdrant gRPC | `qdrant_port`, 6334 by default | `127.0.0.1` |
+| `mind_visualize` | 4173 | `127.0.0.1` |
+| `mgimind viewer` | random, printed at startup | `127.0.0.1` |
+| `mgimind serve-http` | random, or `--port` | `127.0.0.1` unless `--host` |
+
+`serve-http --host` is the one way to bind another interface (a Docker `-p`
+mapping needs it), and a non-loopback host is refused unless you also pass
+`--agent-token`.
+
+mgimind installs no driver, adds no network adapter, and changes no route,
+DNS or firewall setting. `mgimind doctor` prints this footprint with a live
+probe of every port, so the claim is something you can check rather than
+trust.
 
 ## Status and audit
 

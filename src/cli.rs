@@ -1115,13 +1115,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             libraries,
         } => {
             let config = crate::config::MindConfig::load()
-                .context("Failed to load config — run `mgimind init` first")?;
+                .context("Failed to load config: run `mgimind init` first")?;
             crate::viewer::run_on(config, !no_open, port, token, libraries).await
         }
         Commands::Brain => {
             // Friendly alias for `viewer` — opens the 3D memory visualization.
             let config = crate::config::MindConfig::load()
-                .context("Failed to load config — run `mgimind init` first")?;
+                .context("Failed to load config: run `mgimind init` first")?;
             crate::viewer::run(config, true).await
         }
         Commands::Calibrate => {
@@ -1138,7 +1138,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             // own (and inside a container, where nothing else launches Qdrant).
             ensure_qdrant_running().await?;
             let config = crate::config::MindConfig::load()
-                .context("Failed to load config — run `mgimind init` first")?;
+                .context("Failed to load config: run `mgimind init` first")?;
             // v2.0 fail-closed: a same-dimension embedding-model swap silently
             // corrupts search. Refuse to serve a mismatched store rather than hand
             // agents garbage neighbours.
@@ -1164,7 +1164,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
 async fn cmd_ingest_session(path: &str, library: &str) -> Result<()> {
     let config = crate::config::MindConfig::load()
-        .context("Failed to load config — run `mgimind init` first")?;
+        .context("Failed to load config: run `mgimind init` first")?;
     // Ensure target library exists (idempotent).
     let _ = crate::storage::create_library(&config, library).await;
     let report =
@@ -1197,7 +1197,7 @@ async fn cmd_quarantine_promote(id: &str) -> Result<()> {
     if crate::storage::promote_from_quarantine(&config, id).await? {
         println!("Promoted '{id}' from quarantine to ordinary memory.");
     } else {
-        println!("Nothing to promote — '{id}' is not in quarantine.");
+        println!("Nothing to promote: '{id}' is not in quarantine.");
     }
     Ok(())
 }
@@ -1206,12 +1206,12 @@ async fn cmd_quarantine_expire(id: &str) -> Result<()> {
     let config = crate::config::load_cached()?;
     if crate::storage::expire_from_quarantine(&config, id).await? {
         println!(
-            "Expired '{id}' — confirmed the gate was right. Removed from quarantine \
+            "Expired '{id}': confirmed the gate was right. Removed from quarantine \
              (content + reason recorded in the audit log first, when audit is enabled)."
         );
     } else {
         println!(
-            "Nothing to expire — '{id}' is not in quarantine. \
+            "Nothing to expire: '{id}' is not in quarantine. \
              (Live memory is never touched here; use `mgimind delete` for that.)"
         );
     }
@@ -1262,7 +1262,7 @@ pub(crate) fn render_quarantine_entry(e: &crate::storage::QuarantineEntry) -> St
 
 async fn cmd_ingest(library: &str, raw: Option<&str>, memory: Vec<String>) -> Result<()> {
     let config = crate::config::MindConfig::load()
-        .context("Failed to load config — run `mgimind init` first")?;
+        .context("Failed to load config: run `mgimind init` first")?;
     // Ensure target library exists (idempotent).
     let _ = crate::storage::create_library(&config, library).await;
     let candidates: Vec<crate::ingest::Candidate> = memory
@@ -1406,7 +1406,7 @@ async fn cmd_audit_writes(since_hours: Option<i64>, limit: usize) -> Result<()> 
     };
     println!("Write outcomes ({window}):");
     println!("  stored:          {stored}");
-    println!("  near-dup skip:   {dup}   (UNRECOVERABLE — most likely place a write was lost)");
+    println!("  near-dup skip:   {dup}   (UNRECOVERABLE: most likely place a write was lost)");
     println!("  quarantined:     {quar}   (recoverable: mind_quarantine action=promote)");
     println!("  secret-skipped:  {secret}   (content intentionally not logged)");
 
@@ -1428,7 +1428,7 @@ async fn cmd_audit_writes(since_hours: Option<i64>, limit: usize) -> Result<()> 
             .to_string();
         let note = ev.note.as_deref().unwrap_or("");
         let content = ev.after.as_deref().unwrap_or("(no content recorded)");
-        println!("\n  [{op}] {} — {note}", ev.ts);
+        println!("\n  [{op}] {}: {note}", ev.ts);
         println!("    {content}");
     }
     Ok(())
@@ -1592,7 +1592,7 @@ async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
     // only by reading the report's cold_pruned=0 line.
     if prune_cold && archive_cold {
         eprintln!(
-            "note: both --prune-cold and --archive-cold given; archiving (reversible) wins — \
+            "note: both --prune-cold and --archive-cold given; archiving (reversible) wins: \
              nothing is deleted. Drop --archive-cold to actually delete.\n"
         );
     }
@@ -1630,9 +1630,9 @@ async fn cmd_consolidate(opts: crate::consolidate::Options) -> Result<()> {
 async fn cmd_restore_memory(id: &str) -> Result<()> {
     let config = crate::config::load_cached()?;
     if crate::storage::restore_memory(&config, id).await? {
-        println!("Restored '{id}' from archive — it is back in search.");
+        println!("Restored '{id}' from archive: it is back in search.");
     } else {
-        println!("Nothing to restore — '{id}' is not an archived memory.");
+        println!("Nothing to restore: '{id}' is not an archived memory.");
     }
     Ok(())
 }
@@ -1704,11 +1704,11 @@ async fn cmd_reindex(yes: bool) -> Result<()> {
     match &report.backup_path {
         Some(path) => println!(
             "Safety snapshot (JSON, one file per library) in {}. It holds every \
-             memory's id, content, and metadata — your recovery point if the rebuild \
+             memory's id, content, and metadata: your recovery point if the rebuild \
              looks wrong. Safe to delete once you've verified the result.",
             path.display()
         ),
-        None => println!("No existing memories — nothing to back up."),
+        None => println!("No existing memories: nothing to back up."),
     }
     Ok(())
 }
@@ -1718,7 +1718,7 @@ async fn cmd_reindex(yes: bool) -> Result<()> {
 async fn cmd_migrate_v14_dependants(threshold: f32, apply: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
     println!(
-        "v1.4 Phase 1.1 — counting dependants per fact (cosine threshold = {threshold}{}).",
+        "v1.4 Phase 1.1: counting dependants per fact (cosine threshold = {threshold}{}).",
         if apply {
             ", writing back to payloads"
         } else {
@@ -1747,7 +1747,7 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
         .join("cardinality-proposals.json");
     let output_path = output.map(std::path::PathBuf::from).unwrap_or(default_path);
     println!(
-        "v1.4 Phase 1.2 — inferring predicate cardinalities → {}",
+        "v1.4 Phase 1.2: inferring predicate cardinalities → {}",
         output_path.display()
     );
     let n = crate::migrate_v14::run_cardinality_inference(&config, output_path.clone()).await?;
@@ -1833,7 +1833,7 @@ fn cmd_calibrate() {
         println!("  no divergences: every scenario matches intent.");
     } else {
         println!(
-            "  documented divergences ({}/{} frozen) — known gaps between the",
+            "  documented divergences ({}/{} frozen): known gaps between the",
             report.misses.len(),
             crate::calibration::DIVERGENCES.len(),
         );
@@ -1845,7 +1845,7 @@ fn cmd_calibrate() {
     }
     println!(
         "\nThis measures the SHAPE of the model, not that the constants are tuned\n\
-         against real data (they are not — see TODO(phase-4-calibration)). Retrieval\n\
+         against real data (they are not; see TODO(phase-4-calibration)). Retrieval\n\
          recall (R@k) is the separately measured number; see BENCHMARKS.md."
     );
 }
@@ -1871,7 +1871,7 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
     let config = crate::config::load_cached()?;
 
     println!(
-        "v1.7 #111 — re-judging legacy facts against current cardinality registry{}.",
+        "v1.7 #111: re-judging legacy facts against current cardinality registry{}.",
         if apply { ", writing back" } else { ", dry-run" }
     );
 
@@ -2025,7 +2025,7 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
 async fn cmd_migrate_v14_confirmations(apply: bool) -> Result<()> {
     let config = crate::config::load_cached()?;
     println!(
-        "v1.4 Phase 1.3 — backfilling confirmations from derivable signals{}.",
+        "v1.4 Phase 1.3: backfilling confirmations from derivable signals{}.",
         if apply {
             ", writing back"
         } else {
@@ -2410,7 +2410,7 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
                         issues += 1;
                         let _ = writeln!(
                             out,
-                            "[INFO] {n_pending} High-confidence cardinality proposal(s) waiting — run `mgimind doctor --fix` or `mgimind migrate-v14 cardinality --apply`"
+                            "[INFO] {n_pending} High-confidence cardinality proposal(s) waiting: run `mgimind doctor --fix` or `mgimind migrate-v14 cardinality --apply`"
                         );
                     }
                 }
@@ -2473,7 +2473,7 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         } else {
             let _ = writeln!(
                 out,
-                "[INFO] install-mode: {} [d={:.2} c={:.2} e={:.2}] (auto-detect recommends: {} — run `mgimind config set-install-mode {}` to apply)",
+                "[INFO] install-mode: {} [d={:.2} c={:.2} e={:.2}] (auto-detect recommends: {}: run `mgimind config set-install-mode {}` to apply)",
                 cfg.install_mode.as_str(),
                 weights.dependants,
                 weights.confirmations,
@@ -2483,6 +2483,10 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
             );
         }
     }
+
+    let (net_report, net_issues) = network_section();
+    out.push_str(&net_report);
+    issues += net_issues;
 
     if issues == 0 && fixed == 0 {
         let _ = write!(out, "\nAll checks passed.");
@@ -2501,6 +2505,89 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
     }
 
     Ok(out)
+}
+
+/// Best-effort primary IP of this host, found without sending a packet:
+/// connecting a UDP socket only makes the kernel pick a route and bind a source
+/// address. None when there is no route at all (offline machine) or the route
+/// resolves to loopback; the caller then skips the off-loopback probe instead of
+/// reporting a guess as a fact.
+fn primary_local_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // TEST-NET-1 (RFC 5737): reserved for documentation, routed nowhere.
+    sock.connect("192.0.2.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// True when something accepts a TCP connection on `addr` within `ms`.
+/// A firewall that drops instead of refusing reads as "closed", which is the
+/// answer that matters here: nothing off this machine can reach the port either.
+fn tcp_answers(addr: std::net::SocketAddr, ms: u64) -> bool {
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(ms)).is_ok()
+}
+
+/// One report line per port. Pure, so the wording stays testable without a
+/// network: `exposed_on` is the host IP the port also answered on, if any.
+fn port_line(
+    name: &str,
+    port: u16,
+    listening: bool,
+    exposed_on: Option<std::net::IpAddr>,
+) -> String {
+    match (listening, exposed_on) {
+        (false, _) => format!("[--]   {name:<12} :{port} not running\n"),
+        (true, None) => format!("[OK]   {name:<12} :{port} listening, loopback only\n"),
+        (true, Some(ip)) => format!(
+            "[WARN] {name:<12} :{port} also answers on {ip}, so it is reachable from the network.\n\
+             \x20      mgimind binds 127.0.0.1, so check what else holds this port or what\n\
+             \x20      forwards to it.\n"
+        ),
+    }
+}
+
+/// Report every socket mgi-mind can open and prove the live ones answer on
+/// loopback only. A bug report once blamed a broken VPN tunnel on mgimind
+/// "listening on 0.0.0.0" and recommended moving the store to another host on
+/// that basis. Nothing here binds a non-loopback interface unless `serve-http
+/// --host` asks for it, and a user has to be able to verify that in one command
+/// rather than take the README's word for it.
+fn network_section() -> (String, usize) {
+    use std::fmt::Write;
+    use std::net::SocketAddr;
+
+    // The bundled Qdrant keeps its own default HTTP port; only the gRPC port the
+    // client dials is configurable.
+    let grpc = crate::config::load_cached()
+        .map(|c| c.qdrant_port)
+        .unwrap_or(6334);
+    let host_ip = primary_local_ip();
+
+    let mut out = String::from("\nNetwork footprint:\n");
+    let mut issues = 0;
+    for (name, port) in [
+        ("Qdrant HTTP", 6333u16),
+        ("Qdrant gRPC", grpc),
+        ("Visualizer", 4173),
+    ] {
+        let listening = tcp_answers(SocketAddr::from(([127, 0, 0, 1], port)), 300);
+        let exposed = match (listening, host_ip) {
+            (true, Some(ip)) if tcp_answers(SocketAddr::new(ip, port), 300) => Some(ip),
+            _ => None,
+        };
+        if exposed.is_some() {
+            issues += 1;
+        }
+        out.push_str(&port_line(name, port, listening, exposed));
+    }
+    let _ = writeln!(
+        out,
+        "[INFO] serve-http and viewer take a random loopback port unless you pass --port.\n\
+         \x20      serve-http binds 127.0.0.1 unless started with --host, and a non-loopback\n\
+         \x20      --host is refused without --agent-token.\n\
+         [INFO] mgimind installs no driver and changes no route, DNS or firewall setting."
+    );
+    (out, issues)
 }
 
 async fn cmd_create(name: &str) -> Result<()> {
@@ -2634,7 +2721,7 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
     } else {
         let _ = writeln!(
             out,
-            "  This store is your source of truth. Before acting on anything about [{}], search it first (mind_search) — treat your own recollection as a draft to verify.",
+            "  This store is your source of truth. Before acting on anything about [{}], search it first (mind_search): treat your own recollection as a draft to verify.",
             user_libs.join(", ")
         );
     }
@@ -2686,7 +2773,7 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "[Quarantine: {total} entries set aside ({by_reason}) — \
+            "[Quarantine: {total} entries set aside ({by_reason}): \
              review with mind_quarantine(action=\"list\"), \
              keep with action=\"promote\", drop with action=\"expire\"]"
         );
@@ -2841,7 +2928,7 @@ pub(crate) fn render_records(records: &[crate::storage::MemoryRecord], truncated
     if truncated {
         let _ = writeln!(
             out,
-            "(scan hit the cap; this is a window, not the whole set — narrow with \
+            "(scan hit the cap; this is a window, not the whole set: narrow with \
              --since/--before/--library or a tighter filter)"
         );
     }
@@ -2962,7 +3049,7 @@ pub(crate) async fn run_session_start(agent: &str) -> Result<String> {
              mind_session_end (kill/Ctrl-C/crash). The session file is at:\n    \
              {}\n  \
              If you remember what it was, you can append a real summary to that file \
-             manually — the new session is separate.",
+             manually, since the new session is separate.",
             r.path.display()
         ));
     }
@@ -3004,11 +3091,11 @@ async fn cmd_backup(output: &str, encrypt: bool) -> Result<()> {
         let pass = crate::vault::prompt_password("Set backup passphrase: ")?;
         let confirm = crate::vault::prompt_password("Confirm backup passphrase: ")?;
         if pass != confirm {
-            anyhow::bail!("Passphrases do not match — backup aborted.");
+            anyhow::bail!("Passphrases do not match: backup aborted.");
         }
         println!("Backing up (encrypted) to {output}...");
         crate::storage::backup_encrypted(output, &pass)?;
-        println!("Encrypted backup complete. Keep the passphrase safe — it cannot be recovered.");
+        println!("Encrypted backup complete. Keep the passphrase safe: it cannot be recovered.");
     } else {
         println!("Backing up to {output}...");
         crate::storage::backup(output)?;
@@ -3156,7 +3243,7 @@ fn render_profile(
         out.push('\n');
     }
     if out.trim() == "# Profile (mgi-mind)" {
-        out.push_str("_Empty profile — no blocks, facts, or verified procedures yet._\n");
+        out.push_str("_Empty profile: no blocks, facts, or verified procedures yet._\n");
     }
     out
 }
@@ -3241,7 +3328,7 @@ pub(crate) async fn run_import(
     }
 
     let config = crate::config::MindConfig::load()
-        .context("Failed to load config — run `mgimind init` first")?;
+        .context("Failed to load config: run `mgimind init` first")?;
 
     // Ensure the library exists; ignore "already exists" since import is
     // typically rerun.
@@ -3824,7 +3911,7 @@ async fn cmd_config(what: ConfigCmd) -> Result<()> {
 
 async fn cmd_config_install_mode_show() -> Result<()> {
     let config = crate::config::MindConfig::load()
-        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
+        .with_context(|| "config not initialised: run `mgimind init` first".to_string())?;
     let weights = config.install_mode.weights();
     println!(
         "install-mode: {} [dependants={:.2} confirmations={:.2} external={:.2}]",
@@ -3855,14 +3942,14 @@ async fn cmd_config_install_mode_show() -> Result<()> {
 async fn cmd_config_install_mode_set(mode_str: &str) -> Result<()> {
     let new_mode = crate::install_mode::InstallMode::parse(mode_str).ok_or_else(|| {
         anyhow::anyhow!(
-            "unknown install-mode '{mode_str}' — expected one of: chat-only, dev-with-ci, multi-tenant"
+            "unknown install-mode '{mode_str}': expected one of: chat-only, dev-with-ci, multi-tenant"
         )
     })?;
     let mut config = crate::config::MindConfig::load()
-        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
+        .with_context(|| "config not initialised: run `mgimind init` first".to_string())?;
     let old = config.install_mode;
     if old == new_mode {
-        println!("install-mode already {} — no change", new_mode.as_str());
+        println!("install-mode already {}: no change", new_mode.as_str());
         return Ok(());
     }
     config.install_mode = new_mode;
@@ -3885,12 +3972,12 @@ async fn cmd_outcome(
 ) -> Result<()> {
     let signal_type = crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
         anyhow::anyhow!(
-            "unknown signal_type '{signal_type_str}' — expected one of: \
+            "unknown signal_type '{signal_type_str}': expected one of: \
                  test_passed, code_compiled, user_confirmed, cited_by"
         )
     })?;
     let cfg = crate::config::MindConfig::load()
-        .with_context(|| "config not initialised — run `mgimind init` first".to_string())?;
+        .with_context(|| "config not initialised: run `mgimind init` first".to_string())?;
     let signal = crate::outcome::ExternalSignal {
         signal_type,
         success,
@@ -3952,7 +4039,7 @@ async fn cmd_facts_list(
                     .cmp(a.0.created_at.as_deref().unwrap_or(""))
             });
         }
-        other => anyhow::bail!("unknown sort '{other}' — expected: dependants, created"),
+        other => anyhow::bail!("unknown sort '{other}': expected: dependants, created"),
     }
 
     decorated.truncate(limit);
@@ -4264,7 +4351,7 @@ mod export_instructions_tests {
     #[test]
     fn profile_composes_blocks_facts_and_procedures() {
         let mut blocks = std::collections::BTreeMap::new();
-        blocks.insert("persona".to_string(), "Mad — terse".to_string());
+        blocks.insert("persona".to_string(), "Mad: terse".to_string());
         let fact = Fact {
             id: "f".into(),
             subject: "Mad".into(),
@@ -4285,7 +4372,7 @@ mod export_instructions_tests {
         )];
         let out = render_profile(&blocks, &[fact], &procs);
         assert!(out.contains("## Core memory"));
-        assert!(out.contains("**persona**: Mad — terse"));
+        assert!(out.contains("**persona**: Mad: terse"));
         assert!(out.contains("## Facts (1)"));
         assert!(out.contains("Mad builds mgi-mind"));
         assert!(out.contains("## Verified procedures (1)"));
@@ -4359,3 +4446,64 @@ mod redo_duels_tests {
         assert_eq!(v[2].id, "z");
     }
 }
+
+#[cfg(test)]
+mod network_section_tests {
+    use super::{network_section, port_line, primary_local_ip, tcp_answers};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
+
+    #[test]
+    fn a_closed_port_is_reported_as_not_running() {
+        let line = port_line("Qdrant HTTP", 6333, false, None);
+        assert!(line.starts_with("[--]"), "{line}");
+        assert!(line.contains(":6333 not running"), "{line}");
+    }
+
+    #[test]
+    fn a_loopback_only_port_is_reported_ok() {
+        let line = port_line("Qdrant gRPC", 6334, true, None);
+        assert!(line.starts_with("[OK]"), "{line}");
+        assert!(line.contains("loopback only"), "{line}");
+    }
+
+    #[test]
+    fn a_port_answering_off_loopback_warns_and_names_the_address() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        let line = port_line("Visualizer", 4173, true, Some(ip));
+        assert!(line.starts_with("[WARN]"), "{line}");
+        assert!(line.contains("192.168.1.5"), "{line}");
+    }
+
+    #[test]
+    fn tcp_answers_distinguishes_a_live_listener_from_a_closed_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        assert!(tcp_answers(addr, 500));
+        drop(listener);
+        assert!(!tcp_answers(addr, 500));
+    }
+
+    #[test]
+    fn the_probe_address_is_never_loopback() {
+        // Offline CI has no route and gets None; either answer is valid, but a
+        // loopback address would make the off-loopback probe meaningless.
+        if let Some(ip) = primary_local_ip() {
+            assert!(!ip.is_loopback(), "{ip}");
+        }
+    }
+
+    #[test]
+    fn the_section_lists_every_port_and_never_fails_on_a_quiet_machine() {
+        let (report, issues) = network_section();
+        assert!(report.contains("Network footprint:"), "{report}");
+        for name in ["Qdrant HTTP", "Qdrant gRPC", "Visualizer", "serve-http"] {
+            assert!(report.contains(name), "missing {name} in:\n{report}");
+        }
+        // Ports we do not hold cannot raise an issue; ports we do hold are
+        // loopback-bound, so a clean machine scores zero either way.
+        assert_eq!(issues, 0, "{report}");
+    }
+}
+// A test that binds 0.0.0.0 to watch the probe catch it is deliberately absent:
+// it pops the Windows firewall dialog on contributors' machines and fails
+// wherever inbound traffic is filtered, which says nothing about our code.

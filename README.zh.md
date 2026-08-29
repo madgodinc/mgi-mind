@@ -17,7 +17,7 @@ CLI 工具。
 你：  好的，谢了
 ```
 
-数据不离开本机 — 嵌入、检索、重排、vault 全部本地运行。无云端账号、无 API
+数据不离开本机：嵌入、检索、重排、vault 全部本地运行。无云端账号、无 API
 密钥、无遥测。
 
 ---
@@ -52,7 +52,7 @@ MGI-Mind 位于你与助手之间。助手在对话中写下简短笔记（"记�
   "服务器盒子" 通过稠密路找到 "deploy host"；`fossilize_replay`
   通过稀疏路找到唯一包含该词项的笔记。
 - **交叉编码器重排。** 融合后的候选会被 bge-reranker-base 重新评分，
-  它把查询与段落一起读，比单纯比较向量更准。默认开启，英文优化 — 关于其他
+  它把查询与段落一起读，比单纯比较向量更准。默认开启，英文优化；关于其他
   语言上的权衡，见 [语言与重排器](#语言与重排器)。
 - **一个常驻进程。** `mgimind mcp` 本身就是 MCP 服务器：整个会话期间保持
   运行，模型加载一次后常驻内存，一次查询是毫秒级而不是每次重新加载模型。
@@ -63,7 +63,7 @@ MGI-Mind 位于你与助手之间。助手在对话中写下简短笔记（"记�
 ## 为什么用它
 
 没有记忆的助手每次会话都需要重新给上下文，无法在昨天的工作之上继续。常见的
-变通方式是你自己维护笔记、标签和文件夹——但助手仍然无法按语义读它们。
+变通方式是你自己维护笔记、标签和文件夹，但助手仍然无法按语义读它们。
 
 MGI-Mind 与 Obsidian、Notion 的根本区别：**系统决定写下什么，不是你。**
 MCP 服务器实时读助手在做什么，并通过相关性门把事实、决策、修复路由进存储。
@@ -81,7 +81,7 @@ MCP 服务器实时读助手在做什么，并通过相关性门把事实、决�
   相关性门实际在做什么的可检查性。
 
 MGI-Mind 是组装好的本地版本：混合 + 重排检索、相关性门、去重、事实、会话、
-程序性记忆（"错误 → 修复"剧本）、终端 vault — 全部封装在你自己运行的一个
+程序性记忆（"错误 → 修复"剧本）、终端 vault，全部封装在你自己运行的一个
 程序里。
 
 ## 快速开始
@@ -119,9 +119,9 @@ claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
 
 ### 安装器选项
 
-- `INSTALL_DIR=/opt/mgimind curl ... | sh` — 装到非 `~/.local/bin` 的位置。
-- `MGIMIND_TAG=v2.5.0 curl ... | sh` — 锁定具体版本，而不是 `latest`。
-- `SKIP_DOCTOR=1 curl ... | sh` — 只放下程序；之后自己运行 `init` + `doctor --fix`。
+- `INSTALL_DIR=/opt/mgimind curl ... | sh`：装到非 `~/.local/bin` 的位置。
+- `MGIMIND_TAG=v2.5.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
+- `SKIP_DOCTOR=1 curl ... | sh`：只放下程序；之后自己运行 `init` + `doctor --fix`。
 
 ### 手动安装（不用脚本）
 
@@ -144,20 +144,20 @@ mgimind search "如何连接部署服务器"
 
 ### 平台说明
 
-- **Linux x86_64、macOS arm64 和 x86_64、Windows x86_64** —
+- **Linux x86_64、macOS arm64 和 x86_64、Windows x86_64**：
   每个版本都有预编译程序。安装器会自动选对。
-- **macOS PATH** — zsh 不会把 `~/.local/bin` 加入 PATH，所以安装器会把
+- **macOS PATH**：zsh 不会把 `~/.local/bin` 加入 PATH，所以安装器会把
   `export PATH` 写进 `~/.zshrc` 并告知你。输入 `mgimind` 前请开一个新终端。
   设置 `MGIMIND_NO_PROFILE=1` 可让安装器不碰你的配置文件。
-- **macOS Intel 与 ONNX Runtime** — 1.24 起不再提供 `osx-x86_64` 构建，
+- **macOS Intel 与 ONNX Runtime**：1.24 起不再提供 `osx-x86_64` 构建，
   因此 Intel Mac 使用 ONNX Runtime 1.23.0，其余平台使用 1.24.2。
   程序请求 C API 23，两个版本都能提供。
-- **macOS 首次运行检疫** — 安装器会自动清除，但通过浏览器下载的程序需要
+- **macOS 首次运行检疫**：安装器会自动清除，但通过浏览器下载的程序需要
   `xattr -d com.apple.quarantine /path/to/mgimind`。发布版为 ad-hoc 签名而非
   公证；从 Sequoia 起，右键 → 打开 对命令行程序已失效，请用 `xattr`，
   或在系统设置 → 隐私与安全性中放行一次。
-- **Windows** — SmartScreen 可能对未签名的 `mgimind.exe` 发出警告
-  （"Windows protected your PC"）— 选择 **More info → Run anyway**。
+- **Windows**：SmartScreen 可能对未签名的 `mgimind.exe` 发出警告
+  （"Windows protected your PC"），选择 **More info → Run anyway**。
   杀毒软件也可能隔离程序或它下载的模型；如果 `mgimind doctor` 报告某文件
   已下载但缺失，在 AV 中允许 `mgimind.exe` 和 `%USERPROFILE%\mgimind`
   文件夹，然后重跑 `mgimind doctor --fix`。代码签名以去掉 SmartScreen
@@ -226,12 +226,12 @@ mgimind stats                          # 各库、事实、会话的计数
 **存储。** 所有记忆都在一个 Qdrant 集合里。每个点上的 `library` 字段分隔
 命名空间（work、personal、某个项目），查询可以过滤到一个库，也可以跨所有
 库。点的 ID 是 `library + content` 的 UUIDv5，所以同样的文本添加两次只是
-覆盖同一个点——没有重复、没有竞态。`created_at` 的 datetime 索引让
+覆盖同一个点，没有重复、没有竞态。`created_at` 的 datetime 索引让
 `history` 直接返回最新 N 条，不必扫描全部。
 
 **嵌入。** 文本通过 ONNX Runtime 在本地嵌入。默认是 multilingual-e5-base
 （768 维），英文强，也能处理混合语言。嵌入器模型敏感：池化方式（mean
-或 CLS）、`token_type_ids` 输入、query/passage 前缀——都在配置里，
+或 CLS）、`token_type_ids` 输入、query/passage 前缀都在配置里，
 换模型不需要改代码。输入限制 512 个 token；`add` 会把长文本切分，
 不会让超出上限的部分静默丢失。
 
@@ -241,7 +241,7 @@ mgimind stats                          # 各库、事实、会话的计数
 两路。
 
 **安全。** 下载会对照 pinned SHA-256 校验（fail-closed）。Qdrant 只绑定
-到 loopback，可以要求 API key。Vault 只在终端使用——主密码与解密后的
+到 loopback，可以要求 API key。Vault 只在终端使用，主密码与解密后的
 秘密永远不会经过 MCP 通道。文件写入是原子的（临时文件、fsync、rename、
 fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文件，绝不会是
 损坏的文件。
@@ -297,7 +297,7 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 | 命令 | 作用 |
 |---|---|
 | `mgimind mcp` | 以 stdio 模式运行 MCP 服务器（助手连接的就是这个）。一个常驻进程；自动启动 Qdrant。 |
-| `mgimind serve` / `mgimind stop` | 手动启动 / 停止内置 Qdrant（一般不用——`mcp` 会自己处理）。 |
+| `mgimind serve` / `mgimind stop` | 手动启动 / 停止内置 Qdrant（一般不用，`mcp` 会自己处理）。 |
 | `mgimind migrate [--purge]` | 把老的按库分开的集合重新嵌入到统一的 `memories` 集合。幂等。`--purge` 会在之后删除老集合。 |
 | `mgimind backup <file>` / `mgimind restore <file>` | 整个数据目录的 gzip+tar。 |
 | `mgimind export [--format json\|md] [--output <dir>]` | 把记忆导出到文件。 |
@@ -336,7 +336,7 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 - **如果你的内容主要是中文（或其他非英文语言）：** 设
   `rerank_enabled = false`。混合稠密+稀疏检索本身就能很好地排序这些
   语言；正是英文调优的重排器在拖累它们。或者换一个更强的多语言重排器。
-- 重排每个查询都要做交叉编码器推理——20 个候选在纯 CPU 机器上大约
+- 重排每个查询都要做交叉编码器推理：20 个候选在纯 CPU 机器上大约
   1-2 秒。降低 `rerank_top_k` 或关掉重排可让检索更快。
 
 ## 更换嵌入模型
@@ -353,19 +353,24 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 
 ## 故障排查
 
-- **"Model not found ... run doctor --fix"** — `~/mgimind/models/`
+- **"Model not found ... run doctor --fix"**：`~/mgimind/models/`
   里没有那个模型。运行 `mgimind doctor --fix`。
-- **"invalid expand shape" / 推理错误** — 通常是输入远超 512 tokens。
+- **"invalid expand shape" / 推理错误**：通常是输入远超 512 tokens。
   `add` 会自动切分；如果直接调库，请先切分。
-- **检索慢** — 是 CPU 上的重排器。降低 `rerank_top_k`，或设
+- **检索慢**：是 CPU 上的重排器。降低 `rerank_top_k`，或设
   `rerank_enabled = false`。模型在 `mgimind mcp` 进程的整个生命周期
   里保持热加载，所以一次会话只有第一次查询要付加载成本。
-- **某个工具刚装好就报错** — 运行 `mgimind doctor`（助手可以调用
+- **某个工具刚装好就报错**：运行 `mgimind doctor`（助手可以调用
   `mind_doctor`）；它会精确报告缺什么（Qdrant 没跑、某模型没下载、
   ONNX Runtime 缺失、文件被 AV 隔离），`--fix` 能下载的都会下载。
-- **维度不匹配警告** — 集合里的向量与 `vector_size` 不一致，通常是
+- **维度不匹配警告**：集合里的向量与 `vector_size` 不一致，通常是
   换过模型。用 `mgimind migrate` 重新嵌入。
-- **中文结果感觉怪** — 设 `rerank_enabled = false`（见上面的语言说明）。
+- **中文结果感觉怪**：设 `rerank_enabled = false`（见上面的语言说明）。
+- **mgimind 运行时 VPN、隧道或代理坏掉**：运行 `mgimind doctor`，看
+  network footprint 一节。mgimind 的每个端口都绑定在 loopback 上，也
+  不改动任何路由、DNS 或防火墙规则，因此它无法把流量从隧道里拉出来。
+  请看同时启动的其他东西：Docker Desktop 和 WSL2 会自己加虚拟网卡，
+  而启用严格路由的 TUN 客户端在网卡出现或消失时可能丢掉隧道。
 
 ## 安全
 
@@ -374,11 +379,30 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
   警告而不是盲目信任。
 - Qdrant 只绑定到 `127.0.0.1`，支持 API key。
 - Vault 用 AES-256-GCM，密钥由 Argon2id 派生（参数 pinned，库升级
-  不会把你锁在外面）。只在终端使用——主密码与解密后的秘密永远不会
+  不会把你锁在外面）。只在终端使用，主密码与解密后的秘密永远不会
   经过 MCP 通道。MCP 工具 `mind_vault_*` 返回的是终端使用说明，不是
   秘密值本身。
-- 文件写入是原子的，目录会 fsync——崩溃后留下的要么是旧文件，要么
+- 文件写入是原子的，目录会 fsync，崩溃后留下的要么是旧文件，要么
   是新文件，绝不是损坏的文件。
+
+### 网络足迹
+
+mgi-mind 打开的每一个套接字都绑定在 loopback 上：
+
+| 组件 | 端口 | 绑定 |
+|---|---|---|
+| Qdrant HTTP | 6333 | `127.0.0.1` |
+| Qdrant gRPC | `qdrant_port`，默认 6334 | `127.0.0.1` |
+| `mind_visualize` | 4173 | `127.0.0.1` |
+| `mgimind viewer` | 随机，启动时打印 | `127.0.0.1` |
+| `mgimind serve-http` | 随机，或 `--port` | 未给 `--host` 时为 `127.0.0.1` |
+
+绑定其他网卡的唯一方式是 `serve-http --host`（Docker 的 `-p` 映射需要
+它），并且非 loopback 的 host 在没有 `--agent-token` 时会被拒绝。
+
+mgimind 不安装驱动、不添加网卡，也不改动任何路由、DNS 或防火墙设置。
+`mgimind doctor` 会打印这份清单，并实时探测每个端口，所以这句话你可以
+自己验证，而不必选择相信。
 
 ## 状态与审计
 
@@ -386,11 +410,11 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 日志和临时 viewer、0.11.x 的隔离层 + best-effort retrieval 策略、
 0.12.x 的 viewer 波次、0.13.x 的 session liveness、以及 0.14.x 的
 procedural-memory 护城河（LongMemEval baseline + 来自 20 个公开仓库的
-227 对 Д6 数据集）构建。1.0 合约 — md reconcile 的非对称
-「Qdrant 现在 → md 将成为」diff、`MGIMIND_MODEL_VARIANT={cpu|gpu|auto}`
-开关、以及 31 工具的 MCP 表面 — 在 2.0 之前冻结。
+227 对 Д6 数据集）构建。三项 1.0 合约在 2.0 之前冻结：md reconcile 的
+非对称「Qdrant 现在 → md 将成为」diff、`MGIMIND_MODEL_VARIANT={cpu|gpu|auto}`
+开关、以及 31 工具的 MCP 表面。
 
-项目经过 27 个问题的代码审计。**21 个完全修复，6 个部分修复** —
+项目经过 27 个问题的代码审计。**21 个完全修复，6 个部分修复**：
 机制已上线，加固在继续。[`AUDIT_STATUS.md`](AUDIT_STATUS.md) 逐条
 说明每个问题，包括坦诚的差距（比如 fact supersession 还没实现）。
 [`CHANGELOG.md`](CHANGELOG.md) 是按版本的历史记录；

@@ -2,13 +2,23 @@
 
 ## Unreleased
 
+- **`doctor` reports the network footprint.** A bug report claimed that
+  `serve-http` listens on `0.0.0.0` and that this was what broke a VPN
+  tunnel. Neither the HTTP surface nor the bundled Qdrant has ever bound
+  anything but loopback, and no released version could: the `--host` flag
+  arrived in v1.7.0 and refuses a non-loopback bind without `--agent-token`.
+  `doctor` now lists every port mgimind can hold, probes each live one from
+  this host's own address, and warns only when a port really answers off
+  loopback. The READMEs carry the same table plus a VPN troubleshooting
+  entry, so the claim can be checked in one command.
+
 - **`vault store --stdin`.** The secret was a positional argument only, so
   storing one wrote it into shell history and exposed it in the process list
   for the duration of the command. `--stdin` reads it from a pipe instead. The
   master-password prompt reads the terminal directly, not stdin, so the two do
   not collide.
 
-## 2.5.0 — macOS actually installs
+## 2.5.0: macOS actually installs
 
 Every macOS failure found in an end-to-end audit of the install path. No
 retrieval or storage changes.
@@ -42,20 +52,20 @@ retrieval or storage changes.
   releases are ad-hoc signed, not notarized, and right-click → Open stopped
   working for command-line binaries in Sequoia.
 
-## 2.4.0 — multi-tenant confinement gate closed (Д7) + tamper-evident audit
+## 2.4.0: multi-tenant confinement gate closed (Д7) + tamper-evident audit
 
 Closes the Д7 confinement gate and hardens the audit log. All security work, off
 the retrieval path (no ΔR@k change).
 
-- **Scoped-token ingest confinement — a real ACL bypass, fixed.** A
+- **Scoped-token ingest confinement: a real ACL bypass, fixed.** A
   library-scoped HTTP token's `/memory/ingest` wrote fact/procedure candidates to
-  the GLOBAL knowledge/procedure stores, escaping its library allowlist — the
+  the GLOBAL knowledge/procedure stores, escaping its library allowlist, so the
   v2.0 "fail-closed per-token ACL" claim was an overclaim. Candidates are now
   skip-with-counter for scoped tokens (`skipped_scope_facts` / `_procedures`,
   reported in the response); the flag is server-set and unwidenable from the body.
 - **`/memory/by-agent` confinement.** Returns results confined to the token's
-  allowlist (server-injected library filter) instead of a blanket 403 —
-  confinement, not lockout. Falsifiable contract test added.
+  allowlist (server-injected library filter) instead of a blanket 403,
+  which confines the caller instead of locking it out. Falsifiable contract test added.
 - **Ciphertext-only backup write path.** A `Ciphertext` newtype makes it a type
   error to hand the backup writer anything but sealed bytes.
 - **Viewer `--libraries` confinement.** `mgimind viewer --libraries a,b`
@@ -68,7 +78,7 @@ the retrieval path (no ΔR@k change).
   Detects in-place tampering of the append-only log (SECURITY.md promise →
   shipped).
 
-## 2.3.0 — local feature parity, batch 2: fact-graph traversal + profile
+## 2.3.0: local feature parity, batch 2: fact-graph traversal + profile
 
 Two more capabilities stolen from the 2026 memory-layer field, local and
 LLM-free. Additive; no behavior change to existing surfaces.
@@ -76,14 +86,14 @@ LLM-free. Additive; no behavior change to existing surfaces.
 - **Multi-hop fact-graph traversal (Graphiti / Memary-style).** `mgimind graph
   <entity> --hops N` walks the facts already in Qdrant outward from an entity
   (subject/object match), rendering a bounded, cycle-safe, indented tree of
-  directed `-[predicate]-> object` edges — the "knowledge graph" competitors
+  directed `-[predicate]-> object` edges, the same "knowledge graph" competitors
   build on Neo4j, here a plain BFS with no extra store.
 - **Local profile snapshot (Supermemory-style).** `mgimind export --format
-  profile` renders a compact, prompt-ready snapshot — pinned core-memory blocks
-  + current facts + verified procedures — computed locally from data already
+  profile` renders a compact, prompt-ready snapshot (pinned core-memory blocks
+  + current facts + verified procedures) computed locally from data already
   stamped, with no LLM summarization.
 
-## 2.2.0 — local feature parity: pinned blocks + procedures→instructions
+## 2.2.0: local feature parity: pinned blocks + procedures→instructions
 
 Two capabilities stolen from the 2026 memory-layer field and rebuilt local and
 LLM-free. Both are additive; no behavior change to existing surfaces.
@@ -91,33 +101,33 @@ LLM-free. Both are additive; no behavior change to existing surfaces.
 - **Pinned memory blocks (Letta-style core memory).** `mgimind block set|get|
   list|rm` and an MCP `mind_block(action=…)` tool manage a few small named notes
   (persona / user / current-project) stored in `blocks.json`. They are injected
-  at the TOP of every context render — always-true context the agent never has
-  to search for — with 4 KB / 32-block caps so the always-on injection stays
+  at the TOP of every context render (always-true context the agent never has
+  to search for) with 4 KB / 32-block caps so the always-on injection stays
   cheap. Not a second store; searchable knowledge still goes to `mind_add`.
 - **Procedures → instructions export (LangMem-style).** `mgimind export --format
   instructions` renders every verified error→fix procedure as a portable,
   agent-ready markdown block (error signature, fix, provenance, proven-counts),
-  most-proven first. Deterministic and LLM-free — the procedures are already
-  verified by typed outcome signals — so learned fixes survive sessions where the
+  most-proven first. Deterministic and LLM-free, since the procedures are already
+  verified by typed outcome signals, so learned fixes survive sessions where the
   agent forgets to call `mind_recall`.
 
-Tool surface: 43 (was 42) — `mind_block` added.
+Tool surface: 43 (was 42), `mind_block` added.
 
-## 2.1.1 — docs truth-sync + ACL test hardening
+## 2.1.1: docs truth-sync + ACL test hardening
 
 A docs-and-tests patch; no runtime behavior change (the locked v2.0 HTTP
 contract still passes).
 
 - **Docs truth-sync.** Version markers bumped to 2.1.x across README
-  (en/ru/zh), `SECURITY.md`, and `AI_INSTRUCTIONS.md` — the translations had
+  (en/ru/zh), `SECURITY.md`, and `AI_INSTRUCTIONS.md`. The translations had
   drifted as far back as 1.0.x. `ROADMAP.md` actualized: shipped v1.x blocks
   collapsed with honest per-feature attribution (the `as_of` reader and
   coldness/`--archive-cold` correctly placed in the v1.7 window, not v1.4/1.5),
   the never-built S3 backup / OAuth-DCR / markdown-mirror items marked **cut**,
-  and a "v2.x — closing the gate" section added.
+  and a "v2.x: closing the gate" section added.
 - **ACL test hardening (Д7).** The v2.0 library-ACL decision is extracted into
-  pure, transport-free cores — `scope_libs`, `scoped_route_allowed`,
-  `parse_agent_tokens` — with a 17-case adversarial suite (empty / `[]` /
+  pure, transport-free cores (`scope_libs`, `scoped_route_allowed`,
+  `parse_agent_tokens`) with a 17-case adversarial suite (empty / `[]` /
   non-string / unicode library filters, singular-vs-plural precedence,
   empty-array ≠ all-libraries, non-object coercion, write must-name-library,
   duplicate names, present-but-empty scope). Closes the ROADMAP "fuzz-testing
@@ -127,7 +137,7 @@ contract still passes).
   `benchmark/results/2026-06-02-procedural-bootstrap/` run and the unused
   948 KB `docs/social-preview.png`.
 
-## 2.1.0 — connect Hermes and OpenClaude to a shared brain
+## 2.1.0: connect Hermes and OpenClaude to a shared brain
 
 Two multi-agent orchestrators can now use mgi-mind as their shared memory.
 Hermes (NousResearch/hermes-agent) ships conversation tools but no memory, so
@@ -146,7 +156,7 @@ New recipes: [`docs/integrations/hermes.py`](docs/integrations/hermes.py),
 [`docs/integrations/openclaude.md`](docs/integrations/openclaude.md), and an
 updated integrations README.
 
-## 2.0.0 — trustworthy shared multi-agent memory
+## 2.0.0: trustworthy shared multi-agent memory
 
 Several agents reading and writing one brain at once made shared-pool
 correctness the priority. This release closes the gaps that opens, all off the
@@ -221,10 +231,10 @@ The Python client (0.2.0 → 0.3.0) tracks this: `MemoryResult` gains
 `.results` / `.facts` / `.memories` / `.procedures`, is iterable over
 hits, and has `len()`; `str(result)` still yields a prompt-ready block.
 
-### Added: `mgimind reindex` — rebuild the index after switching models
+### Added: `mgimind reindex`: rebuild the index after switching models
 
 **Audit #11.** Swapping the embedding model changes both the vector
-dimension and the vector space, so the stored vectors become meaningless —
+dimension and the vector space, so the stored vectors become meaningless:
 searches either error on a dimension mismatch or silently return garbage
 neighbours. `mgimind reindex` re-embeds every memory and procedure from its
 stored text into a fresh collection at the current `vector_size`.
@@ -232,7 +242,7 @@ stored text into a fresh collection at the current `vector_size`.
 It is safe by construction: the full set of points is read, then written to
 a JSON snapshot on disk (one file per library, ids + content + metadata),
 and only then is the collection dropped and rebuilt. A crash mid-rebuild
-leaves that snapshot as the recovery point — which matters because qdrant
+leaves that snapshot as the recovery point, which matters because qdrant
 runs as an external service, so a file backup of the data dir would not
 capture the memory store. Point ids stay content-addressed, so links and
 dedup survive; `created_at` / `source` / `author` / `type` /
@@ -263,10 +273,10 @@ Fix: every fact read path now excludes `status="stale"` AND
 
 Two new integration tests pin the regression:
 
-- `duel_rule_dampens_loser_on_single_cardinality` — register Single
+- `duel_rule_dampens_loser_on_single_cardinality`: register Single
   cardinality + add winner + add conflicting + query, asserts only
   the winner is returned.
-- `multi_cardinality_allows_coexistence` — same flow with Multi,
+- `multi_cardinality_allows_coexistence`: same flow with Multi,
   asserts both facts coexist.
 
 Both vectorless, ~0.2 s each, run on every CI push.
@@ -305,7 +315,7 @@ v1.6.4`) now collapse to the canonical answer.
 
 ### Added: 2026-06-05 blog post
 
-`docs/blog/2026-06-05-i-found-my-headline-feature-was-broken.md` —
+`docs/blog/2026-06-05-i-found-my-headline-feature-was-broken.md`:
 post-mortem narrative covering the bug discovery, localization,
 fix, retroactive walk, and what 290 passing unit tests can't tell
 you about a user-facing read path that drifted out of sync with
@@ -365,7 +375,7 @@ write survives. A live run collapsed a torn `Single` axis from two
 Active facts to one; the loser kept its row with `status=stale` and a
 `valid_until`, and a second run found nothing left to do.
 
-### Added: `mgimind calibrate` — behavioral metric for the validity model
+### Added: `mgimind calibrate`: behavioral metric for the validity model
 
 The duel rule and doubt window had no measured number, so the README
 claim was a promise. `mgimind calibrate` runs a corpus of realistic
@@ -389,13 +399,13 @@ from retrieval recall (R@k).
   bundled-Qdrant integration suites and `cargo-audit`.
 - Build remains warning-free; `clippy` clean.
 
-## 1.6.4 — Windows fix + doctor --fix cardinality + ADRs + SECURITY policy
+## 1.6.4: Windows fix + doctor --fix cardinality + ADRs + SECURITY policy
 
 This release closes the v1.5 honest limit on cross-platform CI plus
 ships the developer-facing scaffolding that pulse-style projects
 have.
 
-### Issue [#23](https://github.com/madgodinc/mgi-mind/issues/23) — Windows stack overflow
+### Issue [#23](https://github.com/madgodinc/mgi-mind/issues/23): Windows stack overflow
 
 `tokio::main` runs `block_on` on the process's main thread, which
 uses the OS default stack budget. Windows defaults to 1 MB; the v1.5
@@ -404,13 +414,13 @@ HashMaps + Vec<String> candidates + per-fact futures) overflow it.
 
 Fix (two layers in `src/main.rs`):
 
-1. Re-launch `main` on `std::thread::Builder` with 8 MB stack —
-   fixes the process main thread on every platform.
+1. Re-launch `main` on `std::thread::Builder` with 8 MB stack,
+   which fixes the process main thread on every platform.
 2. Build the tokio runtime with `thread_stack_size(8 * 1024 * 1024)`
-   — every worker thread (where `tokio::spawn` lands) gets the same
+   so every worker thread (where `tokio::spawn` lands) gets the same
    8 MB.
 
-8 MB matches the Linux default — the most-tested configuration.
+8 MB matches the Linux default, the most-tested configuration.
 After this lands all six CI jobs go green (Linux / Windows / macOS
 × fmt+clippy+test + Linux integration + Windows integration +
 cargo-audit).
@@ -423,7 +433,7 @@ had to remember to run `migrate-v14 cardinality --apply` to register
 them. `mgimind doctor` now surfaces the count:
 
 ```
-[INFO] 1096 High-confidence cardinality proposal(s) waiting — run
+[INFO] 1096 High-confidence cardinality proposal(s) waiting: run
        `mgimind doctor --fix` or
        `mgimind migrate-v14 cardinality --apply`
 ```
@@ -445,29 +455,29 @@ install-mode: chat-only [dependants=0.70 confirmations=0.10 external=0.20]
 
 ### Project documentation
 
-- **CONTRIBUTING.md** — project layout, build commands, three
+- **CONTRIBUTING.md**: project layout, build commands, three
   architecture rules (Mechanism 1 invariant, §10 q5 guarantees,
   illustrative-until-calibrated constants), how to add an MCP tool,
   branch model.
-- **CODE_OF_CONDUCT.md** — pragmatic compression of Contributor
+- **CODE_OF_CONDUCT.md**: pragmatic compression of Contributor
   Covenant 2.1.
-- **SECURITY.md** — vulnerability disclosure policy with scope
+- **SECURITY.md**: vulnerability disclosure policy with scope
   (vault, extractor, MCP surface, Qdrant binary, audit log) and
   out-of-scope (shell access, DoS via large inputs, MCP client
   misbehaviour).
-- **`.github/ISSUE_TEMPLATE/`** — bug_report.md + feature_request.md
+- **`.github/ISSUE_TEMPLATE/`**: bug_report.md + feature_request.md
   + config.yml routing questions to Discussions.
-- **`docs/design/adr/`** — four foundational ADRs (Cardinality enum,
+- **`docs/design/adr/`**: four foundational ADRs (Cardinality enum,
   Mechanism 1 invariant, §10 q5 guarantees, install-mode anchors).
-- **`benchmarks/v0.14.3-gpu/`** — pre-v1.4 retrieval baseline
+- **`benchmarks/v0.14.3-gpu/`**: pre-v1.4 retrieval baseline
   (R@5 = 99.2%) committed for STALE bench comparison.
-- **`docs/blog/2026-06-04-validity-model.md`** — draft technical
+- **`docs/blog/2026-06-04-validity-model.md`**: draft technical
   post explaining v1.4 / v1.5 / v1.6 design.
-- **`.editorconfig`** — consistent indent / EOL across editors.
+- **`.editorconfig`**: consistent indent / EOL across editors.
 
 ### CLI surface
 
-- `mgimind bench-stale` + `mgimind bench-stale-sweep` — CLI scaffold
+- `mgimind bench-stale` + `mgimind bench-stale-sweep`: CLI scaffold
   for issue [#16](https://github.com/madgodinc/mgi-mind/issues/16)
   calibration tooling. The STALE protocol adapter is still TBD; the
   CLI plumbing and sweep grid are in place.
@@ -476,13 +486,13 @@ install-mode: chat-only [dependants=0.70 confirmations=0.10 external=0.20]
 
 - 290 unit + 6 integration tests pass on **all three OSes**.
 - Cleaned up test serialisation around `DOUBT_WINDOW_FLAGGED`
-  global registry — four registry-touching tests now lock
+  global registry, so four registry-touching tests now lock
   `SERIAL_LOOP_TEST` to prevent races on the macOS runner.
 
 ### Documentation issues opened
 
-- **#23** — Windows stack overflow (closed by this release).
-- **#24** — `ROADMAP.md` is stale (last version mentioned is v1.2;
+- **#23**: Windows stack overflow (closed by this release).
+- **#24**: `ROADMAP.md` is stale (last version mentioned is v1.2;
   we shipped v1.3 through v1.6.4). Tracked for v1.7.
 
 ### Migration notes
@@ -490,7 +500,7 @@ install-mode: chat-only [dependants=0.70 confirmations=0.10 external=0.20]
 None. v1.6.4 ships only the Windows fix + scaffolding; no semantic
 changes to formulas, MCP surface, or payload shape.
 
-## 1.6.3 — bench-stale CLI + bulk cardinality apply + contributor docs
+## 1.6.3: bench-stale CLI + bulk cardinality apply + contributor docs
 
 ### `mgimind migrate-v14 cardinality --apply`
 
@@ -525,20 +535,20 @@ to overall_pct / state_resolution_pct / premise_resistance_pct.
 
 ### Contributor docs
 
-- `CONTRIBUTING.md` — project layout, build commands, three
+- `CONTRIBUTING.md`: project layout, build commands, three
   architecture rules (Mechanism 1 invariant, §10 q5 guarantees,
   illustrative-until-calibrated constants), how to add an MCP tool,
   branch model.
-- `CODE_OF_CONDUCT.md` — pragmatic compression of Contributor
+- `CODE_OF_CONDUCT.md`: pragmatic compression of Contributor
   Covenant 2.1.
-- `.github/ISSUE_TEMPLATE/` — bug_report.md + feature_request.md +
+- `.github/ISSUE_TEMPLATE/`: bug_report.md + feature_request.md +
   config.yml routing questions to Discussions.
 
 ### Tests
 
 290 unit + 6 integration tests, 0 failed.
 
-## 1.6.2 — facts inspection + machine-parseable stats
+## 1.6.2: facts inspection + machine-parseable stats
 
 Two more CLI usability additions.
 
@@ -566,14 +576,14 @@ subject, predicate, object, valid, created_at, dependants_count,
 confirmations_count, external_signals, confidence_score,
 doubt_drift_count, status.
 
-O(facts) for list — fine at 12k base, capped at 10k for the
+O(facts) for list, fine at 12k base, capped at 10k for the
 dependants decoration.
 
 ### Tests
 
 290 unit + 6 integration tests, 0 failed.
 
-## 1.6.1 — CLI surfaces for v1.5 / v1.6 features
+## 1.6.1: CLI surfaces for v1.5 / v1.6 features
 
 Four CLI usability fixes. No schema changes, no MCP surface
 changes, no formula changes.
@@ -619,14 +629,14 @@ Calibration signal: if p90 stays 0 after `migrate-v14 dependants
 
 290 unit + 6 integration tests, 0 failed.
 
-## 1.6.0 — closing v1.5 honest limits
+## 1.6.0: closing v1.5 honest limits
 
 A polish release that closes three TBD items declared in v1.5's
 "Honest limits" section. No new public surface. Same 37 MCP tools,
 same CLI flags, same install modes. Smaller per-tick overhead and
 sharper coverage of the §10 q5 guarantees.
 
-### Step 1 — batched payload reads in retest_fact_step82
+### Step 1: batched payload reads in retest_fact_step82
 
 The v1.5 implementation made four separate `get_points` round-trips
 per fact (dependants_count, confirmations_count, external_signals,
@@ -637,11 +647,11 @@ returns a HashMap in one call. retest_fact_step82 now does one
 Qdrant fetch + four HashMap lookups. 4× reduction in round-trips
 per fact, same semantics.
 
-### Step 2 — `cited_by` chain following
+### Step 2: `cited_by` chain following
 
 The v1.5 self-citation guard always blocked because the lookup
 closure was `|_| None`. v1.6 wires real lookup via
-`fetch_citing_confidences` — a single batched get_points against
+`fetch_citing_confidences`: a single batched get_points against
 MEMORIES_COLLECTION returns a `HashMap<id, f32>` of cached
 confidence_scores. The closure reads from that map synchronously.
 
@@ -652,16 +662,16 @@ confidence_scores. The closure reads from that map synchronously.
 
 Mechanism 1 invariant preserved.
 
-### Step 3 — integration tests on `spawn_background_retest_loop`
+### Step 3: integration tests on `spawn_background_retest_loop`
 
 Closes the audit-flagged gap: v1.5 had no test that ran the spawned
 task end-to-end. v1.6 adds four:
 
-- `busy_flag_observable_by_loop_check` — guarantee (a) plumbing.
-- `per_tick_cap_enforced_by_drain` — guarantee (b) cap enforcement.
-- `edit_counter_consumed_each_tick` — signal flow for guarantee (c)
+- `busy_flag_observable_by_loop_check`: guarantee (a) plumbing.
+- `per_tick_cap_enforced_by_drain`: guarantee (b) cap enforcement.
+- `edit_counter_consumed_each_tick`: signal flow for guarantee (c)
   cadence.
-- `drain_then_reflag_preserves_registry` — failure-path re-flag
+- `drain_then_reflag_preserves_registry`: failure-path re-flag
   contract.
 
 Production code: `spawn_background_retest_loop` now delegates to
@@ -672,7 +682,7 @@ the actual loop.
 Registry-level coverage is the contract; the spawn body is one
 match against helpers all of which are now tested. Spawning the
 loop against stub Qdrant proved too flaky for parallel runs (race
-over global registries) — registry tests are the stable equivalent.
+over global registries), and registry tests are the stable equivalent.
 
 ### Build hygiene
 
@@ -689,20 +699,20 @@ change.
 
 ### Tracked v1.6 follow-ups (still open)
 
-- #16 — STALE bench calibration against Mad's base.
-- #17 — QA accuracy bench with LLM judge.
-- #18 — migrate legacy `external_signals` counter to typed log.
-- #19, #20 — Mac and Windows binary releases.
+- #16: STALE bench calibration against Mad's base.
+- #17: QA accuracy bench with LLM judge.
+- #18: migrate legacy `external_signals` counter to typed log.
+- #19, #20: Mac and Windows binary releases.
 
-## 1.5.0 — install-mode profiles + typed external signals + active re-test pass
+## 1.5.0: install-mode profiles + typed external signals + active re-test pass
 
 The v1.4 → v1.5 work closes the §6 and §10 q5 / q6 questions from
 the validity-model synthesis. The duel rule (v1.4 Phase 2), doubt
 window (v1.4 Phase 3 scaffold), and STALE bench adapter (v1.4
-Phase 4 scaffold) are still calibration TBD — see "Honest limits"
+Phase 4 scaffold) are still calibration TBD; see "Honest limits"
 below.
 
-### v1.5 Phase 6 — install-mode profile + per-mode confidence_score
+### v1.5 Phase 6: install-mode profile + per-mode confidence_score
 
 Three install profiles select different anchors for the
 `confidence_score` formula (synthesis §6). Each mode's weights sum
@@ -716,16 +726,16 @@ to 1.0 by construction:
 
 New CLI:
 
-- `mgimind config install-mode` — print current profile + auto-detect
+- `mgimind config install-mode`: print current profile + auto-detect
   recommendation + breakdown of inputs (`external_signals_7d`,
   `distinct_agents_30d`).
-- `mgimind config set-install-mode <mode>` — set the profile.
+- `mgimind config set-install-mode <mode>`: set the profile.
   Restart `mgimind serve` for long-lived MCP sessions to pick up.
 
 Auto-detect heuristic (`install_detect::collect`):
 `distinct_session_agents ≥ 3` → MultiTenant; otherwise
 `external_signal_count_last_7d ≥ 10` → DevWithCi; otherwise
-ChatOnly. The recommendation is informational only — `doctor`
+ChatOnly. The recommendation is informational only, and `doctor`
 never auto-applies (§10 q6 mis-classification cost = silent
 quality drift).
 
@@ -735,7 +745,7 @@ quality drift).
 ```
 …or, on mismatch, prints the exact `set-install-mode` line to run.
 
-### v1.5 Phase 7 — `mind_outcome` MCP tool + error-rate guardrail
+### v1.5 Phase 7: `mind_outcome` MCP tool + error-rate guardrail
 
 Generalises the procedure-only `mind_procedure_outcome` into a
 typed external-signal API working on any memory:
@@ -746,7 +756,7 @@ weights:    1.0  | 0.3 | 0.7 | 0.2     (§7 anchors)
 ```
 
 Per-signal options:
-- `success=false` multiplies weight by `-0.5` — failures pull the
+- `success=false` multiplies weight by `-0.5`, so failures pull the
   score negative, not just absence of evidence.
 - `cited_by` carries a self-citation guard: only counts when the
   citing memory has confidence ≥ 0.5.
@@ -757,43 +767,43 @@ The typed score plugs into `duel.weight_new_for_mode` via the new
 `NewFactInputs.external_signal_score: Option<f32>`. When `Some(_)`,
 it bypasses the v1.4 log2 shape and uses the signed score directly
 multiplied by the install-mode external slot weight. `None` falls
-back to v1.4 behaviour — matters because Phase 1 migration writes
+back to v1.4 behaviour, which matters because Phase 1 migration writes
 the legacy `external_signals: u32`, but the typed log stays empty
 until users post `mind_outcome` calls.
 
 Error-rate guardrail: if a fact accumulates ≥ 3 failed
 `test_passed` signals within 7 days, it gets flagged for the
 doubt window (`doubt::DOUBT_WINDOW_FLAGGED`). Only `test_passed`
-counts here — `user_confirmed` / `code_compiled` failures are
+counts here, because `user_confirmed` / `code_compiled` failures are
 noisier and don't trip the guardrail.
 
 `tools/list` now returns 37 tools (was 36).
 
-### v1.5 Phase 8 — active re-test pass with three §10 q5 guarantees
+### v1.5 Phase 8: active re-test pass with three §10 q5 guarantees
 
 Turns the v1.4 Phase 3 background loop scaffold (which had
 `n_processed_this_tick = 0`) into a real re-test pass. Three hard
 guarantees enforced:
 
-- **(a) never concurrent with MCP tool call** — `is_mcp_busy()`
+- **(a) never concurrent with MCP tool call**: `is_mcp_busy()`
   checked at the OUTER wake AND between facts inside the walk. A
   tool call starting mid-tick breaks the loop early, logs partial
   progress, re-flags unprocessed candidates for the next tick.
-- **(b) hard per-tick cap** —
+- **(b) hard per-tick cap.**
   `select_retest_candidates(_, BACKGROUND_PER_TICK_CAP)` returns ≤
   50, with a hard-fail assert at the end of the walk. A future
   refactor breaking the cap panics the background task (auto-restart
   by outer scheduling) rather than silently starving MCP.
-- **(c) load-aware cadence** — new `loadavg_multiplier()` reads
+- **(c) load-aware cadence**: new `loadavg_multiplier()` reads
   `/proc/loadavg` (Linux), compares 1 m load to
   `1.5 × available_parallelism`, returns `2.0` to back off when
   overloaded. Non-Linux returns `1.0` (no back-off, loop still
   runs).
 
 New module `confidence` with pure formulas:
-- `confidence_score(inputs, mode) -> f32` — §6 weighted blend.
+- `confidence_score(inputs, mode) -> f32`: §6 weighted blend.
 - `decide_retest_transition(old, new, in_doubt) -> RetestTransition`
-  — §8 step 8.2 rules. `PromoteToDoubt` requires BOTH a downward
+  applies the §8 step 8.2 rules. `PromoteToDoubt` requires BOTH a downward
   shift > 0.2 AND new < 0.3 (two independent reasons must agree).
   `RecoverFromDoubt` requires already-in-doubt AND upward shift > 0.2.
   **Mechanism 1 invariant: NEVER returns a delete verdict.**
@@ -832,7 +842,7 @@ graph was. Wired into:
   several in `doubt`); spawning the actual tokio loop with a fake
   Qdrant and asserting on tick behaviour is v1.6 step 3.
 - **Mac/Windows binaries are not in v1.5.** Audit flagged this as
-  "solution looking for a problem" — no GitHub issues from those
+  "solution looking for a problem", with no GitHub issues from those
   platforms yet. Linux + Docker only for now; contributor PRs
   welcome.
 
@@ -856,51 +866,51 @@ graph was. Wired into:
 - Background loop starts automatically when `mgimind serve` runs
   against an initialised config.
 
-## 1.4.0 — validity model: schema, migration, duel rule, doubt window, auto-extractor
+## 1.4.0: validity model: schema, migration, duel rule, doubt window, auto-extractor
 
 Closes phases 0-5 of the validity-model synthesis. Lands as a
 sequence of feature branches merged in dependency order
 (1 → 2 → 3 → 5 → 4) so each phase has a green CI snapshot on
 main.
 
-- **Phase 0 — schema primitives.** `Cardinality` (Single /
+- **Phase 0: schema primitives.** `Cardinality` (Single /
   TemporalSingle / Multi) + `EntryStatus` (Active / Contested /
   Stale / PropagationShadowed / Unknown / QuarantineCandidate) +
   cached `dependants_count`, `confirmations_count`,
   `confidence_score` payload fields.
-- **Phase 1 — migration + measurement.** `mgimind migrate-v14
+- **Phase 1: migration + measurement.** `mgimind migrate-v14
   dependants|cardinality|confirmations` walks the existing base
   and computes the cached fields. Read-only by default; `--apply`
   writes back. Parallelised via `buffer_unordered(8)`.
-- **Phase 2 — duel rule.** `entrenchment(F_old)` vs
+- **Phase 2: duel rule.** `entrenchment(F_old)` vs
   `weight_new(F_new)`, resolution thresholds `DUEL_FLIP_RATIO=1.5`,
   `DUEL_CONTESTED_RATIO=0.5`. Per-(subject, predicate) lock map
   prevents race conditions. Quarantine path reuses the v0.11
   promote-on-repeat API.
-- **Phase 3 — doubt window (scaffold).** State machine
+- **Phase 3: doubt window (scaffold).** State machine
   `apply_retrieval_event`, retrieval-triggered counter,
   inheritance flag registry. Background loop wired but with
-  `n_processed_this_tick = 0` placeholder — closed in v1.5
+  `n_processed_this_tick = 0` placeholder, closed in v1.5
   Phase 8.
-- **Phase 4 — STALE benchmark adapter (scaffold).**
+- **Phase 4: STALE benchmark adapter (scaffold).**
   `bench_stale.rs` with `CalibrationOverrides` struct sweeps every
   duel/doubt constant via env vars. Bench against real data is
   v1.6 prereq.
-- **Phase 5 — auto-extractor (opt-in feature flag).** Qwen 2.5
+- **Phase 5: auto-extractor (opt-in feature flag).** Qwen 2.5
   GGUF via subprocess `llama-server` + Vulkan backend.
   Triple-backtick prompt-injection fence + sanitisation.
   `PR_SET_PDEATHSIG` against orphans. Cached `reqwest::Client`.
   Install sentinel `.installed-b9496` against partial installs.
-  Gated behind `--features extractor` (NOT on by default — would
+  Gated behind `--features extractor` (NOT on by default, since it would
   let an auto-installed extractor write through model semantics
   users don't know about yet).
 
 Tools/list = 36 (was 35). New: `mind_predicate`.
 
-## 1.1.0 — tool surface consolidation (alias phase)
+## 1.1.0: tool surface consolidation (alias phase)
 
 Same shape competitors converged on: one tool per object, an `action`
-field selects the verb. Doesn't break anything in v1.x — the 15
+field selects the verb. Doesn't break anything in v1.x: the 15
 single-verb tools they replace stay live as deprecated aliases until
 v2.0, with the death date written into every deprecated description.
 
@@ -911,35 +921,35 @@ deprecated singletons still ship for backward compatibility.
 
 ### New tools (5 consolidated verbs)
 
-- `mind_quarantine(action="list"|"show"|"promote")` — replaces
+- `mind_quarantine(action="list"|"show"|"promote")`: replaces
   `mind_quarantine_list` / `_show` / `_promote`.
-- `mind_vault(action="store"|"get"|"list")` — replaces
+- `mind_vault(action="store"|"get"|"list")`: replaces
   `mind_vault_store` / `_get` / `_list` (still terminal-only by design).
-- `mind_session(action="start"|"last"|"end")` — replaces
+- `mind_session(action="start"|"last"|"end")`: replaces
   `mind_session_start` / `_last` / `_end`.
-- `mind_fact(action="add"|"query"|"invalidate")` — replaces
+- `mind_fact(action="add"|"query"|"invalidate")`: replaces
   `mind_fact_add` / `_query` / `_invalidate`.
-- `mind_library(action="create"|"list"|"delete")` — replaces
+- `mind_library(action="create"|"list"|"delete")`: replaces
   `mind_create` / `mind_list` / `mind_delete`.
 
 ### Deprecated (still works through v1.x, removed in v2.0)
 
 The 15 singletons above. Every deprecated tool now carries
 `"deprecated": true` in its JSON schema and a description prefixed
-`DEPRECATED — use mind_X(action="Y"). Removed in v2.0.`. Well-behaved
+`DEPRECATED: use mind_X(action="Y"). Removed in v2.0.`. Well-behaved
 MCP clients hide deprecated tools; older clients keep working unchanged.
 
 ### Kept separate on purpose
 
-- `mind_history` — "newest N by time" is a different verb from
+- `mind_history`: "newest N by time" is a different verb from
   "find relevant by query"; merging it into `mind_search` would hurt
   clarity more than it would help surface size.
-- `mind_doctor` vs `mind_stats` — "what is broken" vs "how much of what"
+- `mind_doctor` vs `mind_stats`: "what is broken" vs "how much of what"
   are different questions.
 - `mind_consolidate`, `mind_export`, `mind_import`, `mind_ingest`,
   `mind_web`, `mind_provenance_add`, `mind_search`, `mind_add`,
   `mind_context`, `mind_learn`, `mind_recall`,
-  `mind_procedure_outcome` — already one verb per tool, nothing to
+  `mind_procedure_outcome`, already one verb per tool, nothing to
   collapse.
 
 ### Roadmap shifted
@@ -955,10 +965,10 @@ coverage: the consolidated `mind_vault` dispatches all three actions
 to the same terminal-only instructions, and an unknown action returns
 a structured error naming the allowed values.
 
-## 1.0.3 — docs: ROADMAP.md (v1.1 → v2.0 committed, v3.0 candidate set)
+## 1.0.3: docs: ROADMAP.md (v1.1 → v2.0 committed, v3.0 candidate set)
 
 Docs-only patch. The internal roadmap that drove v0.9 → v1.0 was not in
-the repo — readers landing on the project had no way to see what was
+the repo, so readers landing on the project had no way to see what was
 committed for upcoming releases, what was deliberately out of scope,
 and what was still being decided.
 
@@ -967,7 +977,7 @@ and what was still being decided.
   bi-temporal facts + supersession, v1.4 decay, v2.0 public-launch
   gate) and a "v3.0 horizon" section listing five candidate directions
   (local-LLM write gate, judge-eval QA mode, cross-agent, schema
-  packs, self-wiring graph) that are **deliberately not promised** —
+  packs, self-wiring graph) that are **deliberately not promised**;
   whichever crosses both a critic-checked spec and a real user pull
   ships as v3.0; the others stay on the list or fall off.
 - Carries over the anti-roadmap unchanged (no Obsidian plugin, no
@@ -978,11 +988,11 @@ and what was still being decided.
 
 No code, no MCP-surface, no on-disk format changes.
 
-## 1.0.2 — docs: bring README "Current version" line in sync with the tag
+## 1.0.2: docs: bring README "Current version" line in sync with the tag
 
 Docs-only patch. README.md / README.ru.md / README.zh.md still said
 "Current version: 0.11.x" and the install snippet pinned
-`MGIMIND_TAG=v0.8.0` — both predate the 1.0 line. Readers landing on
+`MGIMIND_TAG=v0.8.0`, both predating the 1.0 line. Readers landing on
 the project page saw three different "current" versions
 simultaneously: README 0.11.x, latest release v1.0.1, BENCHMARKS
 baseline v0.8.1. That looks like a mess even when the underlying tag
@@ -990,16 +1000,16 @@ chain is clean.
 
 All three READMEs now say `Current version: 1.0.x (semver-stable since
 v1.0.0)` and the install snippet pins `MGIMIND_TAG=v1.0.1`. Historical
-mentions of v0.8.1 in BENCHMARKS.md are left as-is on purpose — they
+mentions of v0.8.1 in BENCHMARKS.md are left as-is on purpose, since they
 are the dated "when this was measured" reference, not a claim about
 the current version.
 
 No code, no MCP-surface, no on-disk format changes.
 
-## 1.0.1 — docs: rebalance v1.0 headline to the default install path
+## 1.0.1: docs: rebalance v1.0 headline to the default install path
 
 Docs-only patch on top of v1.0.0. No code, no MCP-surface, no on-disk
-format changes — v1.0.0 → v1.0.1 is bit-for-bit identical at runtime.
+format changes: v1.0.0 → v1.0.1 is bit-for-bit identical at runtime.
 
 v1.0.0 shipped with R@5 = 99.2% in the release title and at the top of
 BENCHMARKS.md. That number is real, but it comes from the **opt-in
@@ -1012,7 +1022,7 @@ sold a configuration the user does not actually run.
 This patch puts the default install path on top:
 
 - BENCHMARKS.md now opens "Results" with a four-row "Headline number"
-  table — default CPU INT8 + reranker first, GPU FP16 as an ablation
+  table: default CPU INT8 + reranker first, GPU FP16 as an ablation
   row below.
 - BENCHMARKS.md adds a "How hard is the task" subsection in the
   methodology: per-question distinct-session distribution on
@@ -1027,16 +1037,16 @@ This patch puts the default install path on top:
 
 Same data, honest framing.
 
-## 1.0.0 — semver-stable, R@5 = 98.2% on LongMemEval-S (CPU default path)
+## 1.0.0: semver-stable, R@5 = 98.2% on LongMemEval-S (CPU default path)
 
 First semver-stable release. The bar from the roadmap was three things:
 
-1. The benchmark dropping a number on the wall every milestone — done
+1. The benchmark dropping a number on the wall every milestone: done
    (LongMemEval-S baseline + v0.12.1 regression + v0.14.3 GPU ablation).
-2. Procedural memory as the ров — done (Д6 dataset of 227 pairs from 20
+2. Procedural memory as the ров: done (Д6 dataset of 227 pairs from 20
    public repos, R@5 = 96.5% in v0.14.3).
 3. `md import/export` with the "md wins" escape hatch and an asymmetric
-   "Qdrant now → md says" diff in the dry-run — done in v0.14.3 / this
+   "Qdrant now → md says" diff in the dry-run: done in v0.14.3 / this
    release.
 
 The headline retrieval number this tag ships against is the **default
@@ -1044,7 +1054,7 @@ install path** a user gets after `mgimind doctor --fix`: CPU, INT8
 all-MiniLM-L6-v2 + reranker, **R@5 = 98.2% on LongMemEval-S** (R@1 = 91.6%,
 R@10 = 99.8%). The optional GPU + FP16 e5-base recipe documented in
 `BENCHMARKS.md` and `scripts/local-bench-gpu.sh` lifts that to R@5 = 99.2%
-on an RTX 3090 in 25.6 minutes — a real +1.0pp ablation, not the face of
+on an RTX 3090 in 25.6 minutes, a real +1.0pp ablation rather than the face of
 the release. Putting the GPU number in the headline would sell a config
 the zero-config user does not actually run.
 
@@ -1063,7 +1073,7 @@ neither is a mechanical ceiling. See "How hard is the task" in
   stay on CPU. `mgimind doctor --fix` now downloads the right variant
   and writes a `.variant` marker so flipping the env causes the next
   doctor to re-download instead of silently using the wrong file.
-- `scripts/local-bench-gpu.sh` — one-shot GPU reproduction script.
+- `scripts/local-bench-gpu.sh`: one-shot GPU reproduction script.
   Downloads ORT 1.24.2 GPU runtime, builds with `--features cuda`,
   fetches `longmemeval_s.json`, runs `doctor --fix` with the GPU
   variant and the full bench. The recipe behind the v0.14.3 headline,
@@ -1079,7 +1089,7 @@ neither is a mechanical ceiling. See "How hard is the task" in
 
 - BENCHMARKS.md "Reproduce" section points at `local-bench-gpu.sh`.
 - BENCHMARKS.md now carries the v0.12.1 CPU regression run (both
-  rerank=off pod2 and rerank=on pod1 — the second pod's raw.json
+  rerank=off pod2 and rerank=on pod1, since the second pod's raw.json
   turned out to have survived the takedown despite the pod loss),
   the v0.14.3 GPU headline (three runs), and the MiniLM-FP16-on-GPU
   ablation that isolates "+1.0pp R@5 is from e5-base, not from GPU".
