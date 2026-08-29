@@ -503,6 +503,40 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 )),
             }
         }
+        "mind_skill" => {
+            // Skills are the proactive half of procedural memory: matched
+            // against the task about to start, not against an error that
+            // already happened.
+            let cfg = warm(true)?;
+            let action = arg_str(args, "action").unwrap_or("list");
+            let need =
+                |key: &str| arg_str(args, key).ok_or_else(|| anyhow::anyhow!("missing '{key}'"));
+            match action {
+                "set" => {
+                    let name = need("name")?;
+                    let when = need("when")?;
+                    let body = need("body")?;
+                    crate::skill::set(cfg, name, when, body).await
+                }
+                "match" => {
+                    let task = need("task")?;
+                    let limit = arg_u64(args, "limit", 3) as usize;
+                    crate::skill::match_task(cfg, task, limit).await
+                }
+                "list" => crate::skill::list(cfg).await,
+                "show" => crate::skill::show(cfg, need("name")?).await,
+                "remove" => crate::skill::remove(cfg, need("name")?).await,
+                "outcome" => {
+                    let name = need("name")?;
+                    let worked = arg_bool(args, "worked", true);
+                    let verify = arg_bool(args, "verify", false);
+                    crate::skill::outcome(cfg, name, worked, verify).await
+                }
+                other => Err(anyhow::anyhow!(
+                    "unknown action '{other}' (use set|match|list|show|remove|outcome)"
+                )),
+            }
+        }
         "mind_add" => {
             let cfg = warm(true)?;
             let library = arg_str(args, "library")
@@ -1657,6 +1691,24 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["action"]
             }
         }),
+        json!({
+            "name": "mind_skill",
+            "description": "Skills: the house way of doing a kind of work, matched against the task you are ABOUT TO START (mind_recall is the other half: it answers an error that already happened). action=match takes a task description and returns the playbooks that apply, ranked by relevance and by how they have actually worked out. Call it before starting non-trivial work, the way you would check for a house rule. action=set writes one (name is the identity, so writing the same name edits it and keeps its history), list/show read, remove deletes, outcome records whether applying it worked (verify=true only for a deterministic signal, never a hunch).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["match", "set", "list", "show", "remove", "outcome"], "description": "Operation (default: list)" },
+                    "task": { "type": "string", "description": "What the work is; required for action=match" },
+                    "name": { "type": "string", "description": "Skill name [a-z0-9_-]; required for set/show/remove/outcome" },
+                    "when": { "type": "string", "description": "What kind of task should surface this skill; required for action=set" },
+                    "body": { "type": "string", "description": "The playbook itself, 8KB max; required for action=set" },
+                    "limit": { "type": "number", "description": "Max skills to return for action=match (default 3)" },
+                    "worked": { "type": "boolean", "description": "action=outcome: did applying the skill work (default true)" },
+                    "verify": { "type": "boolean", "description": "action=outcome: promote to verified on success. Deterministic signals only" }
+                },
+                "required": ["action"]
+            }
+        }),
     ];
 
     // Mark the 13 singletons as deprecated and rewrite their description with
@@ -1733,8 +1785,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            43,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) + 1 (mind_block) = 43"
+            44,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) + 1 (mind_block) + 1 (mind_skill) = 44"
         );
         let deprecated = tools
             .iter()
@@ -1746,8 +1798,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 28,
-            "non-deprecated surface is 28 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore + mind_block)"
+            live_surface, 29,
+            "non-deprecated surface is 29 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore + mind_block + mind_skill)"
         );
     }
 
@@ -1861,11 +1913,11 @@ mod tests {
         // consolidated v1.1 verbs + 1 v1.4 (mind_predicate) +
         // 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search)
         // + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore)
-        // + 1 (mind_block) = 43 total.
+        // + 1 (mind_block) + 1 (mind_skill) = 44 total.
         // Removal of the 15 deprecated singletons is deferred (see ROADMAP v2.x).
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(None, msg).await.unwrap();
-        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 43);
+        assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 44);
     }
 
     #[tokio::test]

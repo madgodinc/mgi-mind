@@ -185,10 +185,16 @@ pub enum Commands {
         output: Option<String>,
     },
 
-    /// Pinned memory blocks (core memory — always surfaced in context)
+    /// Pinned memory blocks (core memory, always surfaced in context)
     Block {
         #[command(subcommand)]
         action: BlockAction,
+    },
+
+    /// Skills: playbooks matched against the task you are about to start
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
     },
 
     /// Secure vault for passwords and secrets
@@ -842,6 +848,56 @@ pub enum BlockAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// Create or update a skill. Writing the same name again edits it in place
+    /// and keeps the outcome history.
+    Set {
+        /// Skill name ([a-z0-9_-], e.g. rust-cli, css-motion)
+        name: String,
+        /// When this skill applies: the kind of task that should surface it
+        #[arg(long)]
+        when: String,
+        /// The playbook itself
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the playbook from a file ('-' for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
+    },
+    /// List every skill, one line each
+    List,
+    /// Print one skill in full
+    Show {
+        /// Skill name
+        name: String,
+    },
+    /// Delete a skill and its outcome history
+    Rm {
+        /// Skill name
+        name: String,
+    },
+    /// Match skills against the task you are about to start
+    Match {
+        /// What the work is
+        task: String,
+        /// Max skills to return
+        #[arg(long, default_value = "3")]
+        limit: usize,
+    },
+    /// Record how applying a skill went
+    Outcome {
+        /// Skill name
+        name: String,
+        /// The skill's advice failed (default is worked)
+        #[arg(long)]
+        failed: bool,
+        /// Promote to verified on success. Deterministic signals only
+        #[arg(long)]
+        verify: bool,
+    },
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     // Audit log lives under mind_home so it follows MGIMIND_HOME isolation
     // automatically (tests + bench instances each get their own log without
@@ -990,6 +1046,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Restore { input, encrypt } => cmd_restore(&input, encrypt).await,
         Commands::Export { format, output } => cmd_export(&format, output.as_deref()).await,
         Commands::Block { action } => cmd_block(action).await,
+        Commands::Skill { action } => cmd_skill(action).await,
         Commands::Serve => cmd_serve().await,
         Commands::Stop => cmd_stop().await,
         Commands::Mcp => crate::mcp::serve().await,
@@ -2739,6 +2796,27 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         }
         let _ = writeln!(out);
     }
+    // The skill catalogue: names and triggers only. A skill body can run to
+    // kilobytes and most of them do not apply to the task at hand, so the
+    // context carries the index and `mind_skill(action="match")` fetches the
+    // one that does.
+    let skills = crate::storage::list_skills(config)
+        .await
+        .unwrap_or_default();
+    if !skills.is_empty() {
+        let _ = writeln!(
+            out,
+            "[Skills - match one before starting that kind of work]"
+        );
+        for s in skills.iter().take(24) {
+            let mark = if s.verified { "*" } else { " " };
+            let _ = writeln!(out, "  {mark}{:<24} {}", s.name, crate::skill::summary(s));
+        }
+        if skills.len() > 24 {
+            let _ = writeln!(out, "  ... {} more (mgimind skill list)", skills.len() - 24);
+        }
+        let _ = writeln!(out);
+    }
     let _ = writeln!(out, "[Last Session]");
     // Only include the first 10 lines of the session.
     for line in session.lines().take(10) {
@@ -3123,6 +3201,45 @@ async fn cmd_export(format: &str, output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_skill(action: SkillAction) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let out = match action {
+        SkillAction::Set {
+            name,
+            when,
+            body,
+            body_file,
+        } => {
+            let text = match (body, body_file) {
+                (Some(b), _) => b,
+                (None, Some(path)) if path == "-" => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf
+                }
+                (None, Some(path)) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading skill body from {path}"))?,
+                (None, None) => anyhow::bail!("give the playbook with --body or --body-file"),
+            };
+            crate::skill::set(&config, &name, &when, &text).await?
+        }
+        SkillAction::List => crate::skill::list(&config).await?,
+        SkillAction::Show { name } => crate::skill::show(&config, &name).await?,
+        SkillAction::Rm { name } => crate::skill::remove(&config, &name).await?,
+        SkillAction::Match { task, limit } => {
+            crate::skill::match_task(&config, &task, limit).await?
+        }
+        SkillAction::Outcome {
+            name,
+            failed,
+            verify,
+        } => crate::skill::outcome(&config, &name, !failed, verify).await?,
+    };
+    println!("{out}");
+    Ok(())
+}
+
 async fn cmd_block(action: BlockAction) -> Result<()> {
     match action {
         BlockAction::Set { name, content } => {
@@ -3194,7 +3311,10 @@ pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<Str
         let procs = crate::storage::list_verified_procedures(&config)
             .await
             .unwrap_or_default();
-        let md = render_profile(&blocks, &facts, &procs);
+        let skills = crate::storage::list_skills(&config)
+            .await
+            .unwrap_or_default();
+        let md = render_profile(&blocks, &facts, &procs, &skills);
         if let Some(path) = output {
             std::fs::write(path, &md).with_context(|| format!("writing profile to {path}"))?;
             return Ok(format!("Wrote profile to {path}"));
@@ -3209,11 +3329,13 @@ pub(crate) async fn run_export(format: &str, output: Option<&str>) -> Result<Str
 }
 
 /// Render a compact, prompt-ready profile: pinned core memory + current facts +
-/// verified procedures. Pure (no store / no clock) so it is unit-tested directly.
+/// verified procedures + the skill catalogue. Pure (no store / no clock) so it
+/// is unit-tested directly.
 fn render_profile(
     blocks: &std::collections::BTreeMap<String, String>,
     facts: &[crate::knowledge::Fact],
     procs: &[crate::storage::ProcedureHit],
+    skills: &[crate::storage::SkillHit],
 ) -> String {
     let mut out = String::from("# Profile (mgi-mind)\n\n");
     if !blocks.is_empty() {
@@ -3242,8 +3364,15 @@ fn render_profile(
         }
         out.push('\n');
     }
+    if !skills.is_empty() {
+        out.push_str(&format!("## Skills ({})\n", skills.len()));
+        for s in skills.iter().take(24) {
+            out.push_str(&format!("- **{}**: {}\n", s.name, crate::skill::summary(s)));
+        }
+        out.push('\n');
+    }
     if out.trim() == "# Profile (mgi-mind)" {
-        out.push_str("_Empty profile: no blocks, facts, or verified procedures yet._\n");
+        out.push_str("_Empty profile: no blocks, facts, procedures, or skills yet._\n");
     }
     out
 }
@@ -4370,15 +4499,27 @@ mod export_instructions_tests {
             2,
             0,
         )];
-        let out = render_profile(&blocks, &[fact], &procs);
+        let skills = [crate::storage::SkillHit {
+            id: "s1".into(),
+            name: "css-motion".into(),
+            when: "any animation or transition work".into(),
+            body: "prefer transforms".into(),
+            verified: true,
+            success_count: 3,
+            fail_count: 0,
+            score: 0.0,
+        }];
+        let out = render_profile(&blocks, &[fact], &procs, &skills);
         assert!(out.contains("## Core memory"));
         assert!(out.contains("**persona**: Mad: terse"));
         assert!(out.contains("## Facts (1)"));
         assert!(out.contains("Mad builds mgi-mind"));
         assert!(out.contains("## Verified procedures (1)"));
         assert!(out.contains("→ raise stack"));
+        assert!(out.contains("## Skills (1)"));
+        assert!(out.contains("**css-motion**: any animation or transition work"));
 
-        let empty = render_profile(&std::collections::BTreeMap::new(), &[], &[]);
+        let empty = render_profile(&std::collections::BTreeMap::new(), &[], &[], &[]);
         assert!(empty.contains("Empty profile"));
     }
 }

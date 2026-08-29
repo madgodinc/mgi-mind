@@ -457,6 +457,23 @@ never a corrupt one.
 | `mgimind fact query <term>` | Find facts matching a term in subject, predicate, or object. |
 | `mgimind fact invalidate <id>` | Soft-delete a fact (kept on disk, marked invalid, hidden from queries). |
 
+### Skills
+
+A procedure answers "this broke, what fixed it last time". A skill answers "I am
+about to do X, is there a house way to do X". Same storage and the same outcome
+signals, matched at a different moment: against the task, before the work.
+A context render carries the catalogue (names and triggers), so an assistant
+knows what exists without searching, and pulls the body only for the skill that
+applies.
+
+| Command | What it does |
+|---|---|
+| `mgimind skill set <name> --when <trigger> --body <text>` | Write a skill. The name is its identity, so writing it again edits it and keeps the history. `--body-file <path>` reads the body from a file. |
+| `mgimind skill match <task> [--limit N]` | The skills that apply to a task, ranked by relevance and by how they have worked out. |
+| `mgimind skill list` / `mgimind skill show <name>` | The catalogue, or one skill in full. |
+| `mgimind skill outcome <name> [--failed] [--verify]` | Record how applying it went. `--verify` needs a deterministic signal, not a hunch. |
+| `mgimind skill rm <name>` | Delete a skill and its outcome history. |
+
 ### Sessions
 
 | Command | What it does |
@@ -615,8 +632,9 @@ LongMemEval-S plus a 227-pair error→fix dataset from 20 public repos). The
 background re-test, bi-temporal fact supersession, the confidence score, and
 typed outcome signals (`mind_outcome`), plus install-mode CPU/GPU profiles.
 
-The MCP surface is a frozen contract until a 2.0 bump: 25 consolidated tools
-plus 15 deprecated aliases kept for compatibility. The other 1.0 contracts
+The MCP surface is additive-only until a 2.0 bump: 29 live tools plus 15
+deprecated aliases kept for compatibility. Nothing is renamed or removed inside
+2.x; new verbs (most recently `mind_skill`) may be added. The other 1.0 contracts
 are the asymmetric "Qdrant now → md says" reconcile diff and the
 `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch.
 

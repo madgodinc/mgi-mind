@@ -199,13 +199,16 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   the brain on a VPS and point your assistant at it" has no supported path.
   The missing piece is an MCP mode that forwards those tools to a remote
   `serve-http` instead of starting Qdrant locally.
-- **Skills as a first-class memory type (candidate).** OpenViking (Volcengine)
-  unifies memory, knowledge and skills behind one retrieval surface. Here a
-  skill is a naming convention over an ordinary library, so nothing in the
-  system can tell a playbook from a note. A typed skill (name, trigger
-  conditions, body, usage outcomes) would let the retrieval policy surface
-  the right playbook before the work instead of after a correction, and it
-  reuses the procedural-memory machinery already benchmarked in Д6.
+- **✅ Shipped: skills as a first-class memory type.** OpenViking (Volcengine)
+  unifies memory, knowledge and skills behind one retrieval surface; here a
+  skill used to be a naming convention over an ordinary library, so nothing in
+  the system could tell a playbook from a note. A skill is now typed (name,
+  trigger, body, outcome history), matched against the task rather than against
+  an error, and listed by name in every context render. It reuses the
+  procedural-memory trust machinery from Д6, so an unproven skill stays
+  low-trust without a second mechanism. Open: importing an existing `skill-*`
+  library into typed skills, and a bench that scores "did the right skill
+  surface for the task" the way Д6 scores error to fix.
 - **v2.5: portability + Memory-Router (candidate).** The `memory.json`
   portable export/import format (v1.3 leftover); the local Memory-Router
   OpenAI-compatible proxy (biggest adoption lever, no ranking change).

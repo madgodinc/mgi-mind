@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Skills: `mind_skill` and `mgimind skill`.** Procedural memory only answers
+  after something breaks. A skill is the house way of doing a kind of work,
+  matched against the task the agent is about to start, so the rule arrives
+  before the mistake. One point per skill in the memories collection, the name
+  as its identity (a re-write edits it and keeps the history), triggers on both
+  the dense and the sparse arm, and the same typed outcome signals procedures
+  use: an unproven skill stays low-trust and a repeatedly-failing one sinks.
+  `mind_context` and the `profile` export carry the catalogue (names and
+  triggers), so the body is fetched only for the skill that applies. Tool
+  surface: 44 (was 43).
+
 - **`doctor` reports the network footprint.** A bug report claimed that
   `serve-http` listens on `0.0.0.0` and that this was what broke a VPN
   tunnel. Neither the HTTP surface nor the bundled Qdrant has ever bound

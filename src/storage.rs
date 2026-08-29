@@ -835,6 +835,7 @@ pub async fn init(config: &MindConfig) -> Result<()> {
 /// HTTP `/library/create` route, so the guard lives here, not at the CLI.
 const RESERVED_LIBRARY_NAMES: &[&str] = &[
     PROCEDURE_LIBRARY,
+    SKILL_LIBRARY,
     MEMORIES_COLLECTION,
     FACTS_COLLECTION,
     PREDICATES_COLLECTION,
@@ -3178,6 +3179,291 @@ async fn fetch_content_by_id(client: &Qdrant, id: &str) -> Option<String> {
         qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s),
         _ => None,
     }
+}
+
+// --- Skills: typed playbooks matched against the task ----------------------
+//
+// A procedure answers "this error just happened, what fixed it last time". A
+// skill answers "I am about to do X, is there a house way to do X". Same
+// storage shape (one point in MEMORIES_COLLECTION, counts in the derived
+// `_mod_procstats` side collection) and a different retrieval moment: the match
+// runs against the task text, so the trigger line carries BOTH vectors, dense
+// for "similar kind of work" and sparse for the literal tool or language name.
+
+/// Namespace for skill ids. A skill's id comes from its NAME alone, so writing
+/// the same name twice edits the skill instead of leaving two copies to
+/// disagree about the house rule.
+const SKILL_NAMESPACE: Uuid = Uuid::from_u128(0x6d676900_736b_696c_0000_000000000001);
+pub const TYPE_SKILL: &str = "skill";
+pub const SKILL_LIBRARY: &str = "_skills";
+/// Cap on a skill body. Skills are read in full once matched, and a skill that
+/// does not fit here is a document, not a playbook.
+pub const MAX_SKILL_BYTES: usize = 8192;
+
+fn skill_filter() -> Filter {
+    Filter::must([Condition::matches("type", TYPE_SKILL.to_string())])
+}
+
+fn skill_id(name: &str) -> String {
+    Uuid::new_v5(&SKILL_NAMESPACE, name.as_bytes()).to_string()
+}
+
+/// One skill plus its trust signals. `score` is 0.0 outside a match.
+pub struct SkillHit {
+    pub id: String,
+    pub name: String,
+    pub when: String,
+    pub body: String,
+    pub verified: bool,
+    pub success_count: i64,
+    pub fail_count: i64,
+    pub score: f32,
+}
+
+fn skill_from_payload(
+    id: String,
+    p: &HashMap<String, qdrant_client::qdrant::Value>,
+    score: f32,
+) -> SkillHit {
+    SkillHit {
+        id,
+        name: extract_string(p, "name").unwrap_or_default(),
+        when: extract_string(p, "when").unwrap_or_default(),
+        body: extract_string(p, "body").unwrap_or_default(),
+        verified: false,
+        success_count: 0,
+        fail_count: 0,
+        score,
+    }
+}
+
+/// Fill in the derived trust signals for a batch of skills, leaving zeros when
+/// the side collection is absent (dropping it costs the boost, never the skill).
+async fn decorate_skill_stats(client: &Qdrant, hits: &mut [SkillHit]) {
+    let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+    let stats = procstats_for(client, &ids).await;
+    for h in hits.iter_mut() {
+        if let Some(s) = stats.get(&h.id) {
+            h.verified = s.verified;
+            h.success_count = s.success_count;
+            h.fail_count = s.fail_count;
+        }
+    }
+}
+
+/// The stored `created_at` of a skill, or None when this is a first write.
+async fn skill_created_at(client: &Qdrant, id: &str) -> Option<String> {
+    let pid: qdrant_client::qdrant::PointId = id.to_string().into();
+    let resp = client
+        .get_points(GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid]).with_payload(true))
+        .await
+        .ok()?;
+    let point = resp.result.into_iter().next()?;
+    extract_string(&point.payload, "created_at")
+}
+
+/// Create or update a skill. Returns its point id. The name is the identity, so
+/// an edit keeps the accumulated outcome history.
+pub async fn add_skill(config: &MindConfig, name: &str, when: &str, body: &str) -> Result<String> {
+    if body.len() > MAX_SKILL_BYTES {
+        anyhow::bail!(
+            "skill '{name}' body is {} bytes; cap is {MAX_SKILL_BYTES}",
+            body.len()
+        );
+    }
+    if when.trim().is_empty() {
+        anyhow::bail!("skill '{name}' needs a non-empty trigger: what task should surface it");
+    }
+    let client = get_client(config).await?;
+    ensure_memories_collection(&client, config.vector_size).await?;
+
+    let id = skill_id(name);
+    let now = chrono::Utc::now().to_rfc3339();
+    // Keep the original created_at across an edit; a rewritten body is the same
+    // skill maturing, not a new one.
+    let created_at = skill_created_at(&client, &id)
+        .await
+        .unwrap_or_else(|| now.clone());
+
+    // The trigger drives both arms: dense for "work of this kind", sparse for
+    // the literal token ("clippy", "tailwind") that a semantic match blurs away.
+    let embedding = embedder::embed_passage(config, when).await?;
+    check_dim(&embedding, config)?;
+    let (s_idx, s_val) = sparse_vector(&format!("{name} {when}"));
+    let vectors = NamedVectors::default()
+        .add_vector(DENSE_VEC, Vector::new_dense(embedding))
+        .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
+
+    let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+    payload.insert("type".into(), TYPE_SKILL.into());
+    payload.insert("library".into(), SKILL_LIBRARY.into());
+    payload.insert("name".into(), name.into());
+    payload.insert("when".into(), when.into());
+    payload.insert("body".into(), body.into());
+    payload.insert("created_at".into(), created_at.into());
+    payload.insert("updated_at".into(), now.into());
+
+    client
+        .upsert_points(
+            UpsertPointsBuilder::new(
+                MEMORIES_COLLECTION,
+                vec![PointStruct::new(id.clone(), vectors, payload)],
+            )
+            .wait(true),
+        )
+        .await
+        .context("Failed to store skill")?;
+    Ok(id)
+}
+
+/// Skills whose trigger matches the task, most relevant first. Pure retrieval;
+/// the caller ranks and decides. Empty (never an error) when nothing is stored.
+pub async fn match_skills(config: &MindConfig, task: &str, limit: usize) -> Result<Vec<SkillHit>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let embedding = embedder::embed_query(config, task).await?;
+    check_dim(&embedding, config)?;
+    let (s_idx, s_val) = sparse_vector(task);
+
+    let qb = QueryPointsBuilder::new(MEMORIES_COLLECTION)
+        .add_prefetch(
+            PrefetchQueryBuilder::default()
+                .query(Query::new_nearest(VectorInput::new_dense(embedding)))
+                .using(DENSE_VEC)
+                .filter(skill_filter())
+                .limit(limit as u64 * 2),
+        )
+        .add_prefetch(
+            PrefetchQueryBuilder::default()
+                .query(Query::new_nearest(VectorInput::new_sparse(s_idx, s_val)))
+                .using(SPARSE_VEC)
+                .filter(skill_filter())
+                .limit(limit as u64 * 2),
+        );
+
+    let response = client
+        .query(
+            qb.query(Query::new_fusion(Fusion::Rrf))
+                .limit(limit as u64 * 2)
+                .with_payload(true),
+        )
+        .await
+        .context("Skill match failed")?;
+
+    let mut hits: Vec<SkillHit> = response
+        .result
+        .into_iter()
+        .map(|point| {
+            skill_from_payload(
+                point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                &point.payload,
+                point.score,
+            )
+        })
+        .collect();
+    decorate_skill_stats(&client, &mut hits).await;
+
+    // Same normalization as procedure recall: RRF fractions are tiny, so the
+    // trust boosts applied by the caller would otherwise dwarf relevance.
+    let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max);
+    if max > 0.0 {
+        for h in &mut hits {
+            h.score /= max;
+        }
+    }
+    Ok(hits)
+}
+
+/// Every stored skill, name order. Used for the catalogue in a context render.
+pub async fn list_skills(config: &MindConfig) -> Result<Vec<SkillHit>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    let response = client
+        .scroll(
+            ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+                .filter(skill_filter())
+                .limit(256)
+                .with_payload(true),
+        )
+        .await
+        .context("Failed to list skills")?;
+
+    let mut hits: Vec<SkillHit> = response
+        .result
+        .into_iter()
+        .map(|point| {
+            skill_from_payload(
+                point.id.as_ref().map(format_point_id).unwrap_or_default(),
+                &point.payload,
+                0.0,
+            )
+        })
+        .collect();
+    decorate_skill_stats(&client, &mut hits).await;
+    hits.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(hits)
+}
+
+/// One skill by name, or None when it was never written.
+pub async fn get_skill(config: &MindConfig, name: &str) -> Result<Option<SkillHit>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let pid: qdrant_client::qdrant::PointId = skill_id(name).into();
+    let resp = client
+        .get_points(GetPointsBuilder::new(MEMORIES_COLLECTION, vec![pid]).with_payload(true))
+        .await
+        .context("Failed to read skill")?;
+    let Some(point) = resp.result.into_iter().next() else {
+        return Ok(None);
+    };
+    let mut hit = skill_from_payload(
+        point.id.as_ref().map(format_point_id).unwrap_or_default(),
+        &point.payload,
+        0.0,
+    );
+    decorate_skill_stats(&client, std::slice::from_mut(&mut hit)).await;
+    Ok(Some(hit))
+}
+
+/// Delete a skill and its outcome history. Returns whether it existed.
+pub async fn remove_skill(config: &MindConfig, name: &str) -> Result<bool> {
+    let existed = get_skill(config, name).await?.is_some();
+    if !existed {
+        return Ok(false);
+    }
+    let client = get_client(config).await?;
+    let id = skill_id(name);
+    let pid: qdrant_client::qdrant::PointId = id.clone().into();
+    client
+        .delete_points(
+            DeletePointsBuilder::new(MEMORIES_COLLECTION)
+                .points(PointsIdsList { ids: vec![pid] })
+                .wait(true),
+        )
+        .await
+        .context("Failed to delete skill")?;
+    // An explicit delete is a "drop this history" signal, so the derived row
+    // goes with it instead of resurrecting under a later skill of the same name.
+    delete_procstats(&client, &id).await;
+    Ok(true)
 }
 
 /// Scroll an entire collection, following pagination to the end (audit #10).

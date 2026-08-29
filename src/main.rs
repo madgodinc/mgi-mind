@@ -34,6 +34,7 @@ mod retrieval_policy;
 mod secrets;
 mod session;
 mod session_ingest;
+mod skill;
 mod storage;
 mod util;
 mod vault;

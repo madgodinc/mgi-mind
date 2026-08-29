@@ -73,6 +73,8 @@ assistants never overwrite each other's log.
 - The user asks what you know about X -> `mind_fact(action="query")`.
 - You hit an error you have seen before, or start a task that tends to fail ->
   `mind_recall` for a known fix before trying from scratch.
+- You are about to start a kind of work the user has house rules for ->
+  `mind_skill(action="match", task="...")` BEFORE you begin, not after a correction.
 
 **At the end:**
 - `mind_session(action="end")` with the same agent name and a `summary` of what was
@@ -86,6 +88,7 @@ assistants never overwrite each other's log.
 | Durable structured fact | `mind_fact(action="add")` | user -> prefers -> Rust |
 | Details, notes, context | `mind_add` (or `mind_ingest`) | "The staging DB is Postgres 16 on db-staging:5432" |
 | A solved error / how-to-fix | `mind_learn` | error -> fix, recalled by `mind_recall` |
+| The house way of doing a kind of work | `mind_skill(action="set")` | "CSS animation: transform and opacity only" |
 | A secret (password, key, token) | the vault, in the user's terminal | never through MCP |
 
 When the user sets a **permanent rule or preference** ("always use X", "my name is
@@ -185,6 +188,28 @@ reuse a recalled fix, report the outcome:
   (worked: true/false)` bumps the counters (a failure demotes the fix) but does not
   verify. Only a real signal does that.
 
+## Skills: the house way (`mind_skill`)
+
+A procedure is reactive: something broke and you want the fix that worked. A skill
+is the other half. It is how this user wants a kind of work done, and it is worth
+nothing if you read it after the fact, so call `mind_skill(action="match",
+task="<what you are about to do>")` before starting non-trivial work. The task text
+is matched against each skill's trigger, semantically and lexically, so "build a
+hover animation" finds a skill whose trigger says "CSS transitions".
+
+`mind_context` lists the catalogue: names and one-line triggers, marked `*` when a
+skill has been verified. Treat that list as the index. Pull a body with
+`action="match"` or `action="show"` when it applies.
+
+When the user states how they want work done from now on, write it:
+`mind_skill(action="set", name="css-motion", when="CSS animation or transition
+work", body="...")`. The name is the identity, so correcting a skill later is a
+re-write of the same name, never a second copy that disagrees with the first.
+
+After you follow one, close the loop with `action="outcome"`: `worked=false` when
+it led you wrong (it sinks in the ranking), `verify=true` only when a
+deterministic signal says the result was right.
+
 ## Saving externally-sourced snippets (`mind_provenance_add`)
 
 When you just produced a snippet via a code-search or doc-search MCP (`mcp.grep.app`,
@@ -227,6 +252,9 @@ counts.
 
 Facts: `mind_fact` with `action` add / query / invalidate. `mind_predicate` for
 cardinality (single / temporal-single / multi).
+
+Skills: `mind_skill` with `action` match / set / list / show / remove / outcome.
+Match before the work; procedures answer after the error.
 
 Procedures: `mind_learn`, `mind_recall`, `mind_outcome` (typed signal:
 test_passed / code_compiled, both counts and verifies), `mind_procedure_outcome`

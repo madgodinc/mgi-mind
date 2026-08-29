@@ -275,6 +275,21 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 | `mgimind fact query <term>` | 查找 term 出现在 subject、predicate 或 object 中的事实。 |
 | `mgimind fact invalidate <id>` | 软删除一条事实（保留在磁盘上，标记为无效，查询时隐藏）。 |
 
+### 技能
+
+过程记忆回答的是「刚出了错，上次是怎么修的」。技能回答的是「我正要做 X，
+这里有没有既定的做法」。存储与结果信号相同，不同的是时机：按任务匹配，在
+动手之前。上下文里带的是目录（名称与触发条件），助手因此知道有哪些技能，
+只在真正用得上时才取出正文。
+
+| 命令 | 作用 |
+|---|---|
+| `mgimind skill set <名称> --when <触发条件> --body <正文>` | 写入一个技能。名称即身份：再写一次是就地修改并保留历史。`--body-file <路径>` 从文件读取正文。 |
+| `mgimind skill match <任务> [--limit N]` | 适用于该任务的技能，按相关性与实际效果排序。 |
+| `mgimind skill list` / `mgimind skill show <名称>` | 目录，或某个技能的全文。 |
+| `mgimind skill outcome <名称> [--failed] [--verify]` | 记录用下来如何。`--verify` 只用于确定性信号，不是凭感觉。 |
+| `mgimind skill rm <名称>` | 删除技能及其结果历史。 |
+
 ### 会话
 
 | 命令 | 作用 |

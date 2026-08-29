@@ -1926,3 +1926,85 @@ fn reindex_preserves_and_backs_up_memories() {
         "memory must still be retrievable after reindex, got:\n{out}"
     );
 }
+
+/// Skills end to end: write one, see it in the catalogue, match it against a
+/// task phrased in different words, record an outcome, delete it. Covers the
+/// part unit tests cannot reach: the embedding, the hybrid match over
+/// `type=skill`, and the derived outcome row shared with procedures.
+#[test]
+fn a_skill_is_written_matched_and_deleted() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let name = format!("itskill-{}", std::process::id());
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env("MGIMIND_HOME", &mind)
+            .env("ORT_DYLIB_PATH", &ort)
+            .output()
+            .expect("spawn mgimind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, out, err) = run(&[
+        "skill",
+        "set",
+        &name,
+        "--when",
+        "writing or reviewing CSS animation and transitions",
+        "--body",
+        "Animate transform and opacity only; never animate width or top.",
+    ]);
+    assert!(ok, "skill set failed:\nstdout:\n{out}\nstderr:\n{err}");
+
+    let (ok, out, err) = run(&["skill", "list"]);
+    assert!(ok, "skill list failed: {err}");
+    assert!(
+        out.contains(&name),
+        "catalogue is missing the skill:\n{out}"
+    );
+
+    // The task shares no keyword with the trigger beyond "animation", so this
+    // is the dense arm doing the work, not a substring match.
+    let (ok, out, err) = run(&[
+        "skill",
+        "match",
+        "I am about to build a hover animation for a button",
+    ]);
+    assert!(ok, "skill match failed: {err}");
+    assert!(
+        out.contains(&name) && out.contains("never animate width"),
+        "match should return the skill with its body:\n{out}"
+    );
+
+    let (ok, out, err) = run(&["skill", "outcome", &name, "--verify"]);
+    assert!(ok, "skill outcome failed:\nstdout:\n{out}\nstderr:\n{err}");
+    let (ok, out, err) = run(&["skill", "show", &name]);
+    assert!(ok, "skill show failed: {err}");
+    assert!(
+        out.contains("(verified)") && out.contains("✓1"),
+        "outcome should latch verified and count the success:\n{out}"
+    );
+
+    let (ok, out, err) = run(&["skill", "rm", &name]);
+    assert!(ok, "skill rm failed:\nstdout:\n{out}\nstderr:\n{err}");
+    let (_, out, _) = run(&["skill", "list"]);
+    assert!(!out.contains(&name), "skill survived deletion:\n{out}");
+}
