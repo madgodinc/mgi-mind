@@ -1,4 +1,4 @@
-"""Talking to mgi-mind over plain HTTP — no client, any language.
+"""Talking to mgi-mind over plain HTTP: no client, any language.
 
 The Python client is a thin wrapper over these calls. If your agent runtime
 isn't Python, port these four lines: a bearer token, a POST, read the JSON.

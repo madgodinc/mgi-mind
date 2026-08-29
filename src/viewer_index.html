@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MGI-Mind — memory visualization</title>
+<title>MGI-Mind: memory visualization</title>
 <style>
   :root { --bg:#05070d; --fg:#cfe3ff; }
   * { box-sizing: border-box; }
@@ -99,7 +99,7 @@
 <div id="graph"></div>
 
 <div id="title" class="hud">
-  <h1>🧠 <span data-i18n="appName">MGI-Mind — the brain</span></h1>
+  <h1>🧠 <span data-i18n="appName">MGI-Mind: the brain</span></h1>
   <p data-i18n="intro">Prototype. Hover (summary after ~1s), click a core to dive inside.</p>
 </div>
 
@@ -157,7 +157,7 @@
 
 <div id="inside">
   <div class="card">
-    <div class="close" data-i18n="close">esc / click outside — close</div>
+    <div class="close" data-i18n="close">esc / click outside to close</div>
     <div class="c-kind" id="iKind"></div>
     <h2 id="iTitle"></h2>
     <div class="addr" id="iAddr"></div>
@@ -180,7 +180,7 @@
 <script>
 // ===================== i18n =====================
 const I18N = {
-  en: { appName:'MGI-Mind — the brain', intro:'Prototype. Hover (summary after ~1s), click a core to dive inside.',
+  en: { appName:'MGI-Mind: the brain', intro:'Prototype. Hover (summary after ~1s), click a core to dive inside.',
     searchPh:'🔍 search cores…', filterAll:'all types', kMemory:'memory', kEntity:'entities', kLibrary:'regions',
     kEntitySing:'entity', kRegion:'region', regionsBtn:'regions ▾', regionPrefix:'region: ', allRegions:'★ all regions', reset:'reset',
     editor:'✎ editor', legCores:'CORES', legPulses:'IMPULSES', pWrite:'write', pRead:'read', pProcess:'process',
@@ -189,12 +189,12 @@ const I18N = {
     cCores:'cores:', shSphere:'spheres', shCrystal:'crystals', shPoint:'points',
     cBg:'bg:', bgNebula:'nebula', bgStars:'stars', bgPlain:'plain',
     cImpulses:'impulses', cLabels:'labels', cSimulate:'▶ simulate activity',
-    close:'esc / click outside — close', secContent:'full content', understood:'how the agent understood it',
+    close:'esc / click outside to close', secContent:'full content', understood:'how the agent understood it',
     neurons:'neurons (links)', cores:'cores', edit:'✎ edit', save:'💾 save to memory', del:'🗑 delete core',
-    clickToEnter:'click to dive inside', noMatch:'no match', deleted:'🗑 deleted', saved:'💾 saved', pinned:'📌 layout pinned — survives reload', layoutReset:'↺ manual layout cleared',
+    clickToEnter:'click to dive inside', noMatch:'no match', deleted:'🗑 deleted', saved:'💾 saved', pinned:'📌 layout pinned, survives reload', layoutReset:'↺ manual layout cleared',
     confirmDel:'Delete this core permanently?', kindMemory:'memory core', kindEntity:'entity', kindRegion:'region',
     mId:'id:', mRegion:'region:', mAuthor:'author:', mWritten:'written:', mLinks:'links:' },
-  ru: { appName:'MGI-Mind — мозг', intro:'Прототип. Наведись (выжимка через ~1с), кликни на ядро — нырнёшь внутрь.',
+  ru: { appName:'MGI-Mind: мозг', intro:'Прототип. Наведись (выжимка через ~1с), кликни на ядро, чтобы нырнуть внутрь.',
     searchPh:'🔍 поиск по ядрам…', filterAll:'все типы', kMemory:'память', kEntity:'сущности', kLibrary:'регионы',
     kEntitySing:'сущность', kRegion:'регион', regionsBtn:'регионы ▾', regionPrefix:'регион: ', allRegions:'★ все регионы', reset:'сброс',
     editor:'✎ редактор', legCores:'ЯДРА', legPulses:'ИМПУЛЬСЫ', pWrite:'запись', pRead:'чтение', pProcess:'обработка',
@@ -203,12 +203,12 @@ const I18N = {
     cCores:'ядра:', shSphere:'сферы', shCrystal:'кристаллы', shPoint:'точки',
     cBg:'фон:', bgNebula:'туманность', bgStars:'звёзды', bgPlain:'пусто',
     cImpulses:'импульсы', cLabels:'подписи', cSimulate:'▶ симулировать активность',
-    close:'esc / клик вне — выйти', secContent:'полный контент', understood:'как понял агент',
+    close:'esc / клик вне, чтобы выйти', secContent:'полный контент', understood:'как понял агент',
     neurons:'нейроны (связи)', cores:'ядер', edit:'✎ редактировать', save:'💾 сохранить в память', del:'🗑 удалить ядро',
-    clickToEnter:'клик — нырнуть внутрь', noMatch:'нет совпадений', deleted:'🗑 удалено', saved:'💾 сохранено', pinned:'📌 положение закреплено — переживёт перезагрузку', layoutReset:'↺ ручная расстановка сброшена',
+    clickToEnter:'клик, чтобы нырнуть внутрь', noMatch:'нет совпадений', deleted:'🗑 удалено', saved:'💾 сохранено', pinned:'📌 положение закреплено, переживёт перезагрузку', layoutReset:'↺ ручная расстановка сброшена',
     confirmDel:'Удалить ядро навсегда?', kindMemory:'ядро памяти', kindEntity:'сущность', kindRegion:'регион',
     mId:'id:', mRegion:'регион:', mAuthor:'автор:', mWritten:'записано:', mLinks:'связей:' },
-  de: { appName:'MGI-Mind — das Gehirn', intro:'Prototyp. Bewege die Maus (Zusammenfassung nach ~1s), klicke einen Kern zum Eintauchen.',
+  de: { appName:'MGI-Mind: das Gehirn', intro:'Prototyp. Bewege die Maus (Zusammenfassung nach ~1s), klicke einen Kern zum Eintauchen.',
     searchPh:'🔍 Kerne suchen…', filterAll:'alle Typen', kMemory:'Gedächtnis', kEntity:'Entitäten', kLibrary:'Regionen',
     kEntitySing:'Entität', kRegion:'Region', regionsBtn:'Regionen ▾', regionPrefix:'Region: ', allRegions:'★ alle Regionen', reset:'zurücksetzen',
     editor:'✎ Editor', legCores:'KERNE', legPulses:'IMPULSE', pWrite:'Schreiben', pRead:'Lesen', pProcess:'Verarbeitung',
@@ -217,9 +217,9 @@ const I18N = {
     cCores:'Kerne:', shSphere:'Kugeln', shCrystal:'Kristalle', shPoint:'Punkte',
     cBg:'Hintergrund:', bgNebula:'Nebel', bgStars:'Sterne', bgPlain:'leer',
     cImpulses:'Impulse', cLabels:'Beschriftungen', cSimulate:'▶ Aktivität simulieren',
-    close:'esc / Klick außerhalb — schließen', secContent:'voller Inhalt', understood:'wie der Agent es verstand',
+    close:'esc / Klick außerhalb zum Schließen', secContent:'voller Inhalt', understood:'wie der Agent es verstand',
     neurons:'Neuronen (Verbindungen)', cores:'Kerne', edit:'✎ bearbeiten', save:'💾 in Gedächtnis speichern', del:'🗑 Kern löschen',
-    clickToEnter:'klicken zum Eintauchen', noMatch:'kein Treffer', deleted:'🗑 gelöscht', saved:'💾 gespeichert', pinned:'📌 Layout fixiert — übersteht Neuladen', layoutReset:'↺ manuelles Layout gelöscht',
+    clickToEnter:'klicken zum Eintauchen', noMatch:'kein Treffer', deleted:'🗑 gelöscht', saved:'💾 gespeichert', pinned:'📌 Layout fixiert, übersteht Neuladen', layoutReset:'↺ manuelles Layout gelöscht',
     confirmDel:'Diesen Kern endgültig löschen?', kindMemory:'Gedächtniskern', kindEntity:'Entität', kindRegion:'Region',
     mId:'id:', mRegion:'Region:', mAuthor:'Autor:', mWritten:'geschrieben:', mLinks:'Verbindungen:' },
 };
@@ -442,7 +442,7 @@ function renderInside(n){
     const A=[]; A.push('<b>'+t('mId')+'</b> '+n.id); if(n.lib)A.push('<b>'+t('mRegion')+'</b> '+n.lib);
     if(n.author)A.push('<b>'+t('mAuthor')+'</b> '+n.author); if(n.date)A.push('<b>'+t('mWritten')+'</b> '+n.date);
     A.push('<b>'+t('mLinks')+'</b> '+(DEG[n.id]||0)); document.getElementById('iAddr').innerHTML=A.join('  ·  ');
-    document.getElementById('iBody').textContent=n.full||('('+n.kind+' — /api/node/'+n.id+')');
+    document.getElementById('iBody').textContent=n.full||('('+n.kind+': /api/node/'+n.id+')');
     document.getElementById('iUnderstood').innerHTML=n.understood?'<div class="understood"><div class="u-label">'+t('understood')+'</div><div class="u-text">'+n.understood+'</div></div>':'';
     const rel=DATA.links.filter(l=>l.source===n.id||l.target===n.id||(l.source.id||l.source)===n.id||(l.target.id||l.target)===n.id).slice(0,12);
     document.getElementById('iLinks').innerHTML=rel.length?('<h3>'+t('neurons')+'</h3>'+rel.map(l=>{ const sid=l.source.id||l.source,tid=l.target.id||l.target;

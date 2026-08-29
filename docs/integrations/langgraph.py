@@ -1,6 +1,6 @@
 """mgi-mind as memory tools for a LangGraph agent.
 
-Two tools — recall and remember — backed by a running mgi-mind server. The
+Two tools, recall and remember, backed by a running mgi-mind server. The
 agent calls them like any other tool; its memory now outlives the process.
 
 Run the brain first:

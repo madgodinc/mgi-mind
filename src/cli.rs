@@ -76,7 +76,7 @@ pub enum Commands {
         /// Force the reranker on for this query (overrides config)
         #[arg(long, conflicts_with = "no_rerank")]
         rerank: bool,
-        /// Force the reranker OFF for this query — see the raw hybrid order
+        /// Force the reranker OFF for this query, to see the raw hybrid order
         #[arg(long)]
         no_rerank: bool,
         /// Override how many candidates the reranker re-orders for this query
@@ -100,7 +100,7 @@ pub enum Commands {
         /// Only memories created before this instant, EXCLUSIVE (RFC3339 or YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
-        /// List ARCHIVED (soft-forgotten) memories instead of live ones — see
+        /// List ARCHIVED (soft-forgotten) memories instead of live ones: see
         /// what was forgotten, with ids to `mgimind restore-memory <id>`
         #[arg(long)]
         archived: bool,
@@ -214,7 +214,7 @@ pub enum Commands {
         library: String,
         /// Actually mutate the store. Without it: dry-run that prints the plan
         /// (what's new / what would replace existing) and exits. md import is
-        /// an escape hatch — running it unintentionally over an automated
+        /// an escape hatch, and running it unintentionally over an automated
         /// store is exactly what the dry-run default protects against.
         #[arg(long)]
         apply: bool,
@@ -266,7 +266,7 @@ pub enum Commands {
 
     /// Rebuild the memory index for a changed embedding model. Re-embeds every
     /// stored memory and procedure from its saved text into a fresh collection
-    /// at the current `vector_size`. Run this after switching models — the old
+    /// at the current `vector_size`. Run this after switching models: the old
     /// vectors are meaningless in the new space, even at the same dimension.
     /// Idempotent; preserves created_at / source / author / type. Stored text is
     /// never lost (read in full before the collection is rebuilt).
@@ -302,7 +302,7 @@ pub enum Commands {
     },
 
     /// v1.5 Phase 7: record a typed external-signal outcome on any
-    /// memory. Closes the CLI gap — `mind_outcome` was MCP-only
+    /// memory. Closes the CLI gap, since `mind_outcome` was MCP-only
     /// before. Useful for debugging guardrail / confidence_score
     /// behaviour from a terminal.
     Outcome {
@@ -321,7 +321,7 @@ pub enum Commands {
     },
 
     /// Retrieval benchmark (phase Д1): measure R@k retrieval recall on a dataset
-    /// (LongMemEval). Zero-API — no LLM, no keys. NOT QA accuracy.
+    /// (LongMemEval). Zero-API: no LLM, no keys. NOT QA accuracy.
     Bench {
         /// Path to the dataset JSON (e.g. longmemeval_s.json)
         dataset: String,
@@ -363,7 +363,7 @@ pub enum Commands {
 
     /// STALE bench scaffold (Phase 4): runs the bench-stale harness over
     /// a single configuration. The actual STALE protocol adapter is not
-    /// implemented yet — this is the CLI surface so calibration sweep
+    /// implemented yet. This is the CLI surface so calibration sweep
     /// tooling can be developed against the type contracts.
     BenchStale {
         /// Path to the STALE dataset JSON (Appendix G of arxiv 2605.06527).
@@ -391,7 +391,7 @@ pub enum Commands {
     },
 
     /// STALE bench sweep: walk a small grid of constant overrides and
-    /// emit per-run results into a directory. Scaffold — wraps the
+    /// emit per-run results into a directory. A scaffold that wraps the
     /// existing bench-stale single-run harness so calibration tooling
     /// has a CLI surface ready when the harness adapter lands.
     BenchStaleSweep {
@@ -433,14 +433,14 @@ pub enum Commands {
         archive_cold: bool,
     },
     /// Inspect the audit log of mutations (add/update/delete/library/etc).
-    /// Read-only — the log itself is append-only and never edited by hand.
+    /// Read-only: the log itself is append-only and never edited by hand.
     Audit {
         #[command(subcommand)]
         action: AuditAction,
     },
     /// Ephemeral local viewer over the memory store. Brings up an HTTP server
     /// on 127.0.0.1 on a random free port, prints the URL, exits on Ctrl-C.
-    /// Static frontend baked into the binary — no Node, no extra runtime.
+    /// Static frontend baked into the binary: no Node, no extra runtime.
     Viewer {
         /// Don't auto-open the browser. Useful when running on a headless box
         /// over SSH or when scripting integration tests.
@@ -517,7 +517,7 @@ pub enum Commands {
     /// Ingest a closed Claude Code transcript (`.jsonl` under
     /// `~/.claude/projects/<encoded-cwd>/`) into long-term memory. Pulls
     /// user/assistant text blocks (NOT tool_use / tool_result / thinking),
-    /// then routes them through the same relevance gate as live ingest —
+    /// then routes them through the same relevance gate as live ingest:
     /// short reactions get quarantined, paraphrases of stored content fail
     /// the novelty check, and only the substantive material lands. Zero
     /// LLM: no summarization, no compression. The gate IS the filter.
@@ -593,7 +593,7 @@ pub enum MigrateV14Cmd {
 #[derive(Subcommand)]
 pub enum ConfigCmd {
     /// Print the current install-mode and the auto-detect recommendation.
-    /// The recommendation is informational only — it is never auto-applied.
+    /// The recommendation is informational only and never auto-applied.
     InstallMode,
     /// Set the install-mode profile. Accepts `chat-only`, `dev-with-ci`,
     /// or `multi-tenant`. Restart `mgimind serve` for the change to take
@@ -641,10 +641,10 @@ pub enum ExtractorCmd {
         /// Variant to load.
         #[arg(long, default_value = "default")]
         variant: String,
-        /// Stop after N memories — handy for staged runs. 0 = all.
+        /// Stop after N memories, handy for staged runs. 0 = all.
         #[arg(long, default_value = "0")]
         limit: usize,
-        /// Dry run — extract but do NOT write triples into the facts
+        /// Dry run: extract but do NOT write triples into the facts
         /// collection. Prints the same stats so you can size the run.
         #[arg(long)]
         dry_run: bool,
@@ -696,10 +696,10 @@ pub enum AuditAction {
     /// Show audit events whose `target` matches the given id (memory id,
     /// library name, etc).
     Show { id: String },
-    /// "Where did my writes go?" — tally stored vs dropped (near-dup skip,
+    /// "Where did my writes go?" Tally stored vs dropped (near-dup skip,
     /// quarantine, secret-skip) over the audit log, and show the content of
     /// the dropped candidates so a "lost memory" is recoverable. The near-dup
-    /// skips are the unrecoverable ones — look there first.
+    /// skips are the unrecoverable ones, so look there first.
     Writes {
         /// Only events newer than this many hours ago (e.g. 168 = last week).
         #[arg(long, value_name = "HOURS")]
@@ -731,7 +731,7 @@ pub enum QuarantineAction {
     /// usual promotion path is automatic (re-asserting the same content via
     /// ingest); this is the explicit override when you know what you want.
     Promote { id: String },
-    /// Expire (delete) a quarantined entry by id — confirm the gate was right
+    /// Expire (delete) a quarantined entry by id, confirming the gate was right
     /// to reject it. Only ever touches quarantined points, never live memory,
     /// and the content + reason stay in the audit log so it's recoverable.
     Expire { id: String },

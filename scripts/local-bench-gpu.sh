@@ -136,7 +136,7 @@ if [[ -f "${CONFIG_PATH}" ]]; then
         mv "${TMP}" "${CONFIG_PATH}"
         echo "  rerank_enabled = ${RUN_RERANK} (config.json updated)"
     else
-        echo "  [warn] jq not found — leaving rerank_enabled at its current value in ${CONFIG_PATH}"
+        echo "  [warn] jq not found, leaving rerank_enabled at its current value in ${CONFIG_PATH}"
     fi
 fi
 
