@@ -16,6 +16,15 @@
   so short memories do not grow, and points written before this keep the export
   behaviour they had.
 
+- **The viewer is a control surface, and the README now says so.** `mgimind
+  brain` was documented as read-only over the same data. It is not: an
+  unrestricted viewer also serves `DELETE /api/memories/:id`,
+  `PATCH /api/node/:id` and quarantine promotion. Those routes fail closed only
+  when the viewer is started with `--libraries`, and `brain` takes no flags, so
+  it is always the unrestricted form. The bearer token and the loopback bind are
+  all that stand between that port and the store. Documentation only, no
+  behaviour changed.
+
 - **Skills: `mind_skill` and `mgimind skill`.** Procedural memory only answers
   after something breaks. A skill is the house way of doing a kind of work,
   matched against the task the agent is about to start, so the rule arrives

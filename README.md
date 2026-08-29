@@ -379,7 +379,20 @@ Search returns results in tiers so the assistant spends tokens carefully:
 
 `mgimind brain` renders the memory as a graph: cores for memories, facts,
 and regions, wired by the links between them, pulsing as the store changes.
-It runs locally and is read-only over the same data.
+It binds to loopback only and needs the token printed alongside its URL.
+
+Treat it as a control surface. An unrestricted viewer also serves
+`DELETE /api/memories/:id`, `PATCH /api/node/:id` and quarantine promotion,
+so whatever reaches that port with that token can change the store. For a
+viewer that cannot write, start it confined to an allowlist:
+
+```
+mgimind viewer --libraries work,personal
+```
+
+That fail-closes every mutating route with a 403, along with the routes that
+span all libraries (graph, audit, pulse, the ingest feed). `mgimind brain`
+takes no flags, so it is always the unrestricted form.
 
 <p align="center">
   <img src="https://github.com/madgodinc/mgi-mind/releases/download/media-assets/brain-demo.gif" alt="Memory rendered as a brain, glowing cores wired by neurons" width="760">
