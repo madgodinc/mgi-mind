@@ -226,7 +226,7 @@ fn render_report(
 ) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    writeln!(s, "LongMemEval — retrieval recall (R@k), zero-API").unwrap();
+    writeln!(s, "LongMemEval: retrieval recall (R@k), zero-API").unwrap();
     writeln!(
         s,
         "config: model={} dim={} rerank={} (sessions ranked by hybrid dense+sparse)",

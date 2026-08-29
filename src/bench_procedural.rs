@@ -265,7 +265,7 @@ fn render(
 ) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    let _ = writeln!(s, "Procedural memory — recall@k (phase Д6, zero-API)");
+    let _ = writeln!(s, "Procedural memory: recall@k (phase Д6, zero-API)");
     let _ = writeln!(
         s,
         "config: model={} dim={} rerank={}",

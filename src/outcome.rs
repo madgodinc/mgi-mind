@@ -265,7 +265,7 @@ pub async fn record_with_novelty(
     let guardrail_msg = if should_promote_to_doubt_window(&deduped, chrono::Utc::now()) {
         crate::doubt::flag_for_doubt_window(memory_id);
         format!(
-            " ⚠ guardrail triggered: ≥{ERROR_RATE_FAIL_THRESHOLD} failed test_passed signals in last {ERROR_RATE_WINDOW_DAYS}d — flagged for doubt window."
+            " ⚠ guardrail triggered: ≥{ERROR_RATE_FAIL_THRESHOLD} failed test_passed signals in last {ERROR_RATE_WINDOW_DAYS}d: flagged for doubt window."
         )
     } else {
         String::new()
@@ -273,7 +273,7 @@ pub async fn record_with_novelty(
 
     Ok((
         format!(
-            "Recorded {type_name} (success={}) on {memory_id} from source '{}' — {} distinct signal(s) now logged.{guardrail_msg}",
+            "Recorded {type_name} (success={}) on {memory_id} from source '{}': {} distinct signal(s) now logged.{guardrail_msg}",
             new_signal.success,
             new_signal.source,
             deduped.len(),

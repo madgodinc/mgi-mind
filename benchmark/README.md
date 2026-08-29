@@ -16,9 +16,9 @@ benchmark/
 
 Each `results/<date>-<label>/` directory contains:
 
-- `README.md` — what was run, hardware, model, env vars, reproduction steps.
-- `summary.json` — machine-parseable numbers (R@k by mode, wall-time, raw counts).
-- `raw.json` — per-question outputs (with sha256 cited in BENCHMARKS.md).
+- `README.md`: what was run, hardware, model, env vars, reproduction steps.
+- `summary.json`: machine-parseable numbers (R@k by mode, wall-time, raw counts).
+- `raw.json`: per-question outputs (with sha256 cited in BENCHMARKS.md).
 
 ## Headlines
 
@@ -29,7 +29,7 @@ Each `results/<date>-<label>/` directory contains:
 | v0.14.3 + MiniLM (variance check) | LongMemEval-S (500q) | 85.0% | 98.0% | 99.6% | 351s | RTX 3090 | MiniLM GPU ≈ MiniLM INT8 CPU (audit) |
 | v0.8.1 baseline (MiniLM INT8 CPU) | LongMemEval-S (500q) | 85.2% | 98.2% | 99.4% | 1h45m | RTX 5060 Ti | comparison baseline |
 
-R@k is **retrieval recall** — was the right memory in the top-K returned. Not QA accuracy. See [issue #17](https://github.com/madgodinc/mgi-mind/issues/17) for the QA-accuracy plan.
+R@k is **retrieval recall**: was the right memory in the top-K returned. Not QA accuracy. See [issue #17](https://github.com/madgodinc/mgi-mind/issues/17) for the QA-accuracy plan.
 
 ## Reproducing v0.14.3 numbers locally
 
@@ -76,4 +76,4 @@ Default install. No GPU setup. `mgimind doctor --fix` is enough. Set `--output` 
 
 ## What's next (issue #16)
 
-The v1.4 / v1.5 changes (duel rule, doubt window, install-mode profile, active re-test pass) need their own R@k regression check — STALE bench gate is `R@5 regression < 1.0pp` against the v0.14.3 numbers above. Tooling scaffold lives in `src/bench_stale.rs`; CLI surface is `mgimind bench-stale` / `mgimind bench-stale-sweep`. The dataset adapter is the missing piece.
+The v1.4 / v1.5 changes (duel rule, doubt window, install-mode profile, active re-test pass) need their own R@k regression check. The STALE bench gate is `R@5 regression < 1.0pp` against the v0.14.3 numbers above. Tooling scaffold lives in `src/bench_stale.rs`; CLI surface is `mgimind bench-stale` / `mgimind bench-stale-sweep`. The dataset adapter is the missing piece.

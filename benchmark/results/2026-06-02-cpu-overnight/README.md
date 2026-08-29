@@ -1,4 +1,4 @@
-# CPU overnight bench — 2026-06-02
+# CPU overnight bench: 2026-06-02
 
 **Host:** madgodinc@pop-os
 **HW:** Intel i5-12400F (6c/12t), 48GB RAM

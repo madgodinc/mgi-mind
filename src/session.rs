@@ -267,7 +267,7 @@ fn recover_zombie(agent: &str, idle_minutes: i64) -> Result<Option<RecoveredSess
     // Build a synthetic summary out of what we know — no fabrication.
     let summary = format!(
         "Auto-closed by v0.13 liveness check. Last activity at {} (idle for {} min). \
-         The session terminated without calling mind_session_end — usually a kill, \
+         The session terminated without calling mind_session_end, usually a kill, \
          Ctrl-C, or crash. No explicit summary recorded.",
         last.to_rfc3339(),
         age.num_minutes()

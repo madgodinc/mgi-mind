@@ -1,4 +1,4 @@
-# ADR 0001 — Cardinality enum instead of single_valued_predicates list
+# ADR 0001: Cardinality enum instead of single_valued_predicates list
 
 **Status:** accepted.
 **Date:** 2026-06-04.
@@ -21,7 +21,7 @@ pub enum Cardinality {
 
 ## Context
 
-Audit #13 surfaced as PR #2 from @spikefcz — a fix for accumulating
+Audit #13 surfaced as PR #2 from @spikefcz, a fix for accumulating
 contradictory facts on single-valued predicates. The proposed shape
 was a flat `single_valued_predicates: Vec<String>` in config:
 predicates on the list got auto-superseded on write.
@@ -62,16 +62,16 @@ exceptions.
   surface for user review.
 - **Migration cost on existing bases.** Pre-v1.4 facts have no
   cardinality recorded; they read as `Multi` by default (the safe
-  fallback — no false conflicts on legacy data).
+  fallback, so no false conflicts on legacy data).
 
 ## Implementation
 
 `src/knowledge.rs`:
 
 - `Cardinality` enum
-- `register_cardinality(config, predicate, cardinality)` — write to
+- `register_cardinality(config, predicate, cardinality)`: write to
   the cardinality registry.
-- `lookup_cardinality(config, predicate)` — read with `Multi` default.
+- `lookup_cardinality(config, predicate)`: read with `Multi` default.
 
 `src/migrate_v14.rs::run_cardinality_inference`:
 
@@ -91,7 +91,7 @@ exceptions.
 
 - **`single_valued_predicates: Vec<String>` (PR #2).** Rejected as
   described above.
-- **Inferred from usage at read time.** Rejected — the duel rule
+- **Inferred from usage at read time.** Rejected, because the duel rule
   needs to run at write time for the loser to be dampened
   atomically with the winner being written.
 - **Subject-level cardinality** (different subjects can have

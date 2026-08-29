@@ -1,4 +1,4 @@
-# mgi-mind on CUDA — Docker image
+# mgi-mind on CUDA: the Docker image
 
 This is the GPU build of mgi-mind, isolated to a Docker image so the main
 release stays a single CPU-only Rust binary. It exists for two reasons:
@@ -9,7 +9,7 @@ release stays a single CPU-only Rust binary. It exists for two reasons:
    actually re-runnable as the retrieval stack evolves.
 2. **Power-user GPU path.** If you ingest a lot of long documents at
    once (`mind_ingest` with thousands of candidates), the embedding
-   batch is the bottleneck — CUDA shifts that from CPU-seconds to
+   batch is the bottleneck, and CUDA shifts that from CPU-seconds to
    GPU-milliseconds.
 
 The image is **not** part of the standard `install.sh` install. The
@@ -81,7 +81,7 @@ sudo docker run --rm --gpus all \
 ```
 
 A `--limit 20` CPU run takes ~3 min; the same on GPU should take ~30s.
-Recall numbers should match (within rounding) — CUDA is for speed, not
+Recall numbers should match (within rounding), since CUDA is for speed, not
 for changing the model behavior.
 
 ## Versions / Blackwell notes

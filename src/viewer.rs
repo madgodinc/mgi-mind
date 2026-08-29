@@ -129,7 +129,7 @@ pub async fn run_on(
     eprintln!("  ───────────────────────────────────────────────────────");
     eprintln!("  open:  {url}");
     if confined {
-        eprintln!("  scope: library-confined (--libraries) — memory views only");
+        eprintln!("  scope: library-confined (--libraries): memory views only");
     }
     eprintln!("  stop:  Ctrl-C");
     eprintln!();

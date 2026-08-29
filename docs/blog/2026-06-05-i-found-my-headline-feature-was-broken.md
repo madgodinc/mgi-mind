@@ -6,9 +6,9 @@
 
 ## TL;DR
 
-I shipped six versions of an AI-agent memory layer over two weeks. v1.4 added a "validity model" — predicates have a cardinality (Single / TemporalSingle / Multi), and conflicting facts get resolved by a duel rule. The duel rule decides who wins, dampens the loser, keeps both for audit. 290 unit tests, ADRs, four critic rounds, two README translations, contributor docs.
+I shipped six versions of an AI-agent memory layer over two weeks. v1.4 added a "validity model": predicates have a cardinality (Single / TemporalSingle / Multi), and conflicting facts get resolved by a duel rule. The duel rule decides who wins, dampens the loser, keeps both for audit. 290 unit tests, ADRs, four critic rounds, two README translations, contributor docs.
 
-Yesterday I sat down to test it on real data — the 35k-fact knowledge graph extracted from my own two years of personal notes. Added a conflicting fact. Queried the subject. **Both facts came back as Active.**
+Yesterday I sat down to test it on real data, the 35k-fact knowledge graph extracted from my own two years of personal notes. Added a conflicting fact. Queried the subject. **Both facts came back as Active.**
 
 The headline feature was silently broken. Has been since v1.4.
 
@@ -60,7 +60,7 @@ Both Active. No audit event. The duel rule was silent.
 
 ## Locating the bug
 
-The 290 unit tests pass. The CLI integration suite (6 tests) passes. The build is warning-free. So either the bug is in something none of them touch — or it's in a place where unit tests and the production read path disagree about reality.
+The 290 unit tests pass. The CLI integration suite (6 tests) passes. The build is warning-free. So either the bug is in something none of them touch, or it's in a place where unit tests and the production read path disagree about reality.
 
 I added two `eprintln!` lines to `knowledge::add_fact`:
 
@@ -108,7 +108,7 @@ let filter = Filter {
 };
 ```
 
-There it is. `valid="true"` is the only state filter. `dampen_loser` only writes `status`, not `valid`. The loser remains `valid="true"` (it's not invalid, it lost a duel — those are different things in the post-v1.4 model), so it passes the filter and shows up in every query.
+There it is. `valid="true"` is the only state filter. `dampen_loser` only writes `status`, not `valid`. The loser remains `valid="true"` (it's not invalid, it lost a duel, and those are different things in the post-v1.4 model), so it passes the filter and shows up in every query.
 
 The fix is six lines:
 
@@ -161,7 +161,7 @@ fn multi_cardinality_allows_coexistence() {
 
 Both run in 0.2 s against a real Qdrant. The vectorless path needs no embedding model, so CI runs them on every push.
 
-Audited the rest of the read paths for the same omission. Found three more — `list_all_facts`, `list_top_dependants_facts`, `mgimind doctor`'s summary loop. All filtered on `valid="true"` only. Fixed all three.
+Audited the rest of the read paths for the same omission. Found three more: `list_all_facts`, `list_top_dependants_facts`, `mgimind doctor`'s summary loop. All filtered on `valid="true"` only. Fixed all three.
 
 Wrote a `mgimind migrate-v14 redo-duels` walk. It scans every `(subject, predicate)` cluster, identifies Single/TemporalSingle predicates with > 1 active fact, runs the duel rule across the cluster, dampens losers. This cleans up legacy data from before the read-path fix.
 
@@ -171,11 +171,11 @@ I ran it on my own 35k-fact KG. Output:
 Found 31 conflict-bearing cluster(s):
 
   [Single] "Aurora" -> "has_status" (2 active)
-    keep      frozen permanently (since 2026-05-29) — hosted on dead brain server
-    dampen    active (April 2026 — running on brain server, working on stream)
+    keep      frozen permanently (since 2026-05-29), hosted on dead brain server
+    dampen    active (April 2026, running on brain server, working on stream)
 
   [Single] "Mad's HN account MadGodInc" -> "has_status" (2 active)
-    keep      hellbanned (confirmed 2026-06-05) — 5 comments invisible to others
+    keep      hellbanned (confirmed 2026-06-05), 5 comments invisible to others
     dampen    created 2026-05-29, considered healthy initially
 
   [TemporalSingle] "mgi-mind" -> "has_version" (7 active)
@@ -190,7 +190,7 @@ Found 31 conflict-bearing cluster(s):
 Summary: 31 cluster(s) processed, 82 losers cleared.
 ```
 
-The real opinion changes I had in my notes — Aurora becoming frozen after my brain server died, my HN account turning out to be hellbanned, two years of mgi-mind release history — all collapsed to the right answer. Mechanism 1 invariant preserved: the losers are still readable via `mind_history` for the temporal cases, via the audit log for the dampened ones.
+The real opinion changes I had in my notes (Aurora becoming frozen after my brain server died, my HN account turning out to be hellbanned, two years of mgi-mind release history) all collapsed to the right answer. Mechanism 1 invariant preserved: the losers are still readable via `mind_history` for the temporal cases, via the audit log for the dampened ones.
 
 For TemporalSingle I added an `EntryStatus::Superseded` variant separate from `Stale`. Same default-hidden behavior, different semantics: `Stale` means "lost a contradiction duel"; `Superseded` means "was correct at its time, a successor took over." A user who asks "when did Aurora freeze?" gets a meaningful history; they don't see ghost data in normal queries.
 
@@ -212,14 +212,14 @@ The two things look the same when the build is green. They aren't.
 
 The way to detect the difference is to act like a first-day user. Open the MCP server you'd ship. Send the calls a real client would send. Read the responses a real client would read. Don't go through the unit-test boundary, don't use a hand-rolled fixture, don't `cargo test`. Just type in the thing the readme says will work, and see if it works.
 
-For me yesterday, "I'm going to verify the validity model on my real data" — which sounded like an optional checkpoint — turned out to be the most valuable test I have ever written. Every other test in the codebase ran in 0.07 s and confirmed nothing about whether my software does what it claims.
+For me yesterday, "I'm going to verify the validity model on my real data", which sounded like an optional checkpoint, turned out to be the most valuable test I have ever written. Every other test in the codebase ran in 0.07 s and confirmed nothing about whether my software does what it claims.
 
 ## What I'm not claiming
 
 - The R@5 number didn't change. The duel rule fires at write time; retrieval ranks the resulting facts. If only the winners survive, the search ranks them in the same order as before, against the same evaluation set. The 99.2% headline is unaffected by this bug fix. Honest: it's also not improved.
 - I haven't run the STALE benchmark calibration. Issue #16 is open. The architecture changes need their own `R@5 regression < 1.0 pp` gate. The judge-model adapter is unfinished; the dataset wiring needs an API key I don't have yet.
 - The four `pub const` weights in the install-mode profiles (`chat-only`, `dev-with-ci`, `multi-tenant`) are starting points, not calibrated. Source comments label them `TODO(phase-4-calibration)`. A real sweep will move them.
-- Mac and Windows binaries are still not in v1.5/v1.6 — issues #19 and #20 are open. If you'd run mgi-mind on either, please comment in the issue with your use case.
+- Mac and Windows binaries are still not in v1.5/v1.6, and issues #19 and #20 are open. If you'd run mgi-mind on either, please comment in the issue with your use case.
 
 ## What you can run today
 
@@ -240,12 +240,12 @@ curl -L https://github.com/madgodinc/mgi-mind/releases/latest/download/mgimind-x
   "params":{"name":"mind_fact","arguments":
     {"action":"add","subject":"Alice","predicate":"lives_in","object":"Prague"}}}'
 
-# Add a conflict — duel rule resolves it:
+# Add a conflict: duel rule resolves it:
 ./mgimind mcp <<< '{"jsonrpc":"2.0","id":3,"method":"tools/call",
   "params":{"name":"mind_fact","arguments":
     {"action":"add","subject":"Alice","predicate":"lives_in","object":"Dublin"}}}'
 
-# Query — only canonical Dublin:
+# Query: only canonical Dublin:
 ./mgimind mcp <<< '{"jsonrpc":"2.0","id":4,"method":"tools/call",
   "params":{"name":"mind_fact","arguments":
     {"action":"query","subject":"Alice"}}}'
@@ -260,11 +260,11 @@ If you have a pre-v1.7 install with mixed-state clusters, run the walk first. It
 
 ## Appendix: links
 
-- [Issue #25](https://github.com/madgodinc/mgi-mind/issues/25) — bug report with reproducer.
-- [PR #26](https://github.com/madgodinc/mgi-mind/pull/26) — fix + read-path audit + integration tests + retroactive walk + `EntryStatus::Superseded`.
-- [Issue #27](https://github.com/madgodinc/mgi-mind/issues/27) — pairwise vs cluster duel resolution (follow-up).
+- [Issue #25](https://github.com/madgodinc/mgi-mind/issues/25): bug report with reproducer.
+- [PR #26](https://github.com/madgodinc/mgi-mind/pull/26): fix + read-path audit + integration tests + retroactive walk + `EntryStatus::Superseded`.
+- [Issue #27](https://github.com/madgodinc/mgi-mind/issues/27): pairwise vs cluster duel resolution (follow-up).
 - [Source](https://github.com/madgodinc/mgi-mind) | [v1.6.4 release notes](https://github.com/madgodinc/mgi-mind/releases/tag/v1.6.4)
-- [Benchmarks folder](https://github.com/madgodinc/mgi-mind/tree/main/benchmarks) — v0.14.3 R@5 = 99.2%; manual-rebuild-2026-06-05 (this story).
-- [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — the dataset.
+- [Benchmarks folder](https://github.com/madgodinc/mgi-mind/tree/main/benchmarks): v0.14.3 R@5 = 99.2%; manual-rebuild-2026-06-05 (this story).
+- [LongMemEval](https://github.com/xiaowu0162/LongMemEval): the dataset.
 
 Discussions and issues are how I find out what I should be measuring next.

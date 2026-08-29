@@ -1,4 +1,4 @@
-# STALE partial run — N=155, 2026-06-08
+# STALE partial run: N=155, 2026-06-08
 
 Raw per-scenario verdicts behind the STALE table in `BENCHMARKS.md`. Saved here
 so the published number is reproducible from data rather than a hand-typed
@@ -14,8 +14,8 @@ line is one scenario's final grade:
  "implicit_policy_adaptation": true, "type": "T1", "uid": "..."}
 ```
 
-- `t1a_out.jsonl`, `t1b_out.jsonl` — T1 (co-referential) scenarios.
-- `t2_1_out.jsonl` .. `t2_4_out.jsonl` — T2 (propagated) scenarios.
+- `t1a_out.jsonl`, `t1b_out.jsonl`: T1 (co-referential) scenarios.
+- `t2_1_out.jsonl` .. `t2_4_out.jsonl`: T2 (propagated) scenarios.
 
 These are the judge's final SR/PR/IPA booleans only. The intermediate
 `(query, system_answer, expected_belief)` triples that went to the judge are

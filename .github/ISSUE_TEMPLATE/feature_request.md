@@ -15,8 +15,8 @@ labels: enhancement
 
 ## Suggested approach (optional)
 
-<!-- If you have a design sketch — keyboard binding, CLI surface, MCP tool name,
-     formula — drop it here. Not required; even a rough idea helps. -->
+<!-- If you have a design sketch (keyboard binding, CLI surface, MCP tool name,
+     formula), drop it here. Not required; even a rough idea helps. -->
 
 ## Alternatives considered
 

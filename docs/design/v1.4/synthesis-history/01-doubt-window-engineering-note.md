@@ -11,7 +11,7 @@ relates: [[2026-06-04-memory-validity-sort]]
 
 The duel-rule mechanism gives an old, well-entrenched fact a handicap
 proportional to its weight. Under any reasonable formula, an entrenched
-fact wins almost every duel by default — that's the point. But this
+fact wins almost every duel by default, and that's the point. But this
 mechanism has a dark side that needs to be designed-in from the start,
 not bolted on later when symptoms appear:
 
@@ -19,7 +19,7 @@ not bolted on later when symptoms appear:
 entrenchment works.** A fact that has been confirmed twenty times
 across six months, with eight other memories hanging on it, will beat
 almost any single fresh contradicting fact. If the fact has *quietly
-gone stale* — true once, no longer true — the system has no built-in
+gone stale* (true once, no longer true) the system has no built-in
 mechanism to discover this. It just keeps winning duels on accumulated
 weight.
 
@@ -45,7 +45,7 @@ Translate to mgi-mind:
 1. **Define a doubt threshold per fact.** A function of entrenchment:
    the *more* entrenched a fact, the *more frequently* it must
    re-justify itself against fresh evidence. Counter-intuitive but
-   correct — the system should be *more*, not less, demanding of its
+   correct: the system should be *more*, not less, demanding of its
    strongest beliefs.
 
 2. **On retrieval of a highly entrenched fact, check the surrounding
@@ -55,13 +55,13 @@ Translate to mgi-mind:
    retrieval*. Optionally, mark as "retrieved-but-not-confirmed."
 
 3. **After N retrievals-without-confirmation, the fact enters a
-   "doubt window"** — its entrenchment weight is temporarily reduced
+   "doubt window"**: its entrenchment weight is temporarily reduced
    so that even a moderately weighted fresh contradiction can win the
    next duel. The fact has to fight again to re-earn its position.
 
 4. **Doubt is not decay.** Decay is "fade if neglected." Doubt is
    "test what you most rely on." A fact in the doubt window is not on
-   the way out — it is being asked to prove itself one more time. If
+   the way out. It is being asked to prove itself one more time. If
    it wins fresh confirmations, entrenchment resumes; if it loses,
    the duel resolves normally.
 
@@ -76,7 +76,7 @@ around it by manually invalidating, which is the worst of both worlds
 With this: the system stays self-correcting at exactly the place where
 it would otherwise be most confident. The expensive operation
 (re-test of entrenched facts) is cheap to amortise because entrenched
-facts are by definition the ones most often retrieved — the
+facts are by definition the ones most often retrieved, so the
 re-check happens in the same path as the retrieval that would have
 strengthened them anyway.
 
@@ -94,7 +94,7 @@ strengthened them anyway.
 ## How this lands
 
 Lift this note into the v1.5 ROADMAP entry when v1.5 starts. Don't
-edit the public roadmap yet — the duel rule formula isn't crystallised
+edit the public roadmap yet: the duel rule formula isn't crystallised
 either, and the doubt window only makes sense as the counterweight to
 that mechanism.
 

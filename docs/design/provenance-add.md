@@ -1,4 +1,4 @@
-# Design: `mind_provenance_add` — provenance-tagged memory ingest
+# Design: `mind_provenance_add`: provenance-tagged memory ingest
 
 Status: **design only, not implemented**. Branch: `feat/grep-integration`
 (retained for history; the tool is no longer about grep.app specifically).
@@ -8,7 +8,7 @@ Owner: Mad. Drafted: 2026-06-01. Revised: 2026-06-01 (search-half dropped).
 
 The previous version of this document proposed two tools, `mind_grep` and
 `mind_grep_save`. `mind_grep` was a thin scraper of `https://grep.app/api/search`
-— an **internal, unofficial endpoint** of the grep.app site that sits behind
+which is an **internal, unofficial endpoint** of the grep.app site sitting behind
 Vercel anti-bot. That coupling is wrong for a long-lived memory tool: we would
 be tying the durability of mgi-mind to a third-party service that actively bans
 automated access, with no contract and no SLA.
@@ -47,7 +47,7 @@ impossible to do the wrong thing (save without a source URL).
 ```jsonc
 {
   "name": "mind_provenance_add",
-  "description": "Persist an externally-sourced snippet (code, doc, RFC quote, commit message, etc.) into mgi-mind with a mandatory provenance citation. The agent supplies the snippet AS PLAIN UTF-8 — no HTML, no markup. Call this ONLY when the snippet was just produced by a code-search or doc-search MCP in the same session; do NOT fill provenance fields from memory.",
+  "description": "Persist an externally-sourced snippet (code, doc, RFC quote, commit message, etc.) into mgi-mind with a mandatory provenance citation. The agent supplies the snippet AS PLAIN UTF-8: no HTML, no markup. Call this ONLY when the snippet was just produced by a code-search or doc-search MCP in the same session; do NOT fill provenance fields from memory.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -120,7 +120,7 @@ returns a clear error string naming the offending field.
 | `lang`             | Optional, free string. Unknown values are accepted and logged at `info` for future allowlist tightening. |
 | `search_tool_used` | Required. Empty / whitespace-only → reject with `"provenance source unknown, use mind_add instead"`.    |
 
-**`origin_url` host allowlist** (case-insensitive, exact host match — no
+**`origin_url` host allowlist** (case-insensitive, exact host match, with no
 subdomain wildcards in v1):
 
 - `github.com`
@@ -139,7 +139,7 @@ The list is deliberately small at v1 and lives in a single `const` in
 The existing `secrets::scan` runs on every `add_memory`. Snippets that trip
 it are rejected with the standard error. No new bypass.
 
-## 5. Dedup — identity key
+## 5. Dedup: identity key
 
 This is the load-bearing change vs. the previous draft.
 
@@ -157,7 +157,7 @@ Where:
 - `NAMESPACE_MGI_MIND` is the project-wide UUIDv5 namespace already used
   elsewhere.
 - `content` is the exact embedded string from §3 (which, crucially, contains
-  no timestamp — see §3 note).
+  no timestamp; see §3 note).
 - `origin_url` is the normalized input.
 - `line_range_or_empty` is the input `line_range` if present, else the empty
   string.
@@ -211,7 +211,7 @@ Wiring:
 - `mcp.rs::tool_definitions`: one new schema entry. Bump the test
   `exposes_all_25_tools` to `26`.
 - `Cargo.toml`: **no new deps.** `uuid` (with `v5`), `url`, and `regex` are
-  already in the tree (or trivially available — `regex` is the only one to
+  already in the tree (or trivially available; `regex` is the only one to
   verify in `Cargo.lock`).
 
 No CLI subcommand in v1. The CLI surface is settled in a follow-up if
@@ -221,7 +221,7 @@ demanded; the MCP tool is the contract.
 
 mgi-mind already accepts agent-curated text via `mind_add` and `mind_ingest`.
 `mind_provenance_add` is the strict variant of that path: same backend, same
-embeddings, same recall — but with provenance as a load-bearing input rather
+embeddings, same recall, but with provenance as a load-bearing input rather
 than an afterthought. It is *less* tool surface than the previous draft, not
 more.
 
@@ -231,7 +231,7 @@ more.
 2. **Does not go to the network at all.** Pure local validation + `add_memory`.
 3. **Does not enrich provenance.** No fetch of file content from `origin_url`,
    no resolution of `HEAD` to a commit SHA, no metadata enrichment. Garbage
-   in, garbage in — but the validation in §4 catches most garbage.
+   in, garbage in, but the validation in §4 catches most garbage.
 4. **Does not dedup by similarity.** Only by the exact UUIDv5 key from §5.
 5. **Does not strip HTML / markup.** The contract is plain UTF-8 in; if the
    agent passes `<mark>` tags or HTML entities, that is the agent's bug. The
@@ -250,49 +250,49 @@ more.
 
 Validation:
 
-- `origin_url_https_only` — `http://github.com/...` → reject.
-- `origin_url_host_allowlist_accepts_github` — `https://github.com/...` → ok.
-- `origin_url_host_allowlist_rejects_random` — `https://evil.example.com/...`
+- `origin_url_https_only`: `http://github.com/...` → reject.
+- `origin_url_host_allowlist_accepts_github`: `https://github.com/...` → ok.
+- `origin_url_host_allowlist_rejects_random`: `https://evil.example.com/...`
   → reject with the allowlist error string.
-- `origin_url_host_allowlist_is_case_insensitive` — `GitHub.com` → ok.
-- `repo_regex_accepts_owner_repo` — `BurntSushi/ripgrep` → ok.
-- `repo_regex_rejects_three_segments` — `a/b/c` → reject.
-- `file_rejects_absolute` — `file = "/etc/passwd"` → reject.
-- `file_rejects_path_traversal` — `file = "src/../../etc/passwd"` → reject.
-- `file_rejects_path_traversal_classic` — `file = "../../etc/passwd"` → reject.
-- `file_accepts_normal_path` — `crates/regex/src/util.rs` → ok.
-- `line_range_accepts_single` — `42` → ok.
-- `line_range_accepts_range` — `42-58` → ok.
-- `line_range_rejects_garbage` — `42-` / `abc` / `1,2` → reject.
-- `search_tool_used_required` — empty → reject with the exact
+- `origin_url_host_allowlist_is_case_insensitive`: `GitHub.com` → ok.
+- `repo_regex_accepts_owner_repo`: `BurntSushi/ripgrep` → ok.
+- `repo_regex_rejects_three_segments`: `a/b/c` → reject.
+- `file_rejects_absolute`: `file = "/etc/passwd"` → reject.
+- `file_rejects_path_traversal`: `file = "src/../../etc/passwd"` → reject.
+- `file_rejects_path_traversal_classic`: `file = "../../etc/passwd"` → reject.
+- `file_accepts_normal_path`: `crates/regex/src/util.rs` → ok.
+- `line_range_accepts_single`: `42` → ok.
+- `line_range_accepts_range`: `42-58` → ok.
+- `line_range_rejects_garbage`: `42-` / `abc` / `1,2` → reject.
+- `search_tool_used_required`: empty → reject with the exact
   `"provenance source unknown, use mind_add instead"` string.
-- `search_tool_used_whitespace_only_rejected` — `"   "` → reject.
+- `search_tool_used_whitespace_only_rejected`: `"   "` → reject.
 
 Content formatting:
 
-- `format_omits_absent_fields` — missing `repo` / `file` / `lines` / `lang` /
+- `format_omits_absent_fields`: missing `repo` / `file` / `lines` / `lang` /
   `note` ⇒ those lines absent from the embedded content (not present as
   empty lines).
-- `format_has_no_timestamp` — the embedded string contains no ISO timestamp
+- `format_has_no_timestamp`: the embedded string contains no ISO timestamp
   and is byte-stable across two calls with identical input.
-- `format_includes_search_tool_used` — e.g. `source: sourcegraph` line
+- `format_includes_search_tool_used`: e.g. `source: sourcegraph` line
   present.
 
 Dedup id:
 
-- `dedup_id_stable_across_calls` — same inputs ⇒ same UUID.
-- `dedup_id_changes_with_origin_url` — same snippet, two URLs ⇒ two UUIDs.
-- `dedup_id_changes_with_line_range` — same snippet, same URL, different
+- `dedup_id_stable_across_calls`: same inputs ⇒ same UUID.
+- `dedup_id_changes_with_origin_url`: same snippet, two URLs ⇒ two UUIDs.
+- `dedup_id_changes_with_line_range`: same snippet, same URL, different
   ranges ⇒ two UUIDs.
-- `dedup_id_is_v5_not_v4` — version nibble check.
+- `dedup_id_is_v5_not_v4`: version nibble check.
 
 ### 9.2 MCP-level (extend `src/mcp.rs::tests`)
 
-- `tools_list_returns_26` — replaces the current 25-count assertion.
+- `tools_list_returns_26`: replaces the current 25-count assertion.
 - `mind_provenance_add_rejects_missing_snippet`.
 - `mind_provenance_add_rejects_missing_origin_url`.
 - `mind_provenance_add_rejects_missing_search_tool_used`.
-- `mind_provenance_add_rejects_empty_search_tool_used` — empty string in a
+- `mind_provenance_add_rejects_empty_search_tool_used`: empty string in a
   present field, exercising the "use mind_add instead" message.
 - `mind_provenance_add_rejects_http_url`.
 - `mind_provenance_add_rejects_off_allowlist_host`.
@@ -303,13 +303,13 @@ Dedup id:
 Gated on `MGIMIND_IT_QDRANT` like existing tests. End-to-end through real
 storage:
 
-- `provenance_round_trip_through_add_memory` — valid call → `mind_search` for
+- `provenance_round_trip_through_add_memory`: valid call → `mind_search` for
   a token in the snippet returns the record with the expected `[external]`
   header.
-- `provenance_dedup_same_inputs_inserts_once` — fire the same call twice;
+- `provenance_dedup_same_inputs_inserts_once`: fire the same call twice;
   the second returns the "Already present" message and the library size
   grows by exactly 1.
-- `provenance_same_snippet_two_urls_inserts_twice` — same snippet, two
+- `provenance_same_snippet_two_urls_inserts_twice`: same snippet, two
   different allowlisted URLs; library grows by 2.
 
 ### 9.4 Doctor
@@ -326,7 +326,7 @@ missing, parallel to other library-state healing. One new branch in
 2. **Allowlist widening policy.** Stack Overflow URLs are an obvious next
    request (`stackoverflow.com`). Deferred: if/when an agent actually needs
    it, widen with explicit review. v1 ships the seven hosts above.
-3. **Should `lang` get an allowlist too?** Right now: no — agents may use
+3. **Should `lang` get an allowlist too?** Right now: no, since agents may use
    non-obvious tags (`gleam`, `roc`, `mlir`). Log unknowns at `info`; if a
    pattern of typos emerges, tighten later.
 

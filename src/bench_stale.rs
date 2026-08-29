@@ -252,7 +252,7 @@ pub enum PublishDecision {
 
 pub fn render_summary(report: &StaleReport) -> String {
     format!(
-        "\nSTALE benchmark — mgi-mind v{}\n\
+        "\nSTALE benchmark: mgi-mind v{}\n\
          Judge: {}\n\
          Scenarios: {}\n\n\
          Overall:   {:.1}%\n\
@@ -367,7 +367,7 @@ pub async fn run(
     overrides: CalibrationOverrides,
     output: PathBuf,
 ) -> Result<StaleReport> {
-    eprintln!("STALE bench: scaffold on main — the working harness is on the");
+    eprintln!("STALE bench: scaffold on main: the working harness is on the");
     eprintln!("            stale-extraction-optimization branch. Its partial N=155 run");
     eprintln!("            (raw verdicts + reproduction script) is committed at");
     eprintln!("            benchmark/results/2026-06-08-stale-partial-n155/ and reported");

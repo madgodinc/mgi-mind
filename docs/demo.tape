@@ -39,7 +39,7 @@ Enter
 Sleep 3s
 
 # 3. it never left the machine
-Type "# embeddings, search, rerank, vault — all local. no cloud, no API key."
+Type "# embeddings, search, rerank, vault: all local. no cloud, no API key."
 Sleep 600ms
 Enter
 Sleep 2.2s

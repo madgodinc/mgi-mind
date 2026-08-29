@@ -3,7 +3,7 @@
 This file lists the prior work that the v1.4 validity / relevance
 model builds on. The synthesis is not a private discovery; the
 mechanisms it implements were described in the field before this
-project started. Citing them here is honest and load-bearing —
+project started. Citing them here is honest and load-bearing:
 the contribution this project makes is the working open-source
 implementation, not the ideas.
 
@@ -105,7 +105,7 @@ in the v3→FINAL revision of the synthesis.
 
 The synthesis §12 source pillars name the older foundations the
 v1.4 mechanisms ultimately build on. These are not contested
-prior art — they are the well-known field background:
+prior art. They are the well-known field background:
 
 - **Belief revision / epistemic entrenchment** (Gärdenfors et
   al., AGM-style work, ~1985).

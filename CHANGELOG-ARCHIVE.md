@@ -1,21 +1,21 @@
 # Changelog archive (pre-1.0)
 
-Releases v0.1.0 through v0.14.3 — the audit-hardening and benchmark era
+Releases v0.1.0 through v0.14.3, the audit-hardening and benchmark era
 before the semver-stable v1.0.0. The current changelog lives in
 [CHANGELOG.md](CHANGELOG.md); this file is the full history.
 
-## 0.14.3 — procedural-dataset hits the v0.10.0 ров target (227 pairs, 20 repos)
+## 0.14.3: procedural-dataset hits the v0.10.0 ров target (227 pairs, 20 repos)
 
 Final procedural-memory dataset for the v0.10.0 roadmap milestone:
 **227 pairs from 20 OSS repos, 4 languages, 4 strata.** Headline
 R@5 = 96.5% on multilingual-e5-base + rerank=off.
 
 ### Added
-- `benchmark/datasets/procedural-v010-227.jsonl` — final 227-pair set.
+- `benchmark/datasets/procedural-v010-227.jsonl`: final 227-pair set.
   Mined from cargo, clap, click, cobra, commander.js, django, express,
   flask, go, hyper, **next.js (+50 TS pairs)**, pytest, qdrant, requests,
   reqwest, rust-clippy, rustfmt, rustlings, serde, tokio, yargs.
-- `benchmark/results/2026-06-02-procedural-v010-final/raw.json` — per-pair
+- `benchmark/results/2026-06-02-procedural-v010-final/raw.json`: per-pair
   raw results.
 
 ### Results progression
@@ -38,7 +38,7 @@ smaller set; the larger one is the publishable number.
 
 ### What this closes from the roadmap
 
-> v0.10.0 — Д6 procedural memory как ров. Датасет — пары git+CI «упавший
+> v0.10.0: Д6 procedural memory как ров. Датасет это пары git+CI «упавший
 > тест → коммит-фикс» из публичных репо (объективный сигнал, не моя
 > разметка). Стратификация per-language / per-error-type (компиляция /
 > тест / рантайм), отчёт per-stratum, не одним числом.
@@ -46,7 +46,7 @@ smaller set; the larger one is the publishable number.
 Reached: ✅ 200+ pairs ✅ 20+ repos ✅ 4 strata ✅ 4 languages ✅
 per-stratum report.
 
-## 0.14.2 — procedural-dataset v3 (177 pairs from 19 OSS repos, stratified)
+## 0.14.2: procedural-dataset v3 (177 pairs from 19 OSS repos, stratified)
 
 Expanded the procedural-memory bench corpus from the 111-pair bootstrap
 to **177 pairs from 19 OSS repos**, and improved stratification so the
@@ -54,12 +54,12 @@ to **177 pairs from 19 OSS repos**, and improved stratification so the
 changed instead of catching everything as runtime.
 
 ### Added
-- `benchmark/datasets/procedural-v010-177.jsonl` — the v3 dataset (177
+- `benchmark/datasets/procedural-v010-177.jsonl`: the v3 dataset (177
   records). Mined locally with the updated scraper from cargo, clap,
   click, cobra, commander.js, express, flask, hyper, pytest, qdrant,
   requests, reqwest, rust-clippy, rustfmt, rustlings, serde, tokio,
   yargs, and one more.
-- `benchmark/results/2026-06-02-procedural-v3/raw.json` — per-pair
+- `benchmark/results/2026-06-02-procedural-v3/raw.json`: per-pair
   results behind the BENCHMARKS.md numbers.
 
 ### Changed
@@ -71,7 +71,7 @@ changed instead of catching everything as runtime.
 - BENCHMARKS.md procedural section now points at the v3 dataset; the
   bootstrap dataset is kept as a referenced earlier baseline.
 
-### Results — v3 vs v1 bootstrap
+### Results: v3 vs v1 bootstrap
 
 ```
 config: model=multilingual-e5-base dim=768 rerank=false
@@ -92,7 +92,7 @@ larger corpus dilutes the near-duplicate error signatures that drag
 exact-match recall on a small set. Stratum balance is the real win:
 "the system can recall a fix" is now broken out by what kind of fix.
 
-## 0.14.1 — counterfactual A/B for retrieval policy
+## 0.14.1: counterfactual A/B for retrieval policy
 
 Companion to the LongMemEval recall numbers: a CLI that takes any prior
 `mgimind bench` raw.json, classifies each question by the trigger table
@@ -101,16 +101,16 @@ a no-search baseline. Quantifies the **structural** recall value of
 the search-before-answer policy. Not an LLM accuracy measure.
 
 ### Added
-- `mgimind bench-policy <raw.json>` — counterfactual A/B over a prior
+- `mgimind bench-policy <raw.json>`: counterfactual A/B over a prior
   bench output. Output is a text report + embedded JSON for downstream
   consumers. Zero-API.
-- BENCHMARKS.md "Counterfactual A/B — retrieval policy on / off"
+- BENCHMARKS.md "Counterfactual A/B: retrieval policy on / off"
   section with the question-type → priority mapping table and the
   baseline result on the v0.8.1 500q run:
   WITH policy R@5 = 98.2%, WITHOUT R@5 = 0.0% (structural), ΔR@5 = +98.2 pct.
 
 ### Notes
-- LongMemEval-S contains no P0 questions — the policy unlocks 100% of
+- LongMemEval-S contains no P0 questions, so the policy unlocks 100% of
   recall on this corpus. A dataset with explicit chit-chat would split
   the gap (the policy doesn't help there, and the trigger table says
   skip P0).
@@ -118,21 +118,21 @@ the search-before-answer policy. Not an LLM accuracy measure.
   candidates). The Δ goes to "what would the policy save if the agent
   did skip search". Not the same as "LLM is more accurate with mgi-mind."
 
-## 0.14.0 — procedural-memory benchmark harness, README differentiation
+## 0.14.0: procedural-memory benchmark harness, README differentiation
 
 First half of the v1.0 push: the recall harness for procedural memory
 (phase Д6) and the README updates so the project sells what it actually
 is, not "another wrapper around Qdrant."
 
 ### Added
-- `mgimind bench-procedural <dataset.jsonl>` — measures recall@k on a
+- `mgimind bench-procedural <dataset.jsonl>`: measures recall@k on a
   dataset of (error, fix) pairs. Learns each pair into an isolated bench
   library, then recalls by error signature and reports overall +
   per-language + per-stratum + per-language×stratum R@1/R@5/R@10.
   Zero-API. Output is a text report; optional `--output raw.json`
   writes per-pair detail for analysis. Mirrors `mgimind bench` for
   LongMemEval, just on the procedural side.
-- `scripts/scrape_procedural_dataset.py` — local-only scraper that
+- `scripts/scrape_procedural_dataset.py`: local-only scraper that
   mines (error, fix) pairs from already-cloned git repos. Looks for
   fix-pattern commit subjects and extracts an error signature from
   the body (panics, tracebacks, code-quoted errors, symptom
@@ -148,10 +148,10 @@ is, not "another wrapper around Qdrant."
 - A real 200-pair dataset is the v0.10.0 sister task. This release
   ships the harness so the dataset, when built, has a place to land.
   A 5-pair smoke set against the harness returned R@1=100% (trivial
-  signatures, no collisions) — useful only to confirm the pipeline,
+  signatures, no collisions), useful only to confirm the pipeline,
   not to claim recall numbers.
 
-## 0.13.0 — session liveness: zombie sessions auto-close on next start
+## 0.13.0: session liveness: zombie sessions auto-close on next start
 
 Closes the long-standing leak where `mind_session_end` was never reached
 because the MCP client was killed, Ctrl-C'd, or crashed. The session
@@ -166,8 +166,8 @@ remember to write to.
 - Per-agent heartbeat file (`sessions/.heartbeat.<agent>`). Stamped
   with the current RFC3339 timestamp by the MCP dispatcher after every
   `tools/call`, and on `session_start`. Cheap atomic write of a single
-  timestamp — no read-modify-write of the session body.
-- `session::touch(agent)` and `session::touch_all_active()` —
+  timestamp, with no read-modify-write of the session body.
+- `session::touch(agent)` and `session::touch_all_active()`:
   best-effort heartbeat updaters used by the dispatcher.
 - `session::list_zombies(idle_minutes)` returning each agent whose
   active session has been idle longer than the threshold (default 30
@@ -187,10 +187,10 @@ remember to write to.
   the recovery to the user.
 - Auto-close summary is reconstructed, not invented: "Auto-closed by
   v0.13 liveness check. Last activity at <T> (idle for N min). The
-  session terminated without calling mind_session_end — usually a kill,
+  session terminated without calling mind_session_end, usually a kill,
   Ctrl-C, or crash. No explicit summary recorded."
 - `mind_doctor` adds a check `[OK] No zombie sessions` or `[WARN] N
-  zombie session(s)` with one line per agent. Diagnostic only — the
+  zombie session(s)` with one line per agent. Diagnostic only, since the
   recovery path is still `session_start`, never `doctor`.
 - `mind_stats` adds a `zombies: N (idle >30min, see mgimind doctor)`
   line when zombies exist, hidden otherwise.
@@ -210,12 +210,12 @@ remember to write to.
   `session_start` so the recovery message is delivered to whoever just
   re-opened the session (the same person who'd care).
 
-## 0.12.4 — download the versioned ONNX Runtime file, refuse to extract symlinks
+## 0.12.4: download the versioned ONNX Runtime file, refuse to extract symlinks
 
 THE ROOT CAUSE of every "mgimind add hangs forever" report. The
 ONNX Runtime tarball ships `lib/libonnxruntime.so` as a **symlink**
 to `lib/libonnxruntime.so.<version>`. `extract_member_tar_gz` used
-`std::io::copy(&mut entry, &mut out)` on the symlink entry — which
+`std::io::copy(&mut entry, &mut out)` on the symlink entry, which
 silently produces a 0-byte regular file, because tar symlinks have
 no body, only metadata in the header. `doctor --fix` then reports
 "ONNX Runtime installed" with a happy exit code, the file at
@@ -240,16 +240,16 @@ project) hit the empty-symlink trap.
   rather than as another infinite hang.
 
 ### Why this took four bumps to find
-0.12.1 fixed glibc (real, separate bug — qdrant musl). 0.12.2 fixed
+0.12.1 fixed glibc (a real, separate bug in qdrant musl). 0.12.2 fixed
 an IPv6/IPv4 race that turned out to be misdiagnosis (the
 behaviour explained 1% of the symptom and 0% of the freshly-broken
 RunPod containers). 0.12.3 added `tracing::debug` around every
 storage `.await` in `add_memory`, which is what finally pointed at
-`embed_passages start` as the last log line before the hang —
+`embed_passages start` as the last log line before the hang,
 i.e. dlopen of the 0-byte ORT library. The library file was
 visibly 0 bytes the whole time; nobody looked.
 
-## 0.12.3 — surface errors from idempotent index creation, add hot-path tracing
+## 0.12.3: surface errors from idempotent index creation, add hot-path tracing
 
 Diagnostic + correctness patch on top of 0.12.2. The 0.12.2 hotfix
 was based on the wrong root cause (IPv6 vs IPv4 race in
@@ -270,11 +270,11 @@ looks identical to "success" from outside the function.
   binary name) now pinpoints the hanging step in seconds.
 
 ### Caveats
-- `tracing::debug!` is compiled in but inactive by default — same
+- `tracing::debug!` is compiled in but inactive by default, the same
   no-overhead in release as before. Only fires when the user opts
   into `RUST_LOG=debug`. Production users see no log spam.
 
-## 0.12.2 — Qdrant client binds IPv4 explicitly, with timeouts
+## 0.12.2: Qdrant client binds IPv4 explicitly, with timeouts
 
 Hotfix continuation. After 0.12.1 fixed the glibc problem, the next
 silent failure surfaced: on freshly provisioned container hosts
@@ -299,7 +299,7 @@ happened to win the race; the moment two RPCs raced (`add` does
 `collection_exists` + `get_points` + `upsert_points`) the pool
 locked up.
 
-This isn't a "container quirk" — it's an "anyone who isn't the
+This is not a "container quirk". It is an "anyone who isn't the
 developer downloads mgimind and it hangs". The developer's own PC
 masks the bug because it ran first and qdrant landed on its
 IPv4 listener before the IPv6 race could happen; on every other
@@ -320,7 +320,7 @@ machine the bug ships.
   hardware, raise the per-call timeout rather than removing it.
   Disabling the timeout returns us to the immortal-futex world.
 
-## 0.12.1 — bundled Qdrant works on any glibc (musl)
+## 0.12.1: bundled Qdrant works on any glibc (musl)
 
 Hotfix. `doctor --fix` now downloads the **musl** Qdrant binary
 (`qdrant-x86_64-unknown-linux-musl.tar.gz`) on Linux x64 instead of the
@@ -345,7 +345,7 @@ swallow to `/dev/null`), and the parent reported the misleading
   stderr rather than discarding it, so the next failure mode lands
   on the user diagnosable instead of mute.
 
-## 0.12.0 — viewer wave: pagination + three live tabs
+## 0.12.0: viewer wave: pagination + three live tabs
 
 Earns the minor bump with a concrete capability that wasn't there
 before: paginated quarantine listing, with a "load more" footer in
@@ -382,7 +382,7 @@ one capability a real user can do today that they could not before.
 
 Third and final UI tab in the v0.11.8–v0.11.10 wave. Critic flagged
 the copy-paste-row drift risk; resolved by extracting the renderer up
-front. The headline page per the roadmap — "what auto-ingest wrote in
+front. The headline page per the roadmap: "what auto-ingest wrote in
 this session."
 
 ### Added
@@ -390,7 +390,7 @@ this session."
   numeric input. Naive local-time input is converted to UTC ISO via
   `new Date(s).toISOString()` and the resolved string is rendered
   next to the input ("querying since &lt;ISO&gt; UTC") so the user
-  can see what is actually being queried — timezone mismatches are
+  can see what is actually being queried, since timezone mismatches are
   otherwise silent.
 - `max_scan` default 500 (not 200): this is the headline page per the
   roadmap; 200 hid recent bursts during heavy auto-ingest.
@@ -405,7 +405,7 @@ this session."
 All three v0.11 UI tabs land. Viewer surface is now complete for the
 quarantine / consolidate / auto-ingest endpoints shipped in 0.11.2 →
 0.11.4. The repo deletes + recreations earlier in this session mean
-nothing of v0.11 visible on GitHub yet — push lands after this
+nothing of v0.11 visible on GitHub yet; the push lands after this
 commit.
 
 ## 0.11.9 - viewer: Consolidate dry-run tab + Quarantine loading state
@@ -415,13 +415,13 @@ four are addressed in this drop, plus the same loading-state hole in
 Quarantine that the critic correctly extrapolated.
 
 ### Added
-- Consolidate tab. Read-only preview surface — `--apply` stays on the
+- Consolidate tab. Read-only preview surface, and `--apply` stays on the
   CLI. The tab opens with a bordered warn-coloured notice
   ("Read-only preview. To act on this, run `mgimind consolidate
   --apply` in a terminal.") so the absence of an apply button is
   *loud*, not whispered in dim text.
 - Library dropdown is populated from `/api/libraries`. The selector
-  defaults to the first user library, not `(all)` — full-corpus
+  defaults to the first user library rather than `(all)`, because full-corpus
   consolidate walks every point's vector for near-dup math and would
   hang the UI on a large palace. `(all libraries)` is appended as an
   explicit opt-in instead.
@@ -449,7 +449,7 @@ in a real browser.
 - Quarantine tab in `viewer_index.html`. Reuses the existing fetch
   wrapper (`api()`) for GETs and adds an `apiPost()` helper for
   promote.
-- Library dropdown defaults to `(all)` — quarantined entries don't
+- Library dropdown defaults to `(all)`, since quarantined entries don't
   always live in the library the user expects. Limit input
   (default 50) caps response size.
 - Row rendering: gate `reason` badge, library, source, created_at,
@@ -491,7 +491,7 @@ runs it; nothing here is automatic.
 - New module `src/session_ingest.rs` with five parser smoke tests
   (string-form content, blocks-form content, service-row skipping,
   role-tag prefix, empty-skip). No gate-integration test in this
-  release — that lives in the live ingest path's existing coverage.
+  release; that lives in the live ingest path's existing coverage.
 
 ### Relation to `claude --resume`
 Different layer. `claude --resume <session-id>` brings the agent back
@@ -524,7 +524,7 @@ bulk.
 
 ## 0.11.5 - novelty layer in the relevance gate
 
-The v0.11.0 cheap gate is length / blacklist / decision-marker only —
+The v0.11.0 cheap gate is length / blacklist / decision-marker only,
 all syntactic checks. This release wires the novelty layer that the
 roadmap planned: after cheap accepts, pull the top-3 semantic
 neighbors, tokenize their content, and check the share of candidate
@@ -535,19 +535,19 @@ reasons).
 
 This is **not** cosine-noise filtering. Invariant #4 from v0.11.0
 stands: "a repeat IS a confidence signal, not noise." Cosine
-similarity reflects *meaning*; this is a *token-overlap* check —
+similarity reflects *meaning*; this is a *token-overlap* check, which is
 narrower. A semantically related but lexically distinct fact passes;
 a token-rearrangement of existing content does not.
 
 ### Added
-- `storage::top_k_neighbor_content(library, content, k)` — one
+- `storage::top_k_neighbor_content(library, content, k)`: one
   embedding inference, returns the stored content strings of the top-k
   neighbors. Symmetric with `nearest_score` but content instead of
   score.
 - `ingest::run_ingest` second-tier novelty branch after `check_cheap`.
   Falls through to Accept if there are no neighbors (empty library /
-  query failure) — novelty cannot be assessed without a baseline.
-- `NOVELTY_NEIGHBORS = 3` in `ingest.rs` — small enough that the
+  query failure), since novelty cannot be assessed without a baseline.
+- `NOVELTY_NEIGHBORS = 3` in `ingest.rs`, small enough that the
   union doesn't drift toward "everything is similar to something".
 
 ### Notes
@@ -568,14 +568,14 @@ what was written. This endpoint surfaces that feedback loop without
 the UI work that consumes it.
 
 ### Added
-- `GET /api/ingest/recent?since=<ISO>&max_scan=N` — recent memories
+- `GET /api/ingest/recent?since=<ISO>&max_scan=N`: recent memories
   whose `source` field equals `"ingest"` and whose `created_at` is at
   or after the given RFC3339 timestamp (typically session-start). Omit
   `since` to return the most recent `max_scan` (default 200) ingests
   regardless of age. Returns the same `MemoryRow` shape as
   `/api/memories` so the UI can reuse its existing memory-card.
-- `storage::recent_by_source_since(source, since_iso, max_scan)` —
-  shared primitive: server-side narrows to source-tagged points,
+- `storage::recent_by_source_since(source, since_iso, max_scan)`:
+  a shared primitive that server-side narrows to source-tagged points,
   client-side cuts on the date with a lexicographic compare
   (RFC3339-UTC sorts correctly as a string, which is how we always
   write timestamps).
@@ -587,11 +587,11 @@ v0.12 UI consumes them. This release adds the "what would consolidate
 do" preview that the dry-run consolidate page will show.
 
 ### Added
-- `GET /api/consolidate?library=X` — runs the same consolidation logic
+- `GET /api/consolidate?library=X`: runs the same consolidation logic
   as `mgimind consolidate` but always with `apply=false`. Returns a
   JSON `Report` (`scanned`, `exact_dups_removed`, `near_dups_removed`,
   `cold_candidates`, `applied=false`). The endpoint **does not** expose
-  `--apply` — destructive operations belong on the CLI where the user
+  `--apply`, because destructive operations belong on the CLI where the user
   has to type the flag explicitly. The viewer is the preview surface,
   not the action surface.
 - `consolidate::Report` now derives `Serialize` (no behaviour change;
@@ -604,13 +604,13 @@ the quarantine layer into the same surface so the UI work in v0.12 can
 ship without another backend round-trip.
 
 ### Added
-- `GET /api/quarantine?library=X&limit=N` — list quarantined entries
+- `GET /api/quarantine?library=X&limit=N`: list quarantined entries
   (mirrors the CLI/MCP). Bearer-token auth on the same channel as the
   other endpoints.
-- `POST /api/quarantine/:id/promote` — manual promotion of a
+- `POST /api/quarantine/:id/promote`: manual promotion of a
   quarantined entry by id. Returns `{ok: true, id}` on success,
   `{ok: false, id, reason: "not in quarantine"}` for ordinary memory
-  ids — the surface stays honest about what it can act on. Audit log
+  ids, so the surface stays honest about what it can act on. Audit log
   records two events: the storage-level promotion (actor=relevance-gate)
   and the UI-level action (actor=viewer, note="manual promote via
   viewer UI"), so the trail distinguishes manual from auto-reassertion.
@@ -628,12 +628,12 @@ user (or agent) can see what was filtered, why, and override the gate by
 promoting an entry by id.
 
 ### Added
-- `mgimind quarantine list [--library X] [--limit N]` — newest first,
+- `mgimind quarantine list [--library X] [--limit N]`: newest first,
   entries scoped to one library or across all.
-- `mgimind quarantine show <id>` — full content + gate reason + audit
+- `mgimind quarantine show <id>`: full content + gate reason + audit
   trail for one entry. Returns "not in quarantine" for ordinary memory
   ids: the surface only sees what it should.
-- `mgimind quarantine promote <id>` — explicit promotion path, distinct
+- `mgimind quarantine promote <id>`: explicit promotion path, distinct
   from the automatic "re-assert same content via ingest" flow. For when
   the agent knows the entry belongs in normal memory without an
   ingest round-trip.
@@ -641,14 +641,14 @@ promoting an entry by id.
   `mind_quarantine_promote` (mirror the CLI). Tools count: 26 → 29.
 
 ### Notes
-The quarantine layer was deliberately invisible in 0.11.0 — by design,
+The quarantine layer was deliberately invisible in 0.11.0 by design:
 quarantined points must not surface through `mind_search`. The
 inspection commands are the only surface that ever returns them.
 
 ## 0.11.0 - quarantine layer + relevance gate + best-effort retrieval
 
 The core problem v0.11 solves: a write-side relevance filter that silently
-drops low-signal candidates creates a loop — the user re-asserts the same
+drops low-signal candidates creates a loop: the user re-asserts the same
 thing, the filter drops it again, the agent never learns. The fix is a
 quarantine layer between accept and reject. Low-signal candidates are
 quarantined (kept retrievable for re-submission detection, hidden from
@@ -658,14 +658,14 @@ That breaks the loop without surrendering the filter.
 Paired with a best-effort retrieval policy on the read side: the MCP server
 now advertises `instructions` at `initialize`, and `mind_context` lists the
 user-facing libraries to consider before answering. Neither is enforceable
-in MCP — the client may ignore both — so the policy is phrased as triggers,
-not rules.
+in MCP (the client may ignore both), so the policy is phrased as triggers
+rather than rules.
 
 ### Added
 - **Relevance gate** (`src/relevance.rs`). Cheap, pure filters: length floor
   (12 chars / 3 words), 8000-char cap, blacklisted paths/tools, decision
   markers in RU + EN, novelty by token Jaccard against neighbors (not
-  cosine — repetition is a confidence signal, not noise). Verdict::Accept |
+  cosine, since repetition is a confidence signal rather than noise). Verdict::Accept |
   Quarantine{reason}. Applied in `mind_ingest` / `mgimind ingest` to
   `Candidate::Memory`. 12 unit tests.
 - **Quarantine layer** in `src/storage.rs`. New payload flag
@@ -708,12 +708,12 @@ Shipped on `main` ahead of the version bump (the working semver was
 catching up with the work). These are the v0.11 deliverables that landed
 before the quarantine layer:
 
-- **Audit log** (`src/audit.rs`) — append-only JSONL under
+- **Audit log** (`src/audit.rs`): append-only JSONL under
   `MGIMIND_HOME/audit.log`. Every storage mutation
   (add/update/delete/library/quarantine/promote) writes an event with
   actor, target, before/after, and a free-text note. Read-only via
   `mgimind audit list / show <target>`.
-- **Ephemeral viewer** (`src/viewer.rs` + baked `viewer_index.html`) — local
+- **Ephemeral viewer** (`src/viewer.rs` + baked `viewer_index.html`): a local
   HTTP server on 127.0.0.1 with a random free port. Static frontend baked
   into the binary; no Node, no extra runtime. `mgimind viewer` opens the
   browser by default; `--no-open` for headless / SSH.
@@ -723,7 +723,7 @@ before the quarantine layer:
   not content hash, so a hand-edited file replaces its prior version
   instead of accumulating duplicates. This is the v1.0 escape hatch for
   hand-curated stores.
-- **First LongMemEval-S bench result** — R@5 = 98.2% on CPU
+- **First LongMemEval-S bench result**: R@5 = 98.2% on CPU
   (all-MiniLM-L6-v2, rerank off), 1h 45min wall-clock. See `BENCHMARKS.md`
   and `benchmark/results/2026-06-02-cpu-overnight/`. The number is the
   baseline against which v0.12+ retrieval changes will be judged.
@@ -743,11 +743,11 @@ truth signal).
   grep.app, sourcegraph.com), `repo` matches `^[\w.-]+/[\w.-]+$`, `file` rejects
   absolute paths and `..` traversal, `line_range` matches `^\d+(-\d+)?$`, and an
   empty `search_tool_used` yields the actionable error
-  `"provenance source unknown — use mind_add instead"`. Dedup key is
+  `"provenance source unknown: use mind_add instead"`. Dedup key is
   `uuid_v5(NAMESPACE_PROVENANCE, library + snippet + origin_url + line_range)`, so
   the same snippet from two different repos correctly produces two records (the
   citation is part of the identity, not noise). No HTTP, no enrichment, no HTML
-  stripping — the agent passes plain UTF-8 or gets rejected. Tools count: 25 → 26.
+  stripping, so the agent passes plain UTF-8 or gets rejected. Tools count: 25 → 26.
   Design: `docs/design/provenance-add.md`.
 - **`mind_ingest`** - auto-extraction. Agent-driven primary path: send a `candidates`
   array of typed items (memory / fact / procedure) you judged worth keeping. Heuristic

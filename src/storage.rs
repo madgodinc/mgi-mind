@@ -4137,7 +4137,7 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
     let key = crate::vault::derive_key_with_salt(passphrase, &salt)
         .context("backup key derivation failed")?;
     let archive = crate::vault::decrypt_with_key(blob, &key)
-        .context("backup decryption failed — wrong passphrase?")?;
+        .context("backup decryption failed: wrong passphrase?")?;
 
     let home = crate::config::mind_home();
     std::fs::create_dir_all(&home)?;

@@ -87,7 +87,7 @@ pub enum ProvenanceError {
     #[error("snippet must not contain NUL bytes")]
     SnippetNul,
     #[error(
-        "snippet looks marked up (found '<mark>' or '</mark>'); pass plain UTF-8 — \
+        "snippet looks marked up (found '<mark>' or '</mark>'); pass plain UTF-8: \
          strip markup upstream"
     )]
     SnippetMarkup,
@@ -110,7 +110,7 @@ pub enum ProvenanceError {
     FilePathTraversal(String),
     #[error("line_range '{0}' must match ^\\d+(-\\d+)?$ (e.g. '42' or '42-58')")]
     BadLineRange(String),
-    #[error("provenance source unknown — use mind_add instead")]
+    #[error("provenance source unknown: use mind_add instead")]
     SearchToolMissing,
 }
 
@@ -493,7 +493,7 @@ mod tests {
         // to fall back to mind_add.
         assert_eq!(
             err.to_string(),
-            "provenance source unknown — use mind_add instead"
+            "provenance source unknown: use mind_add instead"
         );
     }
 

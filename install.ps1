@@ -65,7 +65,7 @@ try {
     try {
         Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaFile -UseBasicParsing
     } catch {
-        Die "checksum file missing at $url.sha256 — refusing to install unverified binary: $_"
+        Die "checksum file missing at $url.sha256: refusing to install unverified binary. $_"
     }
     $expectedHex = ((Get-Content -Raw $shaFile) -split '\s+')[0].ToLower()
     if ([string]::IsNullOrWhiteSpace($expectedHex)) {
@@ -73,7 +73,7 @@ try {
     }
     $actualHex = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
     if ($actualHex -ne $expectedHex) {
-        Die "SHA-256 mismatch — refusing to install (expected $expectedHex, got $actualHex)"
+        Die "SHA-256 mismatch: refusing to install (expected $expectedHex, got $actualHex)"
     }
     Write-Host "Checksum OK ($expectedHex)"
 

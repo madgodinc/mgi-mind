@@ -1638,7 +1638,7 @@ mod tests {
         assert_eq!(a, b, "same predicate must map to the same id");
         assert_ne!(
             a, c,
-            "different predicate must map to different ids — no collisions in the cardinality registry"
+            "different predicate must map to different ids: no collisions in the cardinality registry"
         );
         assert!(uuid::Uuid::parse_str(&a).is_ok());
     }

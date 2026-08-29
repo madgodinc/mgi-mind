@@ -5,7 +5,7 @@ asshole behaviour.
 
 ## Scope
 
-This applies in every project space — issues, pull requests,
+This applies in every project space: issues, pull requests,
 discussions, code review, the project's GitHub Discussions tab, and
 any direct outreach about the project (email, social DM).
 
@@ -36,10 +36,10 @@ any direct outreach about the project (email, social DM).
 
 - Sexualised language or imagery, in any project space.
 
-- Doxxing — publishing private information about a contributor
+- Doxxing, meaning publishing private information about a contributor
   without their consent.
 
-- Sustained off-topic disruption — repeatedly redirecting
+- Sustained off-topic disruption, meaning repeatedly redirecting
   Discussions or PR threads to unrelated agendas after being asked
   to stop.
 

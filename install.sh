@@ -78,7 +78,7 @@ fi
 # install. Pipe-to-shell installs are the canonical place to insist on this.
 say "Verifying SHA-256"
 if ! curl -fsSL --proto '=https' --tlsv1.2 -o "$tmpdir/$asset.sha256" "$url.sha256"; then
-    die "checksum file missing at $url.sha256 — refusing to install unverified binary"
+    die "checksum file missing at $url.sha256: refusing to install unverified binary"
 fi
 # The .sha256 file is in `shasum -c` format ("<hex>  <name>"); the filename is
 # the bare asset name, so rewrite to its tmpdir path before checking.
@@ -87,12 +87,12 @@ expected_hex="$(awk '{print $1}' "$tmpdir/$asset.sha256")"
 printf '%s  %s\n' "$expected_hex" "$tmpdir/$asset" > "$tmpdir/$asset.sha256.local"
 if command -v sha256sum >/dev/null 2>&1; then
     sha256sum -c "$tmpdir/$asset.sha256.local" >/dev/null \
-        || die "SHA-256 mismatch — refusing to install"
+        || die "SHA-256 mismatch: refusing to install"
 elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 -c "$tmpdir/$asset.sha256.local" >/dev/null \
-        || die "SHA-256 mismatch — refusing to install"
+        || die "SHA-256 mismatch: refusing to install"
 else
-    die "neither sha256sum nor shasum found — cannot verify download"
+    die "neither sha256sum nor shasum found: cannot verify download"
 fi
 say "Checksum OK ($expected_hex)"
 

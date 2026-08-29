@@ -82,7 +82,7 @@ pub async fn run(
 ) -> Result<()> {
     if !bind_is_allowed(host, &agent_tokens) {
         anyhow::bail!(
-            "refusing to bind {host} (non-loopback) with an anonymous token — that \
+            "refusing to bind {host} (non-loopback) with an anonymous token: that \
              would expose an open brain. Pass --agent-token NAME:TOKEN to bind a \
              reachable interface."
         );
@@ -180,7 +180,7 @@ pub async fn run(
         eprintln!("  auth:   Authorization: Bearer {token}");
         eprintln!("  agent:  X-Agent: <id>   (self-asserted author tag, not auth)");
     } else {
-        eprintln!("  auth:   per-agent tokens — identity DERIVED from the bearer token");
+        eprintln!("  auth:   per-agent tokens: identity DERIVED from the bearer token");
         eprintln!("  agents: {agent_names}");
     }
     eprintln!("  routes: POST /memory/{{search,browse,recall,add,ingest,by-agent}}");

@@ -204,7 +204,7 @@ it X?\"); a reference to prior work (\"like last time\", \"the file we were \
 editing\"); anything the user states as a fixed preference or decision.\n\
 \n\
 AFTER resolving something worth keeping (a decision, a fact, an error->fix): \
-capture it with mind_add or mind_learn before moving on — uncaptured context is \
+capture it with mind_add or mind_learn before moving on: uncaptured context is \
 lost next session.\n\
 \n\
 Call mind_context once at session start for recent state and the library list. \
@@ -674,7 +674,7 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                     "Promoted '{id}' from quarantine to ordinary memory."
                 ))
             } else {
-                Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
+                Ok(format!("Nothing to promote: '{id}' is not in quarantine."))
             }
         }
         "mind_restore" => {
@@ -684,10 +684,10 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let id = arg_str(args, "id")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument 'id'"))?;
             if crate::storage::restore_memory(cfg, id).await? {
-                Ok(format!("Restored '{id}' from archive — back in search."))
+                Ok(format!("Restored '{id}' from archive: back in search."))
             } else {
                 Ok(format!(
-                    "Nothing to restore — '{id}' is not an archived memory."
+                    "Nothing to restore: '{id}' is not an archived memory."
                 ))
             }
         }
@@ -769,7 +769,7 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
             let signal_type =
                 crate::outcome::OutcomeSignal::parse(signal_type_str).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "unknown signal_type '{signal_type_str}' — expected one of: \
+                        "unknown signal_type '{signal_type_str}': expected one of: \
                          test_passed, code_compiled, user_confirmed, cited_by"
                     )
                 })?;
@@ -939,7 +939,7 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                             "Promoted '{id}' from quarantine to ordinary memory."
                         ))
                     } else {
-                        Ok(format!("Nothing to promote — '{id}' is not in quarantine."))
+                        Ok(format!("Nothing to promote: '{id}' is not in quarantine."))
                     }
                 }
                 "expire" => {
@@ -948,13 +948,13 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                         .ok_or_else(|| anyhow::anyhow!("action=expire requires 'id'"))?;
                     if crate::storage::expire_from_quarantine(cfg, id).await? {
                         Ok(format!(
-                            "Expired '{id}' — confirmed the gate was right to reject it. \
+                            "Expired '{id}': confirmed the gate was right to reject it. \
                              Removed from quarantine (content + reason recorded in the audit \
                              log first, when audit is enabled)."
                         ))
                     } else {
                         Ok(format!(
-                            "Nothing to expire — '{id}' is not in quarantine (live memory is \
+                            "Nothing to expire: '{id}' is not in quarantine (live memory is \
                              never touched by this action; use mind_delete for that)."
                         ))
                     }
@@ -1189,7 +1189,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_browse",
-            "description": "Browse/list memories by metadata WITHOUT a search query — inventory, not ranking. Newest first. Use to answer 'what did agent X write recently', 'everything from this source', 'all memories since a date'. Same filters as mind_search.",
+            "description": "Browse/list memories by metadata WITHOUT a search query: inventory, not ranking. Newest first. Use to answer 'what did agent X write recently', 'everything from this source', 'all memories since a date'. Same filters as mind_search.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1218,7 +1218,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_should_search",
-            "description": "Decide whether to search memory BEFORE answering a user query. Returns priority (must-search / should-search / answer-directly), the reason, and which libraries to search first. Call this on a turn when unsure; it implements the search-before-answer trigger policy (named project, meta-cue like 'did I tell you', negation to verify, cross-session reference). Advisory — it cannot force a search.",
+            "description": "Decide whether to search memory BEFORE answering a user query. Returns priority (must-search / should-search / answer-directly), the reason, and which libraries to search first. Call this on a turn when unsure; it implements the search-before-answer trigger policy (named project, meta-cue like 'did I tell you', negation to verify, cross-session reference). Advisory: it cannot force a search.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1229,7 +1229,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_visualize",
-            "description": "Open the 3D memory visualization in the user's browser — the brain as glowing cores (memories, facts, regions) wired by neurons, with live pulses. Call this when the user asks to SEE or SHOW their memory / 'the brain' / how memory looks. Spawns a local viewer and returns the URL.",
+            "description": "Open the 3D memory visualization in the user's browser: the brain as glowing cores (memories, facts, regions) wired by neurons, with live pulses. Call this when the user asks to SEE or SHOW their memory / 'the brain' / how memory looks. Spawns a local viewer and returns the URL.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -1247,7 +1247,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_provenance_add",
-            "description": "Persist an externally-sourced snippet (code, doc, RFC quote, commit message, etc.) into mgi-mind with a mandatory provenance citation. The agent supplies the snippet AS PLAIN UTF-8 — no HTML, no markup. Call this ONLY when the snippet was just produced by a code-search or doc-search MCP in the same session; do NOT fill provenance fields from memory.",
+            "description": "Persist an externally-sourced snippet (code, doc, RFC quote, commit message, etc.) into mgi-mind with a mandatory provenance citation. The agent supplies the snippet AS PLAIN UTF-8: no HTML, no markup. Call this ONLY when the snippet was just produced by a code-search or doc-search MCP in the same session; do NOT fill provenance fields from memory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1258,7 +1258,7 @@ fn tool_definitions() -> Vec<Value> {
                     "file":             { "type": "string", "description": "Optional path inside the repo. No leading '/', no '..' segments." },
                     "line_range":       { "type": "string", "description": "Optional line range, e.g. \"42\" or \"42-58\". Regex: ^\\d+(-\\d+)?$." },
                     "lang":             { "type": "string", "description": "Optional language tag (free string)." },
-                    "search_tool_used": { "type": "string", "description": "Identifier of the search source the agent used in THIS session, e.g. \"mcp.grep.app\", \"sourcegraph\", \"github code search\", \"local ripgrep\". REQUIRED. Empty rejects with 'provenance source unknown — use mind_add instead'." },
+                    "search_tool_used": { "type": "string", "description": "Identifier of the search source the agent used in THIS session, e.g. \"mcp.grep.app\", \"sourcegraph\", \"github code search\", \"local ripgrep\". REQUIRED. Empty rejects with 'provenance source unknown: use mind_add instead'." },
                     "note":             { "type": "string", "description": "Optional one-liner the agent attaches (why this is worth keeping)." }
                 },
                 "required": ["snippet", "origin_url", "search_tool_used"]
@@ -1419,7 +1419,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_outcome",
-            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source) — re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail. When memory_id is a PROCEDURE and signal_type is test_passed or code_compiled, this also bumps the procedure's success/fail counters — so a green test after a mind_learn fix marks that playbook verified without a separate mind_procedure_outcome call. Pass the procedure id returned by mind_learn.",
+            "description": "v1.5: Record a typed external-signal outcome on any memory (not only procedures). Use this when a test passed/failed, code compiled, a user explicitly confirmed/denied a fact, or a citing memory referenced this one. Idempotent on (memory_id, signal_type, source): re-posting the same triple updates the existing entry rather than appending a duplicate. Signals contribute to the fact's external_signal_score, which feeds the duel rule and the §3 Mechanism 2 doubt-window guardrail. When memory_id is a PROCEDURE and signal_type is test_passed or code_compiled, this also bumps the procedure's success/fail counters: so a green test after a mind_learn fix marks that playbook verified without a separate mind_procedure_outcome call. Pass the procedure id returned by mind_learn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1445,7 +1445,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_consolidate",
-            "description": "Preview what `mgimind consolidate` would do — count of exact duplicates, near-duplicates, and cold (old + unused) entries. Always dry-run on the MCP surface; destructive consolidation stays on the CLI where the user types --apply explicitly. Use this when the user asks 'how much duplicate memory do I have?' or before suggesting they run the CLI command.",
+            "description": "Preview what `mgimind consolidate` would do: count of exact duplicates, near-duplicates, and cold (old + unused) entries. Always dry-run on the MCP surface; destructive consolidation stays on the CLI where the user types --apply explicitly. Use this when the user asks 'how much duplicate memory do I have?' or before suggesting they run the CLI command.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1455,7 +1455,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_quarantine_list",
-            "description": "List entries the v0.11 relevance gate filtered into the quarantine layer. These are not surfaced by mind_search by design — use this tool when you suspect a fact was filtered (e.g., the user keeps repeating something the gate would reject as low-signal). Newest first.",
+            "description": "List entries the v0.11 relevance gate filtered into the quarantine layer. These are not surfaced by mind_search by design: use this tool when you suspect a fact was filtered (e.g., the user keeps repeating something the gate would reject as low-signal). Newest first.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1466,7 +1466,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_quarantine_show",
-            "description": "Show a single quarantined entry with its full content and the gate reason. Returns 'not in quarantine' for regular memory ids — the surface is honest about what it can see.",
+            "description": "Show a single quarantined entry with its full content and the gate reason. Returns 'not in quarantine' for regular memory ids: the surface is honest about what it can see.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string" } },
@@ -1563,7 +1563,7 @@ fn tool_definitions() -> Vec<Value> {
     let consolidated = vec![
         json!({
             "name": "mind_quarantine",
-            "description": "Inspect, promote, or expire entries that the relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (the gate was too strict — move to ordinary memory by id), expire (the gate was right — delete by id; only ever touches quarantined points, never live memory, and stays recoverable from the audit log). Replaces mind_quarantine_list / _show / _promote.",
+            "description": "Inspect, promote, or expire entries that the relevance gate filtered into the quarantine layer. Single tool with `action`: list (newest first, optional library filter), show (full content + gate reason by id), promote (the gate was too strict: move to ordinary memory by id), expire (the gate was right: delete by id; only ever touches quarantined points, never live memory, and stays recoverable from the audit log). Replaces mind_quarantine_list / _show / _promote.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1577,7 +1577,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_vault",
-            "description": "Vault is terminal-only by design. This tool explains how the user runs the equivalent `mgimind vault` command — secret values never cross the MCP channel. Single tool with `action`: store (instructions for storing a secret), get (instructions for retrieving), list (instructions for listing keys). Replaces mind_vault_store / _get / _list.",
+            "description": "Vault is terminal-only by design. This tool explains how the user runs the equivalent `mgimind vault` command: secret values never cross the MCP channel. Single tool with `action`: store (instructions for storing a secret), get (instructions for retrieving), list (instructions for listing keys). Replaces mind_vault_store / _get / _list.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1612,14 +1612,14 @@ fn tool_definitions() -> Vec<Value> {
                     "object": { "type": "string", "description": "Required for add" },
                     "id": { "type": "string", "description": "Required for invalidate (from action=query)" },
                     "history": { "type": "boolean", "description": "With action=query: return the SUPERSEDED history (past TemporalSingle values, oldest first) instead of current facts" },
-                    "as_of": { "type": "string", "description": "With action=query: POINT-IN-TIME — return the facts that were CURRENT at this instant (RFC3339 or YYYY-MM-DD), time-travelling the superseded chain. Answers 'what was X on date Y'." }
+                    "as_of": { "type": "string", "description": "With action=query: POINT-IN-TIME: return the facts that were CURRENT at this instant (RFC3339 or YYYY-MM-DD), time-travelling the superseded chain. Answers 'what was X on date Y'." }
                 },
                 "required": ["action"]
             }
         }),
         json!({
             "name": "mind_library",
-            "description": "Library namespaces. Single tool with `action`: create (new library by name), list (all libraries with counts), delete (remove a specific memory by id within a library — destructive). Replaces mind_create / mind_list / mind_delete.",
+            "description": "Library namespaces. Single tool with `action`: create (new library by name), list (all libraries with counts), delete (remove a specific memory by id within a library: destructive). Replaces mind_create / mind_list / mind_delete.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1646,7 +1646,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "mind_block",
-            "description": "Pinned core-memory blocks (persona / user / current-project): a few small, named notes that are ALWAYS injected at the top of the session context, not ranked retrieval. Use for stable, always-relevant facts the agent must not have to search for. action=set overwrites, get/list read, remove deletes. Content is capped (4KB/block, 32 blocks); this is core memory, not a second store — put searchable knowledge in mind_add instead.",
+            "description": "Pinned core-memory blocks (persona / user / current-project): a few small, named notes that are ALWAYS injected at the top of the session context, not ranked retrieval. Use for stable, always-relevant facts the agent must not have to search for. action=set overwrites, get/list read, remove deletes. Content is capped (4KB/block, 32 blocks); this is core memory, not a second store: put searchable knowledge in mind_add instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1702,7 +1702,7 @@ fn tool_definitions() -> Vec<Value> {
                     .unwrap_or("")
                     .to_string();
                 let new_desc =
-                    format!("DEPRECATED — use {replacement}. Removed in v2.0. ({old_desc})");
+                    format!("DEPRECATED: use {replacement}. Removed in v2.0. ({old_desc})");
                 obj.insert("description".to_string(), Value::String(new_desc));
             }
             deprecated.push(tool);

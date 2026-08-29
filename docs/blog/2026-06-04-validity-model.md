@@ -1,4 +1,4 @@
-# What I changed about AI agent memory in v1.4 / v1.5 / v1.6 — and what I haven't measured yet
+# What I changed about AI agent memory in v1.4 / v1.5 / v1.6: and what I haven't measured yet
 
 *Draft. 2026-06-04. Honest-limits-first per reverse-formula: scroll to the bottom if you want the headline benchmark, this post does not bury caveats.*
 
@@ -10,7 +10,7 @@ This post does not claim mgi-mind v1.6 is the best AI-agent memory layer. It doe
 
 > **R@5 = 99.2%** on LongMemEval-S (500 questions), multilingual-e5-base FP16 + bge-reranker, RTX 3090.
 
-That number does not change in v1.6 — the v1.4 changes are about *what memory means*, not *how it's retrieved*. Retrieval improves later (issue #16). What changed is the model.
+That number does not change in v1.6, because the v1.4 changes are about *what memory means*, not *how it's retrieved*. Retrieval improves later (issue #16). What changed is the model.
 
 ## The problem that drove v1.4
 
@@ -26,7 +26,7 @@ Not because it was wrong, but because the same machinery needs to handle three o
 2. **Some predicates are temporally single.** "Lives in Prague" was true; "Lives in Dublin" is true now. Both should be queryable; only Dublin should rank in the default view.
 3. **Some single-valued facts deserve to stay live.** "Email is `mad@example.com`" might be a typo overwriting a real address; you do not want to silently invalidate the real one on the first write.
 
-The v1.4 fix is a `Cardinality` enum (`Single` / `TemporalSingle` / `Multi`) on every predicate, plus a duel rule that decides which fact wins on contradiction. The duel rule reads cached signals — `dependants_count`, `confirmations_count`, `external_signals` — and ranks the incumbent against the challenger. The loser is **dampened** (gets `valid_until` set), never deleted. Mechanism 1 invariant.
+The v1.4 fix is a `Cardinality` enum (`Single` / `TemporalSingle` / `Multi`) on every predicate, plus a duel rule that decides which fact wins on contradiction. The duel rule reads cached signals (`dependants_count`, `confirmations_count`, `external_signals`) and ranks the incumbent against the challenger. The loser is **dampened** (gets `valid_until` set), never deleted. Mechanism 1 invariant.
 
 `<details><summary>Why never delete</summary>` Three reasons:
 
@@ -36,7 +36,7 @@ The v1.4 fix is a `Cardinality` enum (`Single` / `TemporalSingle` / `Multi`) on 
 
 `</details>`
 
-## §6 — install-mode profiles (v1.5 Phase 6)
+## §6: install-mode profiles (v1.5 Phase 6)
 
 The duel rule weights three signals to compute a fact's confidence score:
 
@@ -47,11 +47,11 @@ confidence_score = w_dependants * dependants_norm
                  - inheritance_discount_penalty * (1 if inherited else 0)
 ```
 
-What weights? Depends on what the memory is *for*. If you're using mgi-mind as a single-user chat-assistant memory (the default), `confirmations` is decoratively weak — one person saying the same thing twice is almost no evidence. `dependants` (how many other facts structurally depend on this one) is what's load-bearing.
+What weights? Depends on what the memory is *for*. If you're using mgi-mind as a single-user chat-assistant memory (the default), `confirmations` is decoratively weak: one person saying the same thing twice is almost no evidence. `dependants` (how many other facts structurally depend on this one) is what's load-bearing.
 
-If you're using it as a CI loop's memory (test outcomes flow in via `mind_outcome`), `external` is the strongest signal — a passing test is much harder to lie about than a conversational repetition.
+If you're using it as a CI loop's memory (test outcomes flow in via `mind_outcome`), `external` is the strongest signal, since a passing test is much harder to lie about than a conversational repetition.
 
-If you're using it as a multi-tenant store (multiple distinct agents writing), `confirmations` becomes load-bearing again — but for a different reason: independent agents reaching the same conclusion is real evidence, not the same agent repeating itself.
+If you're using it as a multi-tenant store (multiple distinct agents writing), `confirmations` becomes load-bearing again, but for a different reason: independent agents reaching the same conclusion is real evidence, not the same agent repeating itself.
 
 v1.5 ships three illustrative anchor profiles:
 
@@ -71,11 +71,11 @@ The auto-detect uses two counts:
 
 Honest about the numbers: those anchors are starting points. They are marked `TODO(phase-4-calibration)` in the source. A real sweep against the STALE benchmark will move them. The contract test pins `weight_new_for_mode(_, ChatOnly)` against the legacy `weight_new` bit-for-bit, so the v1.4 / v0.14.x retrieval surface is unchanged for the default mode.
 
-## §10 q5 — three guarantees on the background loop (v1.5 Phase 8)
+## §10 q5: three guarantees on the background loop (v1.5 Phase 8)
 
 The doubt window (v1.4 Phase 3) introduces an anti-ossification mechanism: a fact that gets retrieved without confirming context drift starts a counter; after N drifted retrievals, the fact enters the doubt window and its confidence is halved in ranking until a fresh non-drifted retrieval resets the counter.
 
-The blind spot: facts that are *never* retrieved never enter the doubt window. A background pass has to actively re-test top-N entrenched facts. This was scaffolded in v1.4 (`spawn_background_retest_loop`) but the body was `n_processed_this_tick = 0` — a placeholder.
+The blind spot: facts that are *never* retrieved never enter the doubt window. A background pass has to actively re-test top-N entrenched facts. This was scaffolded in v1.4 (`spawn_background_retest_loop`) but the body was `n_processed_this_tick = 0`, a placeholder.
 
 v1.5 Phase 8 closes the loop. Three hard guarantees from §10 question 5 of the synthesis:
 
@@ -86,13 +86,13 @@ v1.5 Phase 8 closes the loop. Three hard guarantees from §10 question 5 of the 
 **(c) Load-aware cadence.** `loadavg_multiplier()` reads `/proc/loadavg` on Linux and returns `2.0` when the 1-minute load exceeds `1.5 × num_cpus`. The cadence formula doubles, the loop sleeps longer. On non-Linux it returns `1.0` (the loop runs without a back-off signal; v1.7 will add Windows / macOS equivalents).
 
 For each candidate the loop:
-1. Reads payload via a single batched `get_points` (one round-trip — v1.6.0 changed this from 4 separate fetches).
+1. Reads payload via a single batched `get_points` (one round-trip; v1.6.0 changed this from 4 separate fetches).
 2. Computes new `confidence_score` with the current install-mode anchors.
 3. Compares to cached score. Three transitions possible via `decide_retest_transition`:
-   - **PromoteToDoubt** — both `delta < -0.2` AND `new < 0.3`. Two independent reasons must agree before state changes. Avoids flipping mid-band facts on noise.
-   - **RecoverFromDoubt** — already in doubt AND `delta > +0.2`.
-   - **NoChange** — write back new score, continue.
-4. Writes audit entry on every transition (`AuditOp::RetestPromote` / `::RetestRecover` — `NoChange` is intentionally not logged to keep the file from ballooning).
+   - **PromoteToDoubt**: both `delta < -0.2` AND `new < 0.3`. Two independent reasons must agree before state changes. Avoids flipping mid-band facts on noise.
+   - **RecoverFromDoubt**: already in doubt AND `delta > +0.2`.
+   - **NoChange**: write back new score, continue.
+4. Writes audit entry on every transition (`AuditOp::RetestPromote` / `::RetestRecover`; `NoChange` is intentionally not logged to keep the file from ballooning).
 
 **`RetestTransition` enum is exhaustive: there is no `Remove` variant.** Mechanism 1 invariant lives in the type system, not just convention.
 
@@ -100,10 +100,10 @@ For each candidate the loop:
 
 The v1.5 release notes declared "Honest limits". v1.6 closes three of them:
 
-- **v1.6.0** — batched payload reads in `retest_fact_step82` (4× round-trip reduction per fact), `cited_by` chain following (the v1.5 self-citation guard always blocked because the lookup was stubbed `|_| None`), integration tests on `spawn_background_retest_loop` at the registry / scheduling level.
-- **v1.6.1** — CLI surfaces for `mind_outcome`, audit log filters by op and time window, install-mode weight breakdown in `doctor`, fact graph distribution in `stats`.
-- **v1.6.2** — `mgimind stats --json` for monitoring scripts, `mgimind facts list/show` for KG inspection.
-- **v1.6.3** — `mgimind migrate-v14 cardinality --apply` for bulk-registering predicate cardinalities after extraction (Mad's base mid-extraction shows 1113 distinct predicates, 1096 high-confidence proposals), `bench-stale` + `bench-stale-sweep` CLI scaffold, CONTRIBUTING.md + CODE_OF_CONDUCT.md + issue templates.
+- **v1.6.0**: batched payload reads in `retest_fact_step82` (4× round-trip reduction per fact), `cited_by` chain following (the v1.5 self-citation guard always blocked because the lookup was stubbed `|_| None`), integration tests on `spawn_background_retest_loop` at the registry / scheduling level.
+- **v1.6.1**: CLI surfaces for `mind_outcome`, audit log filters by op and time window, install-mode weight breakdown in `doctor`, fact graph distribution in `stats`.
+- **v1.6.2**: `mgimind stats --json` for monitoring scripts, `mgimind facts list/show` for KG inspection.
+- **v1.6.3**: `mgimind migrate-v14 cardinality --apply` for bulk-registering predicate cardinalities after extraction (Mad's base mid-extraction shows 1113 distinct predicates, 1096 high-confidence proposals), `bench-stale` + `bench-stale-sweep` CLI scaffold, CONTRIBUTING.md + CODE_OF_CONDUCT.md + issue templates.
 
 Total: **290 unit + 6 integration tests, 0 failed.** The build is warning-free.
 
@@ -112,7 +112,7 @@ Total: **290 unit + 6 integration tests, 0 failed.** The build is warning-free.
 This is the part the reverse-formula puts on top so you can stop reading if it disqualifies the post for you:
 
 - **STALE bench calibration is not run.** The architecture changes need their own `R@5 regression < 1.0pp` gate. Tooling scaffold exists; the dataset adapter and judge model are TBD. Tracked in issue #16.
-- **QA accuracy bench is not run.** Different metric than R@k — "with the retrieved memory, did the model answer correctly". Needs OpenAI / Anthropic API key. Tracked in issue #17.
+- **QA accuracy bench is not run.** A different metric from R@k: "with the retrieved memory, did the model answer correctly". Needs OpenAI / Anthropic API key. Tracked in issue #17.
 - **Constants are illustrative.** Every `pub const` in the v1.5 / v1.6 code carries a `TODO(phase-4-calibration)` comment. Real sweep against the bench will tune them. Defaults are picked from the synthesis document (§6 anchors) and lit review (`DUEL_FLIP_RATIO = 1.5` from STALE Appendix G).
 - **Mac and Windows binaries are not in v1.5 / v1.6.** Issues #19 and #20 are open. If you're on either platform and want them, drop a comment with use case.
 - **`cited_by` self-citation guard depends on cached confidence_score.** Facts that haven't been through the retest pass yet read as confidence 0.5 (default), so they default-block. This is the conservative behaviour; v1.7 may add a separate "pre-rest" baseline if it's surfaced as a problem.

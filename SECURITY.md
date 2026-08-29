@@ -1,7 +1,7 @@
 # Security policy
 
 mgi-mind is a local-first memory layer. By design nothing leaves the
-box — no cloud account, no API key, no telemetry. That's also the
+box: no cloud account, no API key, no telemetry. That's also the
 threat model: a local attacker reading memory contents from disk,
 intercepting MCP traffic on localhost, or feeding malicious input
 through the extractor.
@@ -19,14 +19,14 @@ versions are not patched.
 
 The version drops out of support when the next minor ships and the
 prior minor has had at least one cycle of grace. If you have a 1.x-or-earlier vault
-that needs migrating, open an Issue — there's a path even though
+that needs migrating, open an Issue. There's a path even though
 the build itself is unsupported.
 
 ## Reporting
 
 Send vulnerability reports to **the email in the
 [@madgodinc GitHub profile](https://github.com/madgodinc)**.
-That's the only private channel — DMs on social networks are not
+That's the only private channel. DMs on social networks are not
 monitored for security.
 
 Please include:
@@ -48,17 +48,17 @@ say so in the initial email.
 
 In scope:
 
-- **Vault** — secrets stored via `mgimind vault store`. Encryption,
+- **Vault**: secrets stored via `mgimind vault store`. Encryption,
   key derivation, on-disk format, key reuse, terminal-echo prevention.
-- **Extractor subprocess** — llama-server binary, prompt injection
+- **Extractor subprocess**: llama-server binary, prompt injection
   via memory content, command injection via filenames or model
   variant strings.
-- **MCP stdio surface** — JSON-RPC parsing, prompt-injection escape
+- **MCP stdio surface**: JSON-RPC parsing, prompt-injection escape
   via tool arguments, audit-log evasion.
-- **Qdrant binary** — the bundled `qdrant` is downloaded with a
+- **Qdrant binary**: the bundled `qdrant` is downloaded with a
   pinned SHA-256 checksum (audit #6). If a download path bypasses
   the integrity check, that is in scope.
-- **Audit log** — append-only contract, ability to tamper with
+- **Audit log**: append-only contract, ability to tamper with
   past entries, ability to write false entries.
 
 Out of scope:
@@ -69,7 +69,7 @@ Out of scope:
   in `~/mgimind/` with default user file modes. A local attacker
   with your shell is past the security boundary.
 - **Browser-based attacks against the viewer.** The viewer is
-  `mgimind viewer` — a localhost-only HTTP server with no auth by
+  `mgimind viewer`, a localhost-only HTTP server with no auth by
   design (local-first). Cross-site scripting via memory content
   injected into the viewer is interesting only if it escalates;
   please report if so.

@@ -1,7 +1,7 @@
 """HTTP client for a running mgi-mind server (`mgimind serve-http`).
 
-This is a *client*. The brain itself — the Rust binary, Qdrant, and the local
-models — is installed separately (see the README). This package talks to it over
+This is a *client*. The brain itself (the Rust binary, Qdrant, and the local
+models) is installed separately (see the README). This package talks to it over
 the loopback HTTP surface, so any Python code (a plain script, or an agent in
 LangChain / CrewAI / AutoGen / Band) can read and write memory by calling a few
 functions.
@@ -39,9 +39,9 @@ class MemoryResult:
     `.text` is a rendered block the model can read straight from `str(result)`.
     The structured fields are there when the route returns them:
 
-    * `.results` — search hits, each a dict with `id`, `score`, `content`,
+    * `.results`: search hits, each a dict with `id`, `score`, `content`,
       `library`, `author`, `created_at`, `source`.
-    * `.facts` / `.memories` / `.procedures` — recall, split by silo
+    * `.facts` / `.memories` / `.procedures`: recall, split by silo
       (`.memories` shaped like `.results`, `.facts` a list of subject/predicate/
       object dicts, `.procedures` a text block).
 

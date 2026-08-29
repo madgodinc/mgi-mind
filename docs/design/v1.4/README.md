@@ -1,23 +1,23 @@
-# v1.4 — validity / relevance model
+# v1.4: validity / relevance model
 
 Design docs for v1.4. Relevance moves from `semantic_match × recency`
 to a multi-axis calibrated belief weight.
 
 ## Files
 
-- `synthesis.md` — what we build and why. 4 mechanisms: duel rule,
+- `synthesis.md`: what we build and why. 4 mechanisms: duel rule,
   doubt window, inheritance discount, bi-temporal axes.
-- `implementation-plan.md` — how, in what order, with gates. 5 phases.
-- `prior-art.md` — the field work this builds on (STALE, the
+- `implementation-plan.md`: how, in what order, with gates. 5 phases.
+- `prior-art.md`: the field work this builds on (STALE, the
   March 2026 survey, SAVeR) plus one paper that turned out not
   to be prior art on closer reading.
-- `synthesis-history/` — earlier drafts and engineering notes.
+- `synthesis-history/`: earlier drafts and engineering notes.
 
 ## Status
 
 - Synthesis went through 2 critic rounds. Changelog in `synthesis.md` §7.
 - Implementation via branches `v1.4/phase-N-...`.
-- Current: `v1.4/phase-0-schema-primitives` — Cardinality enum +
+- Current: `v1.4/phase-0-schema-primitives`: Cardinality enum +
   confidence_score field, 13 unit tests, no behavior change to v1.1.
 
 ## Privacy

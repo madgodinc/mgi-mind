@@ -295,7 +295,7 @@ pub fn render_plan(plan: &ReconcilePlan) -> String {
         }
     }
     if c.new + c.replace == 0 {
-        let _ = writeln!(out, "Nothing to apply — md and Qdrant agree on every file.");
+        let _ = writeln!(out, "Nothing to apply: md and Qdrant agree on every file.");
     } else {
         let _ = writeln!(
             out,

@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn tokenize_mixed_language() {
-        let t = tokenize("Aurora — это ИИ соведущий стрима, FastAPI/Gemma");
+        let t = tokenize("Aurora: это ИИ соведущий стрима, FastAPI/Gemma");
         assert!(t.contains(&"aurora".to_string()));
         assert!(t.contains(&"это".to_string()));
         assert!(t.contains(&"fastapi".to_string()));

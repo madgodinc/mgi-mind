@@ -97,7 +97,7 @@ impl IngestReport {
         );
         if self.skipped_dup > 0 {
             s.push_str(&format!(
-                "\nSkipped {} near-duplicate(s) (kept in quarantine — re-assert to restore).",
+                "\nSkipped {} near-duplicate(s) (kept in quarantine: re-assert to restore).",
                 self.skipped_dup
             ));
         }

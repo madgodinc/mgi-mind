@@ -131,7 +131,7 @@ pub fn classify(query: &str, known_libraries: &[String]) -> Advice {
     if !hits.is_empty() {
         return Advice {
             priority: Priority::P1,
-            reason: "query names a known project/library — its stored context must be checked",
+            reason: "query names a known project/library: its stored context must be checked",
             suggested_libraries: hits,
         };
     }
@@ -139,21 +139,21 @@ pub fn classify(query: &str, known_libraries: &[String]) -> Advice {
     if contains_any(&q, META_CUES) {
         return Advice {
             priority: Priority::P1,
-            reason: "meta-cue about memory — the user is testing what the store holds",
+            reason: "meta-cue about memory: the user is testing what the store holds",
             suggested_libraries: Vec::new(),
         };
     }
     if contains_any(&q, CROSS_SESSION) {
         return Advice {
             priority: Priority::P1,
-            reason: "cross-session reference — by definition not in the current context",
+            reason: "cross-session reference: by definition not in the current context",
             suggested_libraries: Vec::new(),
         };
     }
     if contains_any(&q, NEGATION_VERIFY) {
         return Advice {
             priority: Priority::P1,
-            reason: "negation to verify — falsification needs a lookup, not a guess",
+            reason: "negation to verify: falsification needs a lookup, not a guess",
             suggested_libraries: Vec::new(),
         };
     }
@@ -167,7 +167,7 @@ pub fn classify(query: &str, known_libraries: &[String]) -> Advice {
 
     Advice {
         priority: Priority::P0,
-        reason: "no memory trigger detected — answering directly is fine",
+        reason: "no memory trigger detected: answering directly is fine",
         suggested_libraries: Vec::new(),
     }
 }

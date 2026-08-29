@@ -214,7 +214,7 @@ pub fn run(input_path: &Path) -> Result<String> {
     let overall_delta_at_5 =
         (with_policy.overall.recall(5) - without_policy.overall.recall(5)) * 100.0;
     notes.push(format!(
-        "Overall ΔR@5 = +{overall_delta_at_5:.1} pct — this is the recall a no-search baseline would not have."
+        "Overall ΔR@5 = +{overall_delta_at_5:.1} pct: this is the recall a no-search baseline would not have."
     ));
     if priority_counts.get("P0").copied().unwrap_or(0) == 0 {
         notes.push(
@@ -240,7 +240,7 @@ pub fn run(input_path: &Path) -> Result<String> {
     use std::fmt::Write;
     let _ = writeln!(
         s,
-        "Counterfactual A/B — retrieval policy on / off (phase Д6, zero-API)"
+        "Counterfactual A/B: retrieval policy on / off (phase Д6, zero-API)"
     );
     let _ = writeln!(s, "total questions: {}", report.total_questions);
     for (k, v) in &report.priority_counts {

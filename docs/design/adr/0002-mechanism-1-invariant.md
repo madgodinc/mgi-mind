@@ -1,4 +1,4 @@
-# ADR 0002 — Mechanism 1 invariant: never hard-delete a fact
+# ADR 0002: Mechanism 1 invariant: never hard-delete a fact
 
 **Status:** accepted.
 **Date:** 2026-06-04.
@@ -9,7 +9,7 @@ No code path in mgi-mind removes a fact from the facts collection
 based on duel-rule logic, doubt-window logic, or active-re-test
 logic.
 
-The loser of a duel is **dampened** — payload status moves to
+The loser of a duel is **dampened**: payload status moves to
 `Stale`, `valid_until` is set. The fact stays readable; it's just
 hidden from default ranking.
 
@@ -31,7 +31,7 @@ it. There's no "and also delete" arm to slip in.
 
 Validity-model synthesis §3 mechanism 1. Came out of mass-rejection
 behaviour in early-2026 prototype designs that auto-superseded
-conflicting facts — when a flip turned out to be wrong (typo, bad
+conflicting facts. When a flip turned out to be wrong (typo, bad
 inference from extractor), there was no way to recover the original.
 
 ## Reasons
@@ -56,7 +56,7 @@ Three failure modes that hard-delete cannot recover from:
 
 ## Consequences
 
-- **Payload size grows.** Stale facts stay on disk. Acceptable —
+- **Payload size grows.** Stale facts stay on disk. Acceptable,
   Qdrant payload is cheap, and quarantine / consolidate paths
   exist for genuinely cold data.
 
@@ -73,9 +73,9 @@ Three failure modes that hard-delete cannot recover from:
 
 `src/duel.rs::DuelOutcome`:
 
-- `Flip` — winner becomes Active; loser dampened to Stale.
-- `Contested` — both stay live with `EntryStatus::Contested`.
-- `Quarantine` — loser enters QuarantineCandidate state (waiting
+- `Flip`: winner becomes Active; loser dampened to Stale.
+- `Contested`: both stay live with `EntryStatus::Contested`.
+- `Quarantine`: loser enters QuarantineCandidate state (waiting
   for promote-on-repeat).
 
 `src/duel.rs::dampen_loser`:
@@ -101,7 +101,7 @@ Three failure modes that hard-delete cannot recover from:
   Mitigation: quarantine + soft-decay.
 - **Search cost.** Filter-by-status on every query. Mitigation:
   Qdrant index on status field; cheap.
-- **No way to delete a fact written by mistake.** True — but
+- **No way to delete a fact written by mistake.** True, but
   `mgimind fact invalidate <id>` exists and marks it Stale. Real
   hard-delete is only via `mgimind delete` which goes through the
   audit log and is intended for user-initiated content removal,
@@ -109,21 +109,21 @@ Three failure modes that hard-delete cannot recover from:
 
 ## Alternatives considered
 
-- **Hard-delete the loser on a Flip.** Rejected — failure modes
+- **Hard-delete the loser on a Flip.** Rejected, since failure modes
   above.
 - **Time-based hard-delete after N months stale.** Rejected for
-  v1.x — same risks as immediate hard-delete, deferred. v2.0 may
+  v1.x, same risks as immediate hard-delete, deferred. v2.0 may
   add a configurable retention policy that hard-deletes Stale
   facts older than N years; the duel rule itself stays soft.
 
 ## Tests pinning the invariant
 
-- `confidence::tests::never_returns_delete_verdict` — 200-point
+- `confidence::tests::never_returns_delete_verdict`: 200-point
   grid over `(old, new, in_doubt)` asserts `decide_retest_transition`
   never produces a variant other than the three listed.
-- `doubt::tests::busy_flag_observable_by_loop_check` — exercises
+- `doubt::tests::busy_flag_observable_by_loop_check`: exercises
   the BusyGuard pattern.
 
 If a contributor PRs a fourth `RetestTransition` variant, the test
 above does not break, but the exhaustive `match` in
-`retest_fact_step82` does — Rust catches the bypass at compile time.
+`retest_fact_step82` does, so Rust catches the bypass at compile time.

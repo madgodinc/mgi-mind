@@ -1,4 +1,4 @@
-# KG Cleanup Final State — 2026-06-05
+# KG Cleanup Final State: 2026-06-05
 
 ## Before / After
 
@@ -12,9 +12,9 @@
 
 ## Backups (3 snapshots, all 130MB)
 
-- `mgi-mind-backup-2026-06-04-164537.tar.gz` — yesterday baseline
-- `mgi-mind-backup-2026-06-05-post-extraction.tar.gz` — after 11h extraction
-- `mgi-mind-backup-2026-06-05-pre-cleanup.tar.gz` — before today's destructive cleanup
+- `mgi-mind-backup-2026-06-04-164537.tar.gz`: yesterday baseline
+- `mgi-mind-backup-2026-06-05-post-extraction.tar.gz`: after 11h extraction
+- `mgi-mind-backup-2026-06-05-pre-cleanup.tar.gz`: before today's destructive cleanup
 
 If anything needed from the deleted 35k facts: `tar xzf <backup>.tar.gz -C ~` overwrites qdrant + ~/Brain/memory.
 
@@ -32,7 +32,7 @@ If anything needed from the deleted 35k facts: `tar xzf <backup>.tar.gz -C ~` ov
 | Mad's primary language? | Rust |
 | HN account MadGodInc? | hellbanned |
 
-All answers are single-fact — no duplicates, no contradictions surfacing.
+All answers are single-fact, with no duplicates and no contradictions surfacing.
 
 ## What's in the 198 active facts
 

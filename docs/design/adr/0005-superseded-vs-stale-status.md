@@ -1,4 +1,4 @@
-# ADR 0005 — Superseded distinct from Stale
+# ADR 0005: Superseded distinct from Stale
 
 **Status:** accepted.
 **Date:** 2026-06-05.
@@ -7,10 +7,10 @@
 
 `EntryStatus` has two distinct hidden-from-default-query states:
 
-- **`Stale`** — written by `dampen_loser` when a fact lost a contradiction
+- **`Stale`**: written by `dampen_loser` when a fact lost a contradiction
   duel. The fact's claim was wrong (or at least less load-bearing than
   the winner's); the audit log records who beat whom.
-- **`Superseded`** — written by `mark_superseded` when a fact in a
+- **`Superseded`**: written by `mark_superseded` when a fact in a
   `TemporalSingle` chain is overtaken by a newer entry. The fact's claim
   was correct at its time; it stopped being current.
 
@@ -31,12 +31,12 @@ for revisiting:
 1. **Mechanism 1 invariant says never delete.** Good. But "never delete"
    alone doesn't tell the user *why* a fact is no longer current. A user
    debugging their agent's behavior wants to know "was this overwritten
-   by a contradiction, or by the passage of time?" — those are different
+   by a contradiction, or by the passage of time?" Those are different
    stories.
 2. **The `redo-duels` walk surfaces both shapes.** When we run the walk
    on a real KG, it finds `Aurora has_status active` (overwritten by
-   contradiction — Aurora got frozen) and `mgi-mind has_version v0.8.0`
-   (overtaken by time — v1.6.4 is current). Both must be hidden from
+   contradiction, Aurora got frozen) and `mgi-mind has_version v0.8.0`
+   (overtaken by time, v1.6.4 is current). Both must be hidden from
    default queries; the user-facing meaning differs.
 3. **STALE benchmark behavioural metrics need the distinction.** Several
    of the metrics distinguish "premise rejection" (Stale) from "temporal

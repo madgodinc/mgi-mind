@@ -99,7 +99,7 @@ impl DistributionSummary {
     /// not chosen a priori.
     pub fn recommended_formula_shape(&self) -> &'static str {
         if self.count == 0 || self.p50 == 0 {
-            "no signal yet — defer formula choice until more data"
+            "no signal yet: defer formula choice until more data"
         } else if (self.p90 as f32) / (self.p50.max(1) as f32) > 5.0 {
             "fat-tailed distribution → use logarithmic entrenchment (log2(1 + dependants))"
         } else if self.p90 == self.p50 {
@@ -183,7 +183,7 @@ pub fn propose_cardinality_temporal(obs: &[SubjectObservation]) -> CardinalityPr
             confidence: ProposalConfidence::Low,
             reason: format!(
                 "{}/{} multi-object subjects look temporal, but superseded count exceeds a clean \
-                 sequence ({:.0}%) — data doesn't fit a tidy timeline; review manually",
+                 sequence ({:.0}%): data doesn't fit a tidy timeline; review manually",
                 multi.len(),
                 n,
                 temporal_ratio * 100.0
@@ -204,7 +204,7 @@ pub fn propose_cardinality_temporal(obs: &[SubjectObservation]) -> CardinalityPr
             },
             reason: format!(
                 "{}/{} multi-object subjects show a sequential single-value-over-time pattern \
-                 ({:.0}% of prior values superseded) — looks TemporalSingle, not coexisting",
+                 ({:.0}% of prior values superseded): looks TemporalSingle, not coexisting",
                 multi.len(),
                 n,
                 temporal_ratio * 100.0
@@ -221,7 +221,7 @@ pub fn propose_cardinality_temporal(obs: &[SubjectObservation]) -> CardinalityPr
             },
             reason: format!(
                 "{}/{} subjects have ≥ 2 distinct objects and they coexist ({:.0}% superseded \
-                 — below the temporal trigger) → Multi",
+                 below the temporal trigger) → Multi",
                 multi.len(),
                 n,
                 temporal_ratio * 100.0
@@ -280,7 +280,7 @@ pub fn propose_cardinality(objects_per_subject: &[Vec<String>]) -> CardinalityPr
             proposed: Cardinality::Multi,
             confidence: ProposalConfidence::Low,
             reason: format!(
-                "{multi_subjects}/{n_subjects} subjects ({:.0}%) have ≥ 2 distinct objects — below 20% threshold; defaulting to Multi for review",
+                "{multi_subjects}/{n_subjects} subjects ({:.0}%) have ≥ 2 distinct objects: below 20% threshold; defaulting to Multi for review",
                 multi_ratio * 100.0
             ),
         }
@@ -346,7 +346,7 @@ pub async fn run_dependants(
     // Step 1: enumerate every active fact in the knowledge graph.
     let facts = crate::knowledge::list_all_facts(config).await?;
     if facts.is_empty() {
-        eprintln!("  no facts in the knowledge graph yet — nothing to count.");
+        eprintln!("  no facts in the knowledge graph yet: nothing to count.");
         return Ok((HashMap::new(), DistributionSummary::from_counts(&[])));
     }
     eprintln!("  scanning {} facts...", facts.len());
@@ -423,7 +423,7 @@ pub async fn run_cardinality_inference(config: &MindConfig, output: PathBuf) -> 
     // per-subject (distinct, superseded) observations.
     let facts = crate::knowledge::list_all_facts_with_history(config).await?;
     if facts.is_empty() {
-        eprintln!("  no facts in the knowledge graph — nothing to propose.");
+        eprintln!("  no facts in the knowledge graph: nothing to propose.");
         return Ok(0);
     }
     eprintln!("  inspecting {} facts (incl. history)...", facts.len());
@@ -504,7 +504,7 @@ pub async fn run_confirmations(
 
     let procs = crate::storage::list_procedures_for_backfill(config).await?;
     if procs.is_empty() {
-        eprintln!("  no procedures found — nothing to backfill (other memory types stay at 0).");
+        eprintln!("  no procedures found: nothing to backfill (other memory types stay at 0).");
         return Ok((0, DistributionSummary::from_counts(&[])));
     }
     eprintln!(

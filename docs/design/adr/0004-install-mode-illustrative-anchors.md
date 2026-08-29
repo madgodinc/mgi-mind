@@ -1,4 +1,4 @@
-# ADR 0004 — Install-mode profiles with illustrative-only anchors
+# ADR 0004: Install-mode profiles with illustrative-only anchors
 
 **Status:** accepted (anchors marked TODO(phase-4-calibration)).
 **Date:** 2026-06-04.
@@ -91,7 +91,7 @@ because independent agents reporting the same fact IS evidence.
 
 The thresholds (3 agents, 10 signals / week) are conservative
 cliffs, not gradients. §10 question 6 says mis-classification
-cost is silent quality drift — better to default to ChatOnly and
+cost is silent quality drift, so it is better to default to ChatOnly and
 have the user explicitly opt out.
 
 Auto-detect is **informational only.** `mgimind doctor` and
@@ -104,11 +104,11 @@ set-install-mode <mode>`.
 - **Users have to pick.** Documentation in `mgimind doctor` output
   surfaces the auto-detect line; v1.6.1 also prints the weight
   breakdown so users can compare modes visually.
-- **The anchors will move.** Acceptable — the contract test
+- **The anchors will move.** Acceptable, since the contract test
   freezes ChatOnly. New modes can be calibrated independently.
 - **Three modes don't cover every use case.** A "single-user
   with occasional manual outcome calls" profile sits between
-  ChatOnly and DevWithCi. Acceptable for v1.5 / v1.6 — the user
+  ChatOnly and DevWithCi. Acceptable for v1.5 / v1.6, since the user
   can edit weights manually via config.json once issue #16 lands.
 
 ## Implementation
@@ -131,7 +131,7 @@ set-install-mode <mode>`.
 
 - Uses `mode.weights()` instead of hardcoded constants.
 - v1.4 `weight_new` is preserved as a shim that calls
-  `weight_new_for_mode(_, ChatOnly)` — pinned bit-for-bit by the
+  `weight_new_for_mode(_, ChatOnly)`, pinned bit-for-bit by the
   contract test over 256 input combinations.
 
 `src/confidence.rs::confidence_score(inputs, mode)`:
@@ -146,29 +146,29 @@ set-install-mode <mode>`.
 
 ## Tests pinning the design
 
-- `install_mode::tests::weights_sum_to_one` — every mode sums to
+- `install_mode::tests::weights_sum_to_one`: every mode sums to
   1.0 ± 0.001.
-- `install_mode::tests::round_trips_through_json` — kebab-case
+- `install_mode::tests::round_trips_through_json`: kebab-case
   serde.
-- `install_mode::tests::per_mode_emphasis_preserved` — ordering
+- `install_mode::tests::per_mode_emphasis_preserved`: ordering
   invariants (ChatOnly emphasises dependants, DevWithCi raises
   external, MultiTenant raises confirmations).
-- `duel::tests::chat_only_mode_matches_legacy_weight_new` —
+- `duel::tests::chat_only_mode_matches_legacy_weight_new`:
   256-input bit-for-bit contract.
-- `duel::tests::dev_with_ci_mode_lifts_external_signal_weight` —
+- `duel::tests::dev_with_ci_mode_lifts_external_signal_weight`:
   proves the knob does something.
-- `duel::tests::multi_tenant_mode_lifts_confirmation_weight` —
+- `duel::tests::multi_tenant_mode_lifts_confirmation_weight`:
   same for the third mode.
-- `config::tests::pre_v15_config_defaults_to_chat_only` — pre-v1.5
+- `config::tests::pre_v15_config_defaults_to_chat_only`: pre-v1.5
   configs round-trip cleanly.
 
 ## Alternatives considered
 
 - **One global weight matrix.** Rejected per ADR motivation.
 - **Continuous knob (no enum, raw numbers in config).** Rejected
-  — invites worse defaults than the three canned profiles.
+  It invites worse defaults than the three canned profiles.
 - **More profiles** (`AcademicResearch`, `PersonalKnowledge`,
-  etc.). Rejected for v1.5 — three is the smallest set that
+  etc.). Rejected for v1.5: three is the smallest set that
   covers §5 qualitative diversity. Add more after the calibration
   sweep shows real misclassification.
 

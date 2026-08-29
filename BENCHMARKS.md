@@ -6,15 +6,15 @@ metric from another system.
 
 ## The metric: retrieval recall (R@k), zero-API
 
-MGI-Mind has no generation layer — it is the memory, not the assistant. So its
+MGI-Mind has no generation layer. It is the memory, not the assistant. So its
 native, honest number is **retrieval recall R@k**: given a question, does the gold
 evidence appear in the top-k results of the hybrid search? This is measured with
-**no LLM and no external API** — it runs entirely locally.
+**no LLM and no external API**, and it runs entirely locally.
 
 This is **not QA accuracy** (an LLM generates an answer and a judge-LLM scores it).
 QA accuracy needs paid API calls and measures "memory + someone else's LLM", not the
 memory itself. **Do not compare the R@k numbers here against another system's
-LLM-judged QA numbers** — that is apples to oranges. A QA mode (answerer + judge, an
+LLM-judged QA numbers**, which is apples to oranges. A QA mode (answerer + judge, an
 explicitly labeled API mode for like-for-like comparison with e.g. Mem0) is planned
 as a separate, opt-in path; it is not part of this zero-API core.
 
@@ -52,18 +52,18 @@ public test reaches yet.
 ## How recall is computed (LongMemEval, session-level)
 
 For each question:
-1. Its haystack sessions are ingested into an isolated, throwaway library — each
+1. Its haystack sessions are ingested into an isolated, throwaway library, each
    session is one memory tagged with its session id.
 2. `mind_search` runs the question against that library (hybrid dense + sparse).
 3. The ranked results are collapsed to **distinct session ids**, in rank order.
 4. R@k = a gold `answer_session_id` appears within the top-k distinct sessions.
 
 Abstention questions (`_abs`, no in-haystack evidence) are **excluded** from the
-recall denominator and reported separately — they test "say you don't know", not
+recall denominator and reported separately, since they test "say you don't know" rather than
 retrieval. The retrieval config (model, dimension, reranking on/off) is printed in
 the report header, because the number depends on it.
 
-### How hard is the task — distinct-session distribution
+### How hard is the task: distinct-session distribution
 
 A recall number is only meaningful if the haystack is large enough that retrieval
 is non-trivial. For LongMemEval-S (500 questions):
@@ -79,17 +79,17 @@ trivially easier by haystack size.
 
 ## Reproduce
 
-Datasets are public, downloaded once — **no account or service is connected** for
+Datasets are public and downloaded once, with **no account or service connected** for
 this zero-API benchmark.
 
-- **LongMemEval** — `xiaowu0162/LongMemEval` (HuggingFace). Start with the compact
+- **LongMemEval**: `xiaowu0162/LongMemEval` (HuggingFace). Start with the compact
   `longmemeval_s.json`.
-- **LoCoMo** — Maharana 2024 (public). When added, report the standard **1540
+- **LoCoMo**: Maharana 2024 (public). When added, report the standard **1540
   non-adversarial** subset (category 5 has documented ground-truth issues; do not
   rely on it blindly).
 
 ```sh
-# Full run (long on CPU — embeds every haystack session of every question):
+# Full run (long on CPU, embeds every haystack session of every question):
 mgimind bench /path/to/longmemeval_s.json --output longmemeval_s.results.json
 
 # Quick smoke (first N questions):
@@ -111,7 +111,7 @@ raw file alongside any number you publish, so the claim is checkable.
 ### Headline number (the one the release tag stands behind)
 
 The headline is the **default install path** a user gets after `mgimind doctor
---fix` — CPU INT8, the model variant pinned for zero-config installs. Anything
+--fix`: CPU INT8, the model variant pinned for zero-config installs. Anything
 faster or higher is reported as an ablation below, not as the face of the
 project.
 
@@ -129,7 +129,7 @@ real and reproducible gain (raw json below, plus the
 opt-in path on hardware most installs do not have. Putting it in the headline
 would sell a configuration the user does not actually run.
 
-### LongMemEval-S — 2026-06-02, CPU
+### LongMemEval-S: 2026-06-02, CPU
 
 ```
 config: model=all-MiniLM-L6-v2 dim=384 rerank=false (sessions ranked by hybrid dense+sparse)
@@ -163,10 +163,10 @@ Variance (multiple repeats) and additional configs (`rerank=on`,
 in a single overnight burst. The plan is: every minor tag re-runs the headline
 config above and publishes Δ; milestone releases run the full ablation matrix.
 
-Do not paste a number you did not produce on this build — borrowing another
+Do not paste a number you did not produce on this build. Borrowing another
 project's figure is exactly the overclaim this file exists to prevent.
 
-### LongMemEval-S — 2026-06-03, regression v0.12.1 vs v0.8.1 (RunPod CPU)
+### LongMemEval-S: 2026-06-03, regression v0.12.1 vs v0.8.1 (RunPod CPU)
 
 Goal: confirm the quarantine layer (v0.11.x) and the relevance gate did not
 break retrieval against the v0.8.1 baseline above. Same dataset, same model,
@@ -228,12 +228,12 @@ Reranker on this CPU/MiniLM config moves R@1 by +6pp and R@5 by +0.6pp.
 The reranker effect is real but small on MiniLM; it is much larger on the
 e5-base headline below.
 
-### LongMemEval-S — 2026-06-04, v0.14.3 GPU (RTX 3090, e5-base FP16)
+### LongMemEval-S: 2026-06-04, v0.14.3 GPU (RTX 3090, e5-base FP16)
 
 First GPU run of the bench, also first run on `multilingual-e5-base`
 (the dense default; baseline above is `all-MiniLM-L6-v2` for a like-for-like
 v0.8.1 comparison). Switched from the INT8 quantized e5-base ONNX shipped
-by `mgimind doctor --fix` to the **FP16** variant — INT8 ops (`MatMulInteger`,
+by `mgimind doctor --fix` to the **FP16** variant, because INT8 ops (`MatMulInteger`,
 `DynamicQuantizeLinear`) are not implemented in the ORT CUDA execution
 provider and fall back to CPU, defeating GPU acceleration. FP16 keeps the
 whole graph on the GPU and gives the actual speedup (~25 min/500q vs
@@ -249,7 +249,7 @@ build:  mgimind v0.14.3 (commit 47c0455, --features cuda),
 scored: 500 questions (0 abstention excluded), three runs
 ```
 
-Run A — `rerank=false`:
+Run A, `rerank=false`:
 
 ```
   R@1  = 88.4%
@@ -266,7 +266,7 @@ By question type:
   temporal-reasoning         n=133  R@1=86%  R@5=98%  R@10=98%
 ```
 
-Run B — `rerank=true` (headline):
+Run B, `rerank=true` (headline):
 
 ```
   R@1  = 92.6%
@@ -283,7 +283,7 @@ By question type:
   temporal-reasoning         n=133  R@1=89%  R@5=98%  R@10=100%
 ```
 
-Run C — `rerank=true` again (variance):
+Run C, `rerank=true` again (variance):
 
 ```
   R@1  = 92.6%   (Δ vs Run B:  0.0)
@@ -322,10 +322,10 @@ Run C — `rerank=true` again (variance):
 - The `rerank=true` ablation (+4.2pp R@1, +1.2pp R@5, +0.6pp R@10) is
   meaningful and justifies the 2.4× wall cost on this dataset.
 - `single-session-preference` (n=30) remains the weakest stratum on
-  both configurations — same shape as the baseline. Open issue, not a
+  both configurations, the same shape as the baseline. Open issue, not a
   regression.
 
-### LongMemEval-S — 2026-06-04, v0.14.3 GPU (RTX 3090, MiniLM-L6-v2 FP16)
+### LongMemEval-S: 2026-06-04, v0.14.3 GPU (RTX 3090, MiniLM-L6-v2 FP16)
 
 Ablation control for the headline above. Same host, same build, same
 500 questions, but switch the embedder back to `all-MiniLM-L6-v2` (the
@@ -373,7 +373,7 @@ CPU at every cutoff. Two takeaways:
   FP16 reranker through `doctor --fix` is on the roadmap; until then
   the `rerank=on` wall-time numbers above are mostly CPU-bound.
 
-## Counterfactual A/B — retrieval policy on / off
+## Counterfactual A/B: retrieval policy on / off
 
 Companion benchmark to the LongMemEval recall numbers above. Measures the
 **structural value of the search-before-answer policy**: take any
@@ -398,7 +398,7 @@ Question-type → priority mapping (LongMemEval-S):
 | temporal-reasoning | P2 should-search |
 | _(none in LongMemEval-S)_ | P0 no-search |
 
-### Results — 2026-06-02 (over the v0.8.1 baseline 500q run)
+### Results: 2026-06-02 (over the v0.8.1 baseline 500q run)
 
 ```
 total questions: 500
@@ -410,7 +410,7 @@ WITH policy:    R@5 = 98.2% (overall)
   P1 (n=367)    R@5 = 98.9%
   P2 (n=133)    R@5 = 96.2%
 
-WITHOUT policy: R@5 =  0.0% (structural — no search → no retrieval hits)
+WITHOUT policy: R@5 =  0.0% (structural: no search, so no retrieval hits)
 
 ΔR@5 = +98.2 pct  ← recall unlocked by the policy
 ```
@@ -423,17 +423,17 @@ WITHOUT policy: R@5 =  0.0% (structural — no search → no retrieval hits)
   searches doesn't see any candidate, so nothing can be in the top-5. The
   full Δ goes to "what would the policy save if the agent did skip search".
 - LongMemEval-S contains no chit-chat / P0 questions (all 500 map to P1 or
-  P2). The roadmap deliberately removed the P0 tier — false negatives cost
+  P2). The roadmap deliberately removed the P0 tier, because false negatives cost
   more than false positives. The number you see is the **upper bound** of
   policy value on this dataset.
 - A future dataset with explicit P0 questions ("hi", "thanks", "what time
   is it") would cleave the gap: the policy would *not* help there, but
-  also wouldn't hurt — the trigger table says skip P0.
+  also wouldn't hurt, since the trigger table says skip P0.
 - **Not an LLM accuracy measure.** A real A/B with a generation step needs
   a like-for-like LLM-judged harness (see "Like-for-like vs other systems"
   below).
 
-## Procedural memory — recall@k (phase Д6)
+## Procedural memory: recall@k (phase Д6)
 
 Independent benchmark from LongMemEval. Measures whether the procedural-memory
 layer (`mind_learn` / `mind_recall`) surfaces the right playbook when an error
@@ -456,7 +456,7 @@ mgimind bench-procedural <dataset.jsonl> --output raw.json
 
 Dataset format is JSONL with fields `{error, fix, language, stratum, id?, context?}`.
 
-### Results — 2026-06-02 (v0.14.x, final 227-pair v0.10.0 set)
+### Results: 2026-06-02 (v0.14.x, final 227-pair v0.10.0 set)
 
 Mined locally with `scripts/scrape_procedural_dataset.py` from 20 OSS repos
 (cargo, clap, click, cobra, commander.js, django, express, flask, go,
@@ -499,7 +499,7 @@ By stratum (error type):
 - **R@1 = 48.0%** is realistic. Many fix commits share near-identical error
   signatures ("test failure on macOS" appears across 8 commits in next.js).
   With multiple plausible fixes for one signature, picking the *exact* gold
-  at rank 1 is partly a coin flip — the metric to watch is R@5.
+  at rank 1 is partly a coin flip, so the metric to watch is R@5.
 - **compile R@1 = 80%** is the strongest stratum: compile errors carry
   highly specific signatures (`error[E0599]`, `cannot find name`), which the
   sparse retrieval branch catches reliably.
@@ -517,7 +517,7 @@ harness (`mem0ai/memory-benchmarks`) with the same answerer/judge model and top-
 rather than comparing across metrics. Record the judge model, provider, and date
 (LLM judges drift). This is a separate effort from the zero-API recall above.
 
-## STALE — belief revision (the validity axis)
+## STALE: belief revision (the validity axis)
 
 The numbers above measure retrieval: did the right evidence come back. STALE
 measures something the validity model is actually built for: when a belief
@@ -558,7 +558,7 @@ A partial run over the **full 400-scenario distribution**, N = 155 completed
 |---|---|---|---|---|---|
 | T1 (co-referential) | 47 | 38% | 47% | 38% | 53% |
 | T2 (propagated) | 108 | 26% | 39% | 35% | 52% |
-| **Overall** | **155** | **~32% macro / ~30% micro** | — | — | — |
+| **Overall** | **155** | **~32% macro / ~30% micro** | n/a | n/a | n/a |
 
 Overall is the macro-average (T1+T2)/2 per STALE §3.1, for comparability with the
 baseline table. The N-weighted micro-average is ~30%; macro is the headline only
@@ -608,7 +608,7 @@ full-haystack, full-distribution numbers graded with the paper's own judge. The
   non-reproducible by date. A pinned judge is required before any head-to-head
   claim.
 - **A curated 10-scenario sample scored T2 = 70%**, which would superficially
-  beat CUPMem's 68% — which is precisely why it must not be read as a result. It
+  beat CUPMem's 68%, which is precisely why it must not be read as a result. It
   was an easy subclass and is *not* the headline. On the full distribution T2 is
   26%. The curated number is recorded here only so it is not mistaken for the
   real one.

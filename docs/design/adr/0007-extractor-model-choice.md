@@ -49,7 +49,7 @@ embedder: one binary, no CUDA at build, no driver at runtime, works everywhere.
 Q4_K_M keeps the download small (~1–2 GB) and the per-extraction latency in the
 single-digit-seconds range on a current x86 CPU.
 
-### Gemini cloud — benchmark only
+### Gemini cloud: benchmark only
 
 The STALE run used `gemini-flash-latest` for extraction because no local 2–8B
 model cleared the T2 bar, and that lifted T2 from 22% to 70% on a curated sample.
@@ -101,7 +101,7 @@ number measures the extractor's mood, not the mechanism.
 
 - Code: `src/extractor.rs` (Qwen variants, CPU-first, `is_llama_server_installed`
   gate). The Granite variants live on branch `stale-extraction-optimization`.
-- Benchmark: `BENCHMARKS.md` (STALE section — the disclosed cloud-extractor swap),
+- Benchmark: `BENCHMARKS.md` (STALE section, the disclosed cloud-extractor swap),
   `src/bench_stale.rs`.
 - Companion: [0006](./0006-derived-state-provenance.md) (the validity model the
   extractor feeds).

@@ -1,4 +1,4 @@
-# mgi-mind validity/relevance model — synthesis v3 (post critic round 2)
+# mgi-mind validity/relevance model: synthesis v3 (post critic round 2)
 
 Date: 2026-06-04. Third revision after two critic rounds. Round 1
 opened three holes in the v1 core that were defended-by-framing rather
@@ -20,7 +20,7 @@ on LongMemEval-S retrieval (zero-API, no LLM judge), on the default
 install path (CPU MiniLM INT8 + reranker). Competitors: mem0 (57k
 stars, $24M), Zep/Graphiti (32k combined), Letta (23k), Cognee,
 supermemory. Their published numbers are end-to-end QA accuracy with a
-gpt-4o judge; ours is pure retrieval recall — direct comparison
+gpt-4o judge; ours is pure retrieval recall, so direct comparison
 requires running mgi-mind through the same QA harness, which is a
 later step.
 
@@ -33,7 +33,7 @@ modes are observable in production:
   later it can't explain why Mad's Rust code is still running.
 - **Echo entrenchment.** A fact gets quoted across many sessions, each
   quote amplifies confidence. The store ends up *most* confident in
-  facts it has confirmed *least* — they were re-quoted the most, not
+  facts it has confirmed *least*, since they were re-quoted the most, not
   independently re-verified.
 
 The competitor field doesn't have a clean answer to either. The
@@ -43,7 +43,7 @@ proposal below is structural, not a single feature.
 
 ## 2. The core in one paragraph
 
-A contradicting fresh fact does not replace an old one — it **opens a
+A contradicting fresh fact does not replace an old one. It **opens a
 duel**. The old fact enters the duel with a handicap proportional to
 its *entrenchment* (how many other memories depend on it × how often
 it was retrieved and not contradicted). The fresh fact wins only by
@@ -53,13 +53,13 @@ timestamped*, not deleted. Three further mechanisms keep the duel rule
 from ossifying, from echoing, and from triggering on false conflicts.
 
 The word "independent" from the previous synthesis has been replaced
-with "diverse" throughout — this is not cosmetic, see Section 5.
+with "diverse" throughout, which is not cosmetic; see Section 5.
 
 ---
 
 ## 3. Four mechanisms
 
-### Mechanism 1 — Duel rule (conflict resolution)
+### Mechanism 1: Duel rule (conflict resolution)
 
 A duel is triggered when `F_new` and `F_old` share `(subject,
 predicate)` **and the predicate is single-valued** (see Section 4 for
@@ -69,19 +69,19 @@ added.
 When a duel triggers:
 
 1. Compute `entrenchment(F_old)` from:
-   - **dependants** — count of other memories that semantically rely
+   - **dependants**: count of other memories that semantically rely
      on it (already trackable via the knowledge-graph subsystem)
-   - **confirmations** — retrievals where the fact was surfaced and
+   - **confirmations**: retrievals where the fact was surfaced and
      not contradicted by the user, **weighted by source diversity**
      (Section 5)
-   - **age-of-entrenchment** — time since first diverse confirmation,
+   - **age-of-entrenchment**: time since first diverse confirmation,
      not since first write
 2. Compute `weight(F_new)` from:
-   - **inheritance discount** — was it surfaced by a live conversation
+   - **inheritance discount**: was it surfaced by a live conversation
      turn, or carried in from memory (Section 6)
-   - **diversity-weighted confirmations** — how many *distinct-context*
+   - **diversity-weighted confirmations**: how many *distinct-context*
      observations support it (Section 5)
-   - **bi-temporal stance** — valid_time vs transaction_time
+   - **bi-temporal stance**: valid_time vs transaction_time
      (Mechanism 4)
 3. Resolve:
    - `weight(F_new) >> entrenchment(F_old)` → flip. `F_old` gets
@@ -94,7 +94,7 @@ When a duel triggers:
 4. **The loser is never hard-deleted.** It keeps its trace for audit
    and for the case where the duel reverses later.
 
-### Mechanism 2 — Doubt window (anti-ossification), with active re-test
+### Mechanism 2: Doubt window (anti-ossification), with active re-test
 
 The duel rule applied alone makes well-entrenched facts almost
 unkillable. This is the same machinery as human stubbornness:
@@ -136,7 +136,7 @@ upgrades the cost question (Section 9) from "cache entrenchment for
 fast retrieval" to "cache *and* run scheduled re-tests of
 low-traffic high-weight facts." Bigger budget; honest about it.
 
-### Mechanism 3 — Inheritance discount (anti-echo, silent by default)
+### Mechanism 3: Inheritance discount (anti-echo, silent by default)
 
 Every fact a session inherits from memory (briefing,
 `mind_session_last`, files outside the live conversation) is loaded
@@ -150,19 +150,19 @@ with `inherited_unverified = true`. While the flag is set:
   with "I have this from memory, not from this session" would train
   users to ignore the disclaimer. The flag is *voiced* only when an
   inherited fact is actively in conflict with something in the live
-  session ("I have Rust in memory, you said Go — let me ask"). For
+  session ("I have Rust in memory, you said Go, let me ask"). For
   everything else the flag works internally and silently. Trust in
   memory is built by being quietly correct, not by narrating
   provenance.
 
 The flag clears at the first independent in-session confirmation.
 
-### Mechanism 4 — Bi-temporal axes (anti-late-arrival)
+### Mechanism 4: Bi-temporal axes (anti-late-arrival)
 
 Two clocks, not one:
 
-- `valid_time` — when the fact became true in the world.
-- `transaction_time` — when the system found out.
+- `valid_time`: when the fact became true in the world.
+- `transaction_time`: when the system found out.
 
 Optional third axis (`decision_time`) for audit: when did the system
 decide to treat this as authoritative.
@@ -180,7 +180,7 @@ single `valid_until` originally planned.
 
 ---
 
-## 4. "Contradicts" — predicate cardinality
+## 4. "Contradicts": predicate cardinality
 
 The duel rule above says it triggers on `(subject, predicate)` matches
 "with single-valued predicate." This is load-bearing and was not in v1.
@@ -192,15 +192,15 @@ can write in two languages.
 Spec:
 
 - Every predicate-type carries a `cardinality` attribute:
-  - `single` — at most one current `object` per `subject`
+  - `single`: at most one current `object` per `subject`
     (`primary_language`, `birth_year`, `current_project`)
-  - `multi` — many `objects` allowed simultaneously
+  - `multi`: many `objects` allowed simultaneously
     (`uses_language`, `worked_at`, `speaks`)
-  - `temporal-single` — single at any moment but historically a
+  - `temporal-single`: single at any moment but historically a
     sequence (`primary_language` is actually this if you care about
-    history — Rust in 2025, Go in 2026 — and it's the natural pair
+    history (Rust in 2025, Go in 2026), and it's the natural pair
     for bi-temporal axes)
-- Cardinality is set when a predicate-type is first introduced —
+- Cardinality is set when a predicate-type is first introduced,
   by the extractor, by `mind_fact_add(predicate, cardinality)`, or
   by an explicit type-registration call. It is *not* a hardcoded
   list.
@@ -215,11 +215,11 @@ specifying which inputs are eligible.
 
 ---
 
-## 5. "Independent" — the diversity model
+## 5. "Independent": the diversity model
 
 The v1 synthesis leaned on the word "independent confirmation" without
 specifying it. The critic correctly observed that in a single-user
-mgi-mind install, *independence in the strict sense barely exists* —
+mgi-mind install, *independence in the strict sense barely exists*,
 every confirmation is from the same user. If the user is sincerely
 mistaken and repeats the same wrong fact three times across sessions,
 the v1 model counts three independent confirmations. By construction
@@ -229,7 +229,7 @@ The fix is to replace "independent" with **diversity**, defined
 operationally and degrading gracefully:
 
 1. **Source diversity** (highest weight). The fact is supported by
-   provenance from distinct origin types — a live user assertion *and*
+   provenance from distinct origin types: a live user assertion *and*
    a code-search snippet *and* a CI signal. The existing
    `mind_provenance_add` already records origin URL + tool used; this
    is the substrate.
@@ -241,9 +241,9 @@ operationally and degrading gracefully:
    during retrieval is what produces robust learning, not raw
    repetition.
 3. **External-signal weight** (strongest single confirmation type). A
-   confirmation that comes from a deterministic external signal —
+   confirmation that comes from a deterministic external signal,
    `cargo test` exit 0, a commit landing, `mind_procedure_outcome(
-   worked=true)` — weighs more than any number of conversational
+   worked=true)` weighs more than any number of conversational
    repetitions. This is already partially implemented for procedures;
    it generalises to all facts.
 4. **Single-source decay.** Confirmations from the *same source*
@@ -253,16 +253,16 @@ operationally and degrading gracefully:
    passing as three independent confirmations. The decay curve is one
    of the open formula questions (Section 9).
 
-**Net effect — and its follow-through.** In a single-user install with
+**Net effect, and its follow-through.** In a single-user install with
 no external signals, diversity weight degrades to "one source, with
-diminishing returns" — the model doesn't pretend to have independence
+diminishing returns": the model doesn't pretend to have independence
 it doesn't have. In a multi-tenant or tool-augmented install, real
 diversity counts properly. The mechanism degrades to its weakest
 sensible form rather than silently producing fake confidence.
 
 That degradation has a follow-through the v2 of this document did not
 spell out, and the critic round 2 caught: **in the chat-only
-single-user default — which is mgi-mind's main use case — three of
+single-user default, which is mgi-mind's main use case, three of
 the four diversity axes go quiet (source diversity ~ none,
 external-signal weight ~ none, context diversity weak unless time
 gaps are large). Single-source decay does the work alone, and "do the
@@ -273,7 +273,7 @@ was banking on.
 Concretely this means the load-bearing signal in single-user defaults
 shifts away from `confirmations` and toward `dependants`. Counting
 how many other memories *structurally* depend on a fact is reliable in
-single-user mode — the dependency graph is real, not echoed. Counting
+single-user mode: the dependency graph is real, not echoed. Counting
 how many times the same user said the same thing is, as the critic
 correctly forced, almost decoratively weak.
 
@@ -395,7 +395,7 @@ Also dropped from v1:
 4. **Confidence weights had to shift from `confirmations` to
    `dependants` in single-user mode.** Round 2 observation: in the
    chat-only single-user default (the main use case), three of the
-   four diversity axes from §5 go quiet — only single-source decay
+   four diversity axes from §5 go quiet, leaving only single-source decay
    does the work, which is "don't trust repeats too much." That is
    weaker than the duel rule needs. Fixed by adding the
    install-mode-aware confidence breakdown to §6 (dependants ≈ 0.7
@@ -460,7 +460,7 @@ Also added in v3:
 
 ---
 
-## 8. Worked example — Rust → Go
+## 8. Worked example: Rust → Go
 
 State at session start. Three facts about Mad's primary language:
 
@@ -535,7 +535,7 @@ effort estimate.
 
 ---
 
-## 10. What is open — the actual work
+## 10. What is open: the actual work
 
 Five formula / parameter / engineering decisions that depend on real
 data, not on theory:
@@ -551,7 +551,7 @@ data, not on theory:
 4. **Doubt-window parameters.** N retrievals-without-confirmation
    before window opens. Frequency of the *active* re-test background
    pass. Drift threshold for the centroid comparison.
-5. **Cost / performance model — now two budgets, not one.** The v2
+5. **Cost / performance model: now two budgets, not one.** The v2
    synthesis closed dyra 3 (doubt-window blind spot) by adding a
    scheduled background re-test. The critic round 2 correctly pointed
    out that the re-test was added to the design but not to the
@@ -563,7 +563,7 @@ data, not on theory:
      cached per fact; cache invalidation fires when a dependant of
      the fact is added, removed, or itself changes confidence enough
      to cross a threshold. Entrenchment is **not recomputed on the
-     retrieval path** — it is read from cache. This is the contract
+     retrieval path**: it is read from cache. This is the contract
      with the warm-process narrative we sell publicly.
 
    - **Background-pass budget (cold, scheduled).** A separate idle-time
@@ -572,7 +572,7 @@ data, not on theory:
            simple per-process flag set on enter, cleared on exit.
            This protects the latency contract from background
            contention.
-       (b) **Caps its per-tick scan** — top-N entrenched-low-traffic
+       (b) **Caps its per-tick scan**: top-N entrenched-low-traffic
            facts, where N is small enough that one tick fits inside
            the longest expected idle window. The walk is amortised
            across many ticks, not done in one breath.
@@ -580,7 +580,7 @@ data, not on theory:
            initially); rate increases when many dependant graph
            changes have occurred since the last pass, decreases when
            the graph is quiet. The signal is "how stale could the
-           cache plausibly be?" — not a hardcoded clock.
+           cache plausibly be?", not a hardcoded clock.
 
    - **Where the cache lives.** Qdrant payload for the per-fact
      `confidence_score` and last-recompute timestamp; a sidecar
@@ -591,7 +591,7 @@ data, not on theory:
      process, ms lookup" remains true on the retrieval path. We
      additionally have "low-priority background process that
      reconciles staleness, scheduled to never collide with active
-     queries." This is honest — and it explains why we don't ship
+     queries." This is honest, and it explains why we don't ship
      "memory that costs you nothing": it costs an idle budget. That
      idle budget is the price of not ossifying.
 
@@ -599,21 +599,21 @@ data, not on theory:
    (chat-only / dev-with-CI / multi-tenant) with different weight
    distributions. Open: who switches the profile, and when?
 
-   - **Manual via config** is the safe default — predictable, no
+   - **Manual via config** is the safe default: predictable, no
      surprise weight shifts. Cost: the user has to know which profile
      they are in, and re-pick after a real change in their workflow.
-   - **Auto-detect by signal density** is the tempting alternative —
+   - **Auto-detect by signal density** is the tempting alternative,
      "we saw N external-signal confirmations in the last K days,
      promote to dev-with-CI." Cost: the auto-switch can pull weights
      out from under an active session. A fact that was confidence-
      ranked 0.8 in chat-only might recompute to 0.6 in dev-with-CI
      mid-conversation, with no user-visible cause. This is the same
      class of bug as the doubt-window's retrieval-only blind spot
-     before v2 — a mechanism that helps overall but creates a small,
+     before v2: a mechanism that helps overall but creates a small,
      wrong-feeling local discontinuity.
 
    The honest answer is probably **manual config with an auto-detected
-   recommendation** — the system notices "your signal mix suggests
+   recommendation**: the system notices "your signal mix suggests
    dev-with-CI, here is what would change" and surfaces it, but does
    not switch on its own. That keeps the user in control of the
    confidence calibration that the system reports back to them.
@@ -625,14 +625,14 @@ data, not on theory:
    history. Which profile does it start on? Three options:
 
    - **chat-only by default**, promote to dev-with-CI when external
-     signals accumulate. Safe but slow — a new install on a CI-heavy
+     signals accumulate. Safe but slow: a new install on a CI-heavy
      workflow under-reports confidence for weeks before the profile
      catches up.
    - **dev-with-CI by default**, demote if external signals never
      appear. Wrong-direction risk: the system claims confidence it
-     has not yet earned, then quietly demotes — the inverse of what
+     has not yet earned, then quietly demotes, the inverse of what
      we want.
-   - **A neutral cold-start profile** — equal-ish weights, transitions
+   - **A neutral cold-start profile**: equal-ish weights, transitions
      into one of the three steady profiles as signal accumulates.
      Most honest, most plumbing.
 
@@ -643,7 +643,7 @@ data, not on theory:
    pre-declare their mode at `mgimind init` time as a hint. Decided in
    week 2 of the schedule, not before, because the migration of the
    existing 12k base settles part of this question anyway (the author
-   install is not cold-start — it has years of history).
+   install is not cold-start, it has years of history).
 
 These seven are the work. Each has a non-obvious answer. Each will
 require iteration against the actual ~12k-memory base in mgi-mind's
@@ -651,25 +651,25 @@ author install.
 
 ---
 
-## 11. Effort and defense — honestly
+## 11. Effort and defense: honestly
 
 **Effort.** 3-6 focused weeks, by the author's own count:
 
-- Week 1 — formulas in Rust, with unit tests against synthetic
+- Week 1: formulas in Rust, with unit tests against synthetic
   conflict scenarios. Cardinality registry. Diversity-weighted
   confirmation counter.
-- Week 2 — schema migration over the existing ~12k-memory base
+- Week 2: schema migration over the existing ~12k-memory base
   (backfill entrenchment, confirmations, inheritance flags). This
   week is a real risk: old memories have no confirmation history,
   no provenance for many of them, and the migration choices set
   the calibration baseline for everything that follows.
-- Week 3 — retrieval pipeline integration; entrenchment cache;
+- Week 3: retrieval pipeline integration; entrenchment cache;
   background active re-test pass; smoke bench against the
   existing LongMemEval-S R@k to confirm no regression.
-- Weeks 4-6 — edge cases, behavioural patterns under real use,
+- Weeks 4-6: edge cases, behavioural patterns under real use,
   iteration on formulas. The bulk of the work lives here.
 
-Then — and only then — a comparative QA bench against
+Then, and only then, a comparative QA bench against
 mem0 / Zep / supermemory on LongMemEval-S with gpt-4o judging.
 $30-50. This is the *measurement* that closes the loop, not the
 *marketing* hook. If QA accuracy moved, the mechanism works. If it
@@ -701,8 +701,8 @@ What remains real:
   supermemory ship products without these mechanisms; nothing in
   the prior-art search shows a working, local, open-source memory
   layer that implements the four mechanisms together and reports
-  numbers on a recognised benchmark. That gap — between described
-  and shipped — is the lane. It is narrower than "I invented
+  numbers on a recognised benchmark. That gap between described
+  and shipped is the lane. It is narrower than "I invented
   this" but it exists, and it is testable: a working
   implementation either lands STALE numbers above the published
   baselines or it does not.
@@ -718,7 +718,7 @@ makes the question moot anyway.
 
 ---
 
-## 11.5. Positioning — "described, then shipped"
+## 11.5. Positioning: "described, then shipped"
 
 This section was forced through three critic rounds (calibration
 round 2; prior-art round 4). It claims the positioning explicitly
@@ -743,7 +743,7 @@ mem0 = 8.3%, Zep = 6.0%, A-mem = 5.1%, LightMem = 17.8%. The best
 frontier LLM with no memory layer at all (Gemini-3.1-pro reading
 the raw transcript) reaches 55.2%. CUPMem, the architecture STALE's
 authors propose alongside the benchmark, reaches 68.0%. The
-*published memory products fail this benchmark catastrophically* —
+*published memory products fail this benchmark catastrophically*,
 worse than throwing the dialogue at the model. That gap is not
 rhetorical. It is a number anyone can verify.
 
@@ -759,7 +759,7 @@ This reframes the audience and the channels.
 
 - **The audience that reads STALE.** Researchers and engineers who
   already know about the belief-revision problem in agent memory.
-  For them, the prior-art citation is the credential — it shows we
+  For them, the prior-art citation is the credential: it shows we
   read the field. The contribution is the working implementation
   and the STALE numbers. arXiv preprint, r/LocalLLaMA, lobste.rs,
   HN with the STALE result as the headline.
@@ -861,7 +861,7 @@ Pre-empted easy critiques:
   public-domain pieces; what is harder to copy is the *integration
   decisions* (where the thresholds sit, how caching works, how the
   migration goes). The defense is first-mover with a working
-  implementation, not a structural moat — see Section 11.
+  implementation, not a structural moat; see Section 11.
 
 Where push-back is genuinely wanted (after two rounds, these are the
 ones still standing):
@@ -869,7 +869,7 @@ ones still standing):
 - **Cardinality bootstrapping for ~12k existing memories.** Almost no
   fact has a registered cardinality. The migration has to choose
   defaults. `multi` for everything is safe but kills the duel rule
-  for the existing base — and the existing base *is* what gives the
+  for the existing base, and the existing base *is* what gives the
   system any entrenchment at launch. Is there a heuristic to infer
   cardinality from the existing data (e.g. "this predicate has only
   ever been used with one distinct object per subject" → propose
@@ -878,7 +878,7 @@ ones still standing):
 
 - **Single-source decay curve.** Now load-bearing in the §6
   install-mode-aware confidence formula. The decay determines how
-  strongly the system resists a sincerely-mistaken user — too
+  strongly the system resists a sincerely-mistaken user: too
   aggressive and the user cannot update memory at all; too lenient
   and three repeats pass as confirmation. May not have a good
   universal answer; may need to be per-predicate (a `current_project`
@@ -890,7 +890,7 @@ ones still standing):
 - **Active re-test's adaptive cadence.** §10 question 5 says the
   background pass adjusts cadence by "how stale could the cache
   plausibly be?" This phrase is doing a lot of work. Concretely, what
-  signal triggers a cadence increase — dependant-graph edit count
+  signal triggers a cadence increase: dependant-graph edit count
   since last pass? Average confidence-cache age? Both? Where is the
   saturation cap that prevents a pathological case (many small edits)
   from starving the retrieval path?
@@ -909,7 +909,7 @@ ones still standing):
   they don't structurally fight each other. But under what conditions
   do they *reinforce* each other into a pathological state? E.g. a
   fact with high inheritance-discount + low diversity + entering doubt
-  window simultaneously — what does the formula say, and is that the
+  window simultaneously: what does the formula say, and is that the
   right answer? The composition has not been pressure-tested in any
   worked corner case.
 
@@ -933,9 +933,9 @@ third push that lands on any of the above will also produce one.
 - **Effort.** 3-6 focused weeks; week 2 (schema migration, now
   including cardinality bootstrapping) is the real risk window.
 - **Defense.** Timestamp + Apache-2.0 first-mover implementation.
-  No patent ambition yet — nothing concrete to claim until the
+  No patent ambition yet, nothing concrete to claim until the
   formulas crystallise.
-- **Positioning.** Calibrated, not maximised — explicit choice in
+- **Positioning.** Calibrated, not maximised: an explicit choice in
   §11.5, with audience and channel implications.
 - **Next.** §10 (the five formula / parameter / cost decisions) and
   §13 (the five questions still standing after two rounds) mark the
@@ -945,7 +945,7 @@ Two critic rounds produced two structural revisions, each catching
 something real. Round 2 closed its own loop: after the v3 fixes
 landed, the same critic explicitly stepped off the ball with
 "критиковать его за то, что он ещё не написал формулу, которую
-невозможно написать без прогона на 12k базе — было бы bikeshedding"
+невозможно написать без прогона на 12k базе, было бы bikeshedding"
 and added two further open-work items (§10 questions 6 and 7) before
 stopping. That is the calibrated stop the v1 framing was meant to
 prevent and could not.
@@ -959,7 +959,7 @@ than light." Those are different claims. v1 conflated them. v3 does
 not, and the second critic round confirmed that distinction.
 
 Next step is not another revision of this document. Next step is week
-1 of §11 — the formulas land in Rust, against synthetic conflict
+1 of §11: the formulas land in Rust, against synthetic conflict
 scenarios, with the 12k-memory base as the post-migration target.
 This document goes into the repo as a design note when v1.4 work
 begins, edited only if implementation forces a change to the spec.

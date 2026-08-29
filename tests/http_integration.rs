@@ -129,7 +129,7 @@ fn http_surface_full_contract() {
     loop {
         if let Ok(Some(status)) = server.0.try_wait() {
             panic!(
-                "serve-http exited before /health came up ({status}) — port {http_port} likely busy"
+                "serve-http exited before /health came up ({status}): port {http_port} likely busy"
             );
         }
         let (code, _) = curl(&["-H", &bearer, &health]);
@@ -583,7 +583,7 @@ fn http_v2_acl_flood_verdict_contract() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(Some(status)) = server.0.try_wait() {
-            panic!("serve-http exited before /health ({status}) — port {http_port} likely busy");
+            panic!("serve-http exited before /health ({status}): port {http_port} likely busy");
         }
         if curl(&["-H", &h_admin, &health]).0 == 200 {
             break;

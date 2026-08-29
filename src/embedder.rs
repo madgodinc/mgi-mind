@@ -577,7 +577,7 @@ pub fn extract_member_tar_gz(archive: &Path, member: &str, dest: &Path) -> Resul
                     .unwrap_or_default();
                 anyhow::bail!(
                     "Refusing to extract symlink/hardlink entry '{member}' (-> '{target}') \
-                     as a regular file. Tar symlinks have no body — copying them produces \
+                     as a regular file. Tar symlinks have no body, so copying them produces \
                      a 0-byte file that hangs dlopen. Ask for the resolved versioned \
                      filename inside the archive."
                 );
