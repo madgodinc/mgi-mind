@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Documents survive being chunked.** A long note is split into ~500-character
+  fragments before it is embedded, and every fragment of one write was stamped
+  with the same `created_at`, computed once for the whole batch. Nothing recorded
+  where a fragment sat, so nothing could put the note back together: in a real
+  4.8k-point store, 1082 fragments of one document shared 33 timestamps between
+  them, 68 of them on a single stamp. A multi-fragment write now carries
+  `chunk_index`, `chunk_total` and `chunk_overlap`, and `export --format md`
+  groups a document by (source, created_at), orders it and rejoins it. The
+  overlap is recorded rather than inferred: matching a suffix against a prefix
+  looks right until the text repeats, where the longest match runs past the seam
+  and swallows a line. A single-fragment write stores the payload it always did,
+  so short memories do not grow, and points written before this keep the export
+  behaviour they had.
+
 - **Skills: `mind_skill` and `mgimind skill`.** Procedural memory only answers
   after something breaks. A skill is the house way of doing a kind of work,
   matched against the task the agent is about to start, so the rule arrives

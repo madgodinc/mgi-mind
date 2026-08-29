@@ -66,8 +66,20 @@ const CHUNK_CHARS: usize = 500;
 /// Split text into chunks of about `max_chars`, with a small overlap between
 /// consecutive chunks and a hard split of any single line longer than `max_chars`.
 pub(crate) fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
+    chunk_text_with_overlap(text, max_chars)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// `chunk_text`, but each chunk is paired with how many characters of its head
+/// were copied from the tail of the chunk before it. Reassembly needs that number
+/// to be exact: inferring the overlap by matching a suffix against a prefix looks
+/// right until the text repeats, where the longest match runs past the true seam
+/// and eats a real line. The splitter already knows the number, so it reports it.
+pub(crate) fn chunk_text_with_overlap(text: &str, max_chars: usize) -> Vec<(String, usize)> {
     if text.chars().count() <= max_chars {
-        return vec![text.to_string()];
+        return vec![(text.to_string(), 0)];
     }
     let overlap = (max_chars / 8).max(32);
     let mut units: Vec<String> = Vec::new();
@@ -81,16 +93,19 @@ pub(crate) fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
             }
         }
     }
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<(String, usize)> = Vec::new();
     let mut current = String::new();
+    // How much of `current` is text carried over from the previous chunk.
+    let mut carried = 0usize;
     for unit in &units {
         if !current.is_empty() && current.chars().count() + unit.chars().count() + 1 > max_chars {
-            chunks.push(current.clone());
+            chunks.push((current.clone(), carried));
             let count = current.chars().count();
             current = current
                 .chars()
                 .skip(count.saturating_sub(overlap))
                 .collect();
+            carried = current.chars().count();
         }
         if !current.is_empty() {
             current.push('\n');
@@ -98,9 +113,40 @@ pub(crate) fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
         current.push_str(unit);
     }
     if !current.trim().is_empty() {
-        chunks.push(current);
+        chunks.push((current, carried));
     }
     chunks
+}
+
+/// Reassemble chunks written by `add_memory` back into one document, in order.
+/// Each piece carries the character count that `chunk_text_with_overlap` copied
+/// from its predecessor, and exactly that many characters are dropped from its
+/// head. Nothing is inferred, so repetitive text rejoins as correctly as prose.
+///
+/// Reconstruction is faithful in text and order but not byte-exact: `add_memory`
+/// trims every chunk before storing it, so whitespace that sat on a seam is gone.
+pub(crate) fn join_chunks(pieces: &[(&str, usize)]) -> String {
+    let mut out = String::new();
+    for (piece, overlap) in pieces {
+        if out.is_empty() {
+            out.push_str(piece);
+            continue;
+        }
+        let skip = (*overlap).min(piece.chars().count());
+        let off = piece
+            .char_indices()
+            .nth(skip)
+            .map(|(i, _)| i)
+            .unwrap_or(piece.len());
+        let rest = &piece[off..];
+        // A seam that fell between two lines leaves no carried characters; the
+        // newline chunk_text cut there has to come back or the lines merge.
+        if skip == 0 && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(rest);
+    }
+    out
 }
 
 /// Stable token id for a sparse term. Hash the term to a u32 index (collisions
@@ -1288,11 +1334,22 @@ pub async fn add_memory_authored(
     // matches `quarantine_id_for` and `live_memory_exists`, which both trim. Skip
     // it and a whitespace-padded re-assertion lands on a different id and dodges
     // the dedup/re-assertion guards entirely.
-    let chunks: Vec<String> = chunk_text(content, CHUNK_CHARS)
-        .into_iter()
-        .map(|c| c.trim().to_string())
-        .filter(|c| c.chars().count() >= 3)
-        .collect();
+    // Carry each fragment's overlap alongside it. Trimming can eat into the head
+    // that was copied from the previous chunk, so the number that gets stored is
+    // recomputed against the trimmed text rather than taken from the splitter raw.
+    let (chunks, overlaps): (Vec<String>, Vec<usize>) =
+        chunk_text_with_overlap(content, CHUNK_CHARS)
+            .into_iter()
+            .map(|(c, carried)| {
+                let front_trimmed = c.chars().count() - c.trim_start().chars().count();
+                let trimmed = c.trim().to_string();
+                let overlap = carried
+                    .saturating_sub(front_trimmed)
+                    .min(trimmed.chars().count());
+                (trimmed, overlap)
+            })
+            .filter(|(c, _)| c.chars().count() >= 3)
+            .unzip();
     if chunks.is_empty() {
         return Ok(0);
     }
@@ -1317,8 +1374,10 @@ pub async fn add_memory_authored(
     let existing = existing_created_at_map(&client, MEMORIES_COLLECTION, &ids).await;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut points = Vec::with_capacity(chunks.len());
-    for ((chunk, id), embedding) in chunks.iter().zip(ids.iter()).zip(embeddings) {
+    let n_chunks = chunks.len();
+    let mut points = Vec::with_capacity(n_chunks);
+    for (idx, ((chunk, id), embedding)) in chunks.iter().zip(ids.iter()).zip(embeddings).enumerate()
+    {
         let hash = blake3::hash(chunk.as_bytes()).to_hex().to_string();
         let created_at = existing.get(id).cloned().unwrap_or_else(|| now.clone());
 
@@ -1327,20 +1386,28 @@ pub async fn add_memory_authored(
         let vectors = NamedVectors::default()
             .add_vector(DENSE_VEC, Vector::new_dense(embedding))
             .add_vector(SPARSE_VEC, Vector::new_sparse(s_idx, s_val));
-        points.push(PointStruct::new(
-            id.clone(),
-            vectors,
-            build_payload(
-                chunk,
-                &hash,
-                &created_at,
-                &now,
-                library,
-                source,
-                TYPE_MEMORY,
-                author,
-            ),
-        ));
+        let mut payload = build_payload(
+            chunk,
+            &hash,
+            &created_at,
+            &now,
+            library,
+            source,
+            TYPE_MEMORY,
+            author,
+        );
+        // Every fragment of one long note lands in this same batch and therefore
+        // carries the identical `created_at` computed above, so a timestamp sort
+        // cannot put a document back together (a real 4.8k-point store had 1082
+        // fragments of one document sharing 33 distinct stamps). Record the
+        // position explicitly; `export_all` reads it to reassemble. A single-chunk
+        // write keeps the payload it always had, so short memories do not grow.
+        if n_chunks > 1 {
+            payload.insert("chunk_index".into(), (idx as i64).into());
+            payload.insert("chunk_total".into(), (n_chunks as i64).into());
+            payload.insert("chunk_overlap".into(), (overlaps[idx] as i64).into());
+        }
+        points.push(PointStruct::new(id.clone(), vectors, payload));
     }
 
     let stored = points.len();
@@ -3946,6 +4013,15 @@ pub async fn by_author(
     Ok(results)
 }
 
+/// One stored fragment of a document, as the markdown export sees it: where it
+/// sat in the write, its text, and how many leading characters are a copy of the
+/// previous fragment's tail.
+struct ExportFragment<'a> {
+    index: i64,
+    content: &'a str,
+    overlap: usize,
+}
+
 pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> Result<usize> {
     if format != "json" && format != "md" {
         anyhow::bail!("Unsupported format: {format}. Use json or md");
@@ -3982,6 +4058,9 @@ pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> 
                 "content": content,
                 "source": extract_string(payload, "source"),
                 "created_at": extract_string(payload, "created_at"),
+                "chunk_index": extract_int(payload, "chunk_index"),
+                "chunk_total": extract_int(payload, "chunk_total"),
+                "chunk_overlap": extract_int(payload, "chunk_overlap"),
             }));
     }
 
@@ -3998,7 +4077,47 @@ pub async fn export_all(config: &MindConfig, format: &str, output_dir: &str) -> 
             }
             "md" => {
                 let mut md = format!("# {lib_name}\n\n");
+                // Fragments of one write are put back together in order before
+                // being emitted. The document key is (source, created_at) rather
+                // than source alone: one source is written to many times and each
+                // write numbers its own chunks from zero, so grouping by source
+                // would interleave unrelated documents. Every fragment of a single
+                // `add_memory` shares one timestamp exactly, which makes the pair a
+                // usable batch identity. Points written before the position stamp
+                // existed carry no `chunk_index` and take the old path unchanged.
+                let mut docs: std::collections::BTreeMap<(&str, &str), Vec<ExportFragment>> =
+                    std::collections::BTreeMap::new();
+                let mut loose: Vec<&serde_json::Value> = Vec::new();
                 for entry in entries {
+                    match (
+                        entry.get("source").and_then(|v| v.as_str()),
+                        entry.get("created_at").and_then(|v| v.as_str()),
+                        entry.get("chunk_index").and_then(|v| v.as_i64()),
+                        entry.get("content").and_then(|v| v.as_str()),
+                    ) {
+                        (Some(src), Some(ts), Some(i), Some(c)) => {
+                            let ov = entry
+                                .get("chunk_overlap")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0)
+                                .max(0) as usize;
+                            docs.entry((src, ts)).or_default().push(ExportFragment {
+                                index: i,
+                                content: c,
+                                overlap: ov,
+                            });
+                        }
+                        _ => loose.push(entry),
+                    }
+                }
+                for ((src, _ts), mut pieces) in docs {
+                    pieces.sort_by_key(|f| f.index);
+                    let texts: Vec<(&str, usize)> =
+                        pieces.iter().map(|f| (f.content, f.overlap)).collect();
+                    md.push_str(&format!("---\n\n{}\n\n", join_chunks(&texts)));
+                    md.push_str(&format!("*source: {src}*\n\n"));
+                }
+                for entry in loose {
                     if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
                         md.push_str(&format!("---\n\n{content}\n\n"));
                         if let Some(src) = entry.get("source").and_then(|v| v.as_str()) {
@@ -4766,6 +4885,106 @@ mod tests {
         for c in &chunks {
             assert!(c.chars().count() <= 200 + 64);
         }
+    }
+
+    /// Split a document the way `add_memory` does, then put it back together.
+    fn split_and_rejoin(doc: &str, max_chars: usize) -> (usize, String) {
+        let raw = chunk_text_with_overlap(doc, max_chars);
+        // `add_memory` trims each fragment and recomputes the overlap against the
+        // trimmed text; mirror that here or the test proves the wrong thing.
+        let stored: Vec<(String, usize)> = raw
+            .into_iter()
+            .map(|(c, carried)| {
+                let front = c.chars().count() - c.trim_start().chars().count();
+                let trimmed = c.trim().to_string();
+                let ov = carried.saturating_sub(front).min(trimmed.chars().count());
+                (trimmed, ov)
+            })
+            .filter(|(c, _)| c.chars().count() >= 3)
+            .collect();
+        let refs: Vec<(&str, usize)> = stored.iter().map(|(c, o)| (c.as_str(), *o)).collect();
+        (stored.len(), join_chunks(&refs))
+    }
+
+    #[test]
+    fn chunked_document_rejoins_into_the_original() {
+        let doc: String = (0..40)
+            .map(|i| format!("Line {i}: the quick brown fox jumps over the lazy dog."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (n, rebuilt) = split_and_rejoin(&doc, 500);
+        assert!(n > 3, "expected a split document, got {n} chunks");
+        // Trimming loses whitespace that sat on a seam, so the guarantee is the
+        // text and its order, not the exact bytes.
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(norm(&rebuilt), norm(&doc));
+    }
+
+    #[test]
+    fn repetitive_text_rejoins_without_losing_a_line() {
+        // The case that defeats inferring the overlap from a suffix/prefix match:
+        // every line is identical, so the longest match runs past the real seam.
+        let doc: String = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+            .to_string()
+            + &"\nalpha bravo charlie delta echo foxtrot golf hotel india juliet".repeat(29);
+        let (n, rebuilt) = split_and_rejoin(&doc, 200);
+        assert!(n > 2, "expected a split document, got {n} chunks");
+        assert_eq!(
+            rebuilt.matches("alpha bravo").count(),
+            doc.matches("alpha bravo").count(),
+            "a repeated line was dropped or duplicated"
+        );
+    }
+
+    #[test]
+    fn chunk_position_round_trips_through_the_payload() {
+        // The one seam the pure tests cannot reach: an i64 written into a Qdrant
+        // payload has to come back out of `extract_int` as the same number, and a
+        // short note that writes no position keys has to read back as absent.
+        let mut payload = build_payload(
+            "fragment",
+            "hash",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "lib",
+            Some("doc"),
+            TYPE_MEMORY,
+            None,
+        );
+        payload.insert("chunk_index".into(), 3_i64.into());
+        payload.insert("chunk_total".into(), 7_i64.into());
+        payload.insert("chunk_overlap".into(), 62_i64.into());
+        assert_eq!(extract_int(&payload, "chunk_index"), Some(3));
+        assert_eq!(extract_int(&payload, "chunk_total"), Some(7));
+        assert_eq!(extract_int(&payload, "chunk_overlap"), Some(62));
+
+        let plain = build_payload(
+            "fragment",
+            "hash",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "lib",
+            Some("doc"),
+            TYPE_MEMORY,
+            None,
+        );
+        assert_eq!(extract_int(&plain, "chunk_index"), None);
+        assert_eq!(extract_int(&plain, "chunk_overlap"), None);
+    }
+
+    #[test]
+    fn rejoin_of_a_single_chunk_is_the_chunk() {
+        assert_eq!(join_chunks(&[("just the one", 0)]), "just the one");
+        assert_eq!(join_chunks(&[]), "");
+    }
+
+    #[test]
+    fn a_short_note_is_one_chunk_with_no_overlap() {
+        // The payload of a short memory must stay exactly what it always was, so
+        // `add_memory` writes no position keys when there is only one fragment.
+        let one = chunk_text_with_overlap("a short note", 500);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].1, 0);
     }
 
     #[test]

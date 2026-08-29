@@ -499,7 +499,7 @@ applies.
 | `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant by hand (rarely needed, `mcp` does it for you). |
 | `mgimind migrate [--purge]` | Re-embed legacy per-library collections into the single `memories` collection. Idempotent. `--purge` deletes the old collections afterward. |
 | `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar of the whole data directory. |
-| `mgimind export [--format json\|md] [--output <dir>]` | Export memories to files. |
+| `mgimind export [--format json\|md] [--output <dir>]` | Export memories to files. `md` rejoins the fragments of a chunked document back into one block, in order. |
 | `mgimind import <obsidian\|markdown> <path> [--library <l>]` | Import a folder of markdown (recursively, chunked). |
 | `mgimind doctor [--fix]` | Health check; `--fix` downloads anything missing. |
 
