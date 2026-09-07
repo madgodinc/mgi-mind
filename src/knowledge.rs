@@ -226,7 +226,7 @@ pub fn detect_conflict(existing: &[Fact], new_object: &str, cardinality: Cardina
     existing.iter().any(|f| f.valid && f.object != new_object)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
     pub subject: String,
@@ -248,6 +248,14 @@ pub struct Fact {
     /// `valid_until`.
     pub status: Option<String>,
     pub valid: bool,
+    /// Id into the origin-context side table: the centroid of what was being
+    /// worked on when this fact was written. Absent on facts written before the
+    /// doubt window had a context to record, and on any write that happened
+    /// with an empty activity buffer.
+    pub origin_context_id: Option<String>,
+    /// True when the doubt window is enforcing and this fact has drifted out of
+    /// context often enough to be discounted. Always false in shadow mode.
+    pub in_doubt: bool,
 }
 
 fn extract_string(
@@ -492,6 +500,16 @@ async fn add_fact_core(
     if let Some(a) = author {
         payload.insert("author".into(), a.into());
     }
+    // What was being worked on when this fact was asserted. The doubt window
+    // later compares this against the context a retrieval happens in. Only an
+    // id goes into the payload: facts stay vectorless (audit #6), and the
+    // vectors live in one side table where facts written during the same
+    // stretch of work share a single entry.
+    if let Some(context) = crate::activity::current_centroid()
+        && let Some(context_id) = crate::activity::store_origin_context(config, &context)
+    {
+        payload.insert("origin_context_id".into(), context_id.into());
+    }
 
     // Payload-only point (NamedVectors::default() is empty - no vector stored).
     let point = PointStruct::new(id.clone(), NamedVectors::default(), payload);
@@ -620,7 +638,50 @@ pub async fn query_facts(config: &MindConfig, query: &str) -> Result<Vec<Fact>> 
         }
     }
 
+    apply_doubt_window(config, &mut facts).await;
     Ok(facts)
+}
+
+/// Run the doubt window's drift check over a set of surfaced facts.
+///
+/// This is the retrieval half of Mechanism 2, and until now it did not exist:
+/// `is_context_drifted` had no caller outside its own tests, so an entrenched
+/// fact was never asked to re-justify itself on a read.
+///
+/// The current context and the corpus mean are resolved once for the whole
+/// result set, not per fact. When either is missing (nothing searched yet in
+/// this process, or an empty store) every fact keeps full standing, because no
+/// signal has to mean no penalty.
+///
+/// In shadow mode this only measures. Facts are reordered, and `in_doubt` is
+/// set, only when the mode is `enforce`.
+async fn apply_doubt_window(config: &MindConfig, facts: &mut [Fact]) {
+    if facts.is_empty() || crate::doubt::drift_mode(config) == crate::doubt::DriftMode::Off {
+        return;
+    }
+    let Some(current) = crate::activity::current_centroid() else {
+        return;
+    };
+    let Some(mean) = crate::activity::corpus_mean(config).await else {
+        return;
+    };
+
+    for fact in facts.iter_mut() {
+        let state = crate::doubt::apply_drift_check(
+            config,
+            &fact.id,
+            fact.origin_context_id.as_deref(),
+            &current,
+            &mean,
+        )
+        .await;
+        fact.in_doubt = state == Some(crate::doubt::DoubtState::Inside);
+    }
+
+    // A doubted fact is not hidden and not deleted, it just stops outranking
+    // facts that still hold up. Mechanism 1's never-delete invariant applies to
+    // the read path too.
+    facts.sort_by_key(|f| f.in_doubt);
 }
 
 /// v2.0: list facts the duel left unresolved — `contested` (both values stay
@@ -705,6 +766,8 @@ fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
         valid_until: extract_string(p, "valid_until"),
         status: extract_string(p, "status"),
         valid: true,
+        origin_context_id: extract_string(p, "origin_context_id"),
+        in_doubt: false,
     }
 }
 
@@ -1445,6 +1508,7 @@ mod tests {
             valid_until: None,
             status: None,
             valid: true,
+            ..Default::default()
         };
         let facts = vec![
             f("Aurora", "deployed_on", "srv-3"),
@@ -1508,6 +1572,7 @@ mod tests {
             valid_until: None,
             status: None,
             valid: true,
+            ..Default::default()
         }
     }
 

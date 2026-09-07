@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **The doubt window measures context drift, and the threshold it used could
+  never fire.** Half of the mechanism was never connected: `centroid`,
+  `is_context_drifted` and `apply_doubt_check_to_fact` had no caller outside
+  their own unit tests, so a retrieval never asked an entrenched fact to
+  re-justify itself. The substrate had been removed underneath them. Facts went
+  vectorless in audit #6, which left nothing to compare a fact's origin context
+  against, and no buffer recorded what the current context was.
+
+  Connecting it exposed a worse problem. `DOUBT_DRIFT_THRESHOLD` was 0.4, chosen
+  in 384-dim MiniLM space and carried into a 768-dim multilingual-e5 store.
+  Sampling 400 memories from a live store and comparing all 79800 pairs: raw
+  cosine ran from 0.666 to 0.972, and not one pair fell below the 0.6 the
+  threshold required. Same-library and cross-library pairs were
+  indistinguishable, medians 0.779 and 0.776. The corpus mean vector had norm
+  0.884, so nearly all of that cosine was a component every embedding shares
+  rather than anything about the text. Subtracting the mean separates them:
+  same-library pairs then reach 0.869 while cross-library pairs stop at 0.378.
+
+  So drift is now measured on centered vectors, against a corpus mean sampled
+  from the store and cached in `corpus_mean.json`. A rolling buffer of the last
+  64 query embeddings gives the current context at no extra inference cost. A
+  fact records which context it was written in as a short `origin_context_id`;
+  facts stay vectorless, the vectors live in one side table, and facts written
+  during the same stretch of work share an entry.
+
+  It ships in shadow. `doubt_drift_mode` defaults to `"shadow"`: drift is
+  measured on every fact query and recorded, and no fact changes. `mgimind
+  calibrate` reports the store's anisotropy and the drift percentiles it has
+  observed, then proposes a threshold from them. Set
+  `doubt_drift_threshold` and switch the mode to `"enforce"` to act on it.
+  Enforcing without a threshold degrades to shadow and says so, because
+  inventing a number in the wrong space is the failure this replaces.
+
+- **The access journal no longer fsyncs on a Tokio worker or under the read
+  lock.** `access::record` runs inside `storage::search_filtered`, and every 64th
+  access flushed inline: two fsyncs (the temp file, then the directory) on the
+  thread serving the search. The flush also held the counter mutex for the whole
+  disk cycle, so concurrent searches queued behind the slowest part of it. The
+  counts are now copied out under the lock and written outside it, and the write
+  goes to the blocking pool when a runtime is available.
+
+- **Session recovery no longer leaks inheritance flags into the next session.**
+  `clear_all_inherited` runs at the end of `run_session_end`, but the liveness
+  check auto-closes a stale session by calling `session::end` directly and
+  skipped it. In a warm `mgimind mcp` process the flags carried into the next
+  session, where facts the new conversation had genuinely confirmed were
+  re-discounted as inherited. Recovery clears them now.
+
 - **Documents survive being chunked.** A long note is split into ~500-character
   fragments before it is embedded, and every fragment of one write was stamped
   with the same `created_at`, computed once for the whole batch. Nothing recorded

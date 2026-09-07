@@ -1,4 +1,5 @@
 mod access;
+mod activity;
 mod audit;
 mod bench;
 mod bench_policy;

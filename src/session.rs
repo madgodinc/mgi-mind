@@ -276,6 +276,11 @@ fn recover_zombie(agent: &str, idle_minutes: i64) -> Result<Option<RecoveredSess
     let started_at = read_started_from_file(&path);
 
     end(agent, &summary)?;
+    // `cli::run_session_end` clears this after a normal end; recovery closes a
+    // session without going through it. Left uncleared in a warm `mgimind mcp`
+    // process, the flags carry into the next session and re-discount facts that
+    // the new live conversation actually confirmed.
+    crate::doubt::clear_all_inherited();
 
     // Best-effort cleanup of the heartbeat file (end() already removed the
     // current-pointer).

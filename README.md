@@ -89,13 +89,21 @@ on their own:
   loser to a hidden `stale` status; a borderline one is marked contested or
   diverted to quarantine. Nothing is deleted, so the audit log keeps the
   loser. Automatic, inside a normal `mind_fact add`.
-- **Doubt window.** An entrenched fact has to keep re-justifying itself. A
-  retrieval whose context has drifted from where the fact was learned does
-  not strengthen it, and after enough such drifted retrievals the fact's
-  ranking weight is halved until a fresh in-context confirmation. A
-  background pass re-tests entrenched facts that have gone quiet, under hard
-  guarantees: never during a tool call, a per-tick cap, and a load-aware
-  cadence.
+- **Doubt window.** An entrenched fact has to keep re-justifying itself. Every
+  fact query measures how far the current context has drifted from the context
+  the fact was written in; after five consecutive drifted retrievals the fact
+  stops outranking facts that still hold up, and any single in-context
+  retrieval resets the count. Nothing is hidden or deleted. Drift is measured
+  on vectors with the corpus mean removed, because raw cosine cannot separate
+  topics in an anisotropic embedding space (see `mgimind calibrate` below).
+  The current context is the running process's own recent queries, so this
+  applies inside a warm `mgimind mcp` or `serve-http` session; a one-shot CLI
+  command has no context yet and no fact is penalised for that. This ships in
+  shadow: drift is measured and recorded, and no fact changes, until you set
+  `doubt_drift_threshold` from your own store's numbers and switch
+  `doubt_drift_mode` to `"enforce"`. A background pass separately
+  re-tests entrenched facts that have gone quiet, under hard guarantees: never
+  during a tool call, a per-tick cap, and a load-aware cadence.
 - **Inheritance discount.** Facts carried into a session from memory count at
   half weight and cannot co-confirm each other. One stale source agreeing
   with itself is not two confirmations, so memory can't self-reinforce into
@@ -120,6 +128,16 @@ reports how many land on the outcome a person would expect: a fresh unsupported
 claim cannot overturn an entrenched belief, a CI signal can, repetition alone
 coexists rather than overwriting. Today 14 of 15 scenarios match intent; the one
 that does not is printed with its reason, not hidden, and the suite runs in CI.
+It also reports the doubt window's drift distribution, and that report exists
+because of what it found. The drift threshold was 0.4, picked in 384-dim MiniLM
+space and left in place when the default model became 768-dim multilingual-e5.
+Measured on a live store, 400 memories and all 79800 pairs, raw cosine ran from
+0.666 to 0.972: the threshold could not fire once. The corpus mean vector had
+norm 0.884, so almost all of that cosine was a component every embedding shares.
+Centering fixes the measurement, and `calibrate` proposes a threshold from the
+drift your own store produces rather than from a constant that travelled between
+embedding spaces.
+
 This measures the *shape* of the validity model, separate from retrieval recall
 (R@k, see [BENCHMARKS.md](BENCHMARKS.md)). The two are different numbers and
 never belong in the same table.
@@ -670,6 +688,7 @@ src/
   knowledge.rs   knowledge-graph facts + cardinality + supersession
   duel.rs        duel rule: resolve contradicting facts (flip / contested / quarantine)
   doubt.rs       doubt window + background active re-test of entrenched facts
+  activity.rs    recent-query buffer, corpus mean (centering), origin-context store
   confidence.rs  per-fact confidence score (dependants / confirmations / signals)
   outcome.rs     typed external signals (test_passed, code_compiled, ...) into weight
   procedure.rs   procedural memory: learn / recall / outcome

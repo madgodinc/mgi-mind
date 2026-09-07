@@ -145,6 +145,119 @@ pub fn centroid(vectors: &[Vec<f32>]) -> Vec<f32> {
     sum
 }
 
+// ===== Centered drift =====
+
+/// Cosine similarity between two vectors after removing the corpus mean from
+/// both.
+///
+/// Centering is what makes this comparison mean anything. Raw cosine cannot
+/// separate topics in an anisotropic space, and multilingual-e5 is strongly
+/// anisotropic: measured on a live store, the corpus mean vector had norm 0.88
+/// and not one pair out of 79800 fell below cosine 0.666, with same-library and
+/// cross-library pairs landing on the same median. Subtracting the mean removes
+/// that shared component and the topics separate.
+///
+/// `None` when either vector is empty, the dimensions disagree, or a centered
+/// vector collapses to zero length. That last case is a memory sitting exactly
+/// on the corpus mean, which carries no direction to compare.
+pub fn centered_cosine(a: &[f32], b: &[f32], mean: &[f32]) -> Option<f32> {
+    if a.is_empty() || b.is_empty() || mean.is_empty() {
+        return None;
+    }
+    if a.len() != b.len() || a.len() != mean.len() {
+        return None;
+    }
+
+    let center = |v: &[f32]| -> Option<Vec<f32>> {
+        let centered: Vec<f32> = v.iter().zip(mean).map(|(x, m)| x - m).collect();
+        let norm: f32 = centered.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm <= f32::EPSILON {
+            return None;
+        }
+        Some(centered.into_iter().map(|x| x / norm).collect())
+    };
+
+    let (ca, cb) = (center(a)?, center(b)?);
+    Some(ca.iter().zip(&cb).map(|(x, y)| x * y).sum())
+}
+
+/// Drift between a fact's origin context and the current one: `1 - centered
+/// cosine`, so 0 is the same direction, 1 orthogonal, 2 opposite. `None` means
+/// no usable signal, which every caller treats as "not drifted".
+pub fn context_drift(origin: &[f32], current: &[f32], mean: &[f32]) -> Option<f32> {
+    centered_cosine(origin, current, mean).map(|cos| 1.0 - cos)
+}
+
+/// What the drift check is allowed to do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DriftMode {
+    /// Skip the check.
+    Off,
+    /// Measure and record drift, change nothing.
+    Shadow,
+    /// Measure, record, and move the doubt-window counter, using this threshold.
+    Enforce(f32),
+}
+
+static ENFORCE_WITHOUT_THRESHOLD_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Resolve the configured drift mode.
+///
+/// `enforce` without a calibrated threshold degrades to shadow rather than
+/// picking a number, because picking a number is the exact mistake this
+/// mechanism exists to undo. The warning fires once per process so it is
+/// visible without flooding a hot path.
+pub fn drift_mode(config: &MindConfig) -> DriftMode {
+    match config.doubt_drift_mode.as_str() {
+        "off" => DriftMode::Off,
+        "enforce" => match config.doubt_drift_threshold {
+            Some(threshold) => DriftMode::Enforce(threshold),
+            None => {
+                if !ENFORCE_WITHOUT_THRESHOLD_WARNED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "mgimind: doubt_drift_mode is \"enforce\" but doubt_drift_threshold is                          unset, so drift is only being measured. Run `mgimind calibrate` to get                          a threshold from this install's own data."
+                    );
+                }
+                DriftMode::Shadow
+            }
+        },
+        _ => DriftMode::Shadow,
+    }
+}
+
+/// Retrieval-side drift check for one surfaced fact.
+///
+/// `current` and `mean` are computed once per query and passed in, so a query
+/// returning many facts pays for them once. Returns the fact's new doubt state
+/// only when enforcing; in shadow mode the drift is measured, recorded for
+/// calibration, and nothing about the fact changes.
+pub async fn apply_drift_check(
+    config: &MindConfig,
+    fact_id: &str,
+    origin_context_id: Option<&str>,
+    current: &[f32],
+    mean: &[f32],
+) -> Option<DoubtState> {
+    let mode = drift_mode(config);
+    if mode == DriftMode::Off {
+        return None;
+    }
+
+    let origin = crate::activity::load_origin_context(config, origin_context_id?)?;
+    let drift = context_drift(&origin, current, mean)?;
+    crate::activity::observe_drift(config, drift);
+
+    match mode {
+        DriftMode::Enforce(threshold) => {
+            apply_doubt_check_to_fact(config, fact_id, drift > threshold)
+                .await
+                .ok()
+        }
+        _ => None,
+    }
+}
+
 // ===== Pure helpers — adaptive background cadence =====
 
 /// Compute the next cadence interval based on graph activity.
@@ -1310,6 +1423,180 @@ mod tests {
     // serial-test guard inside the bodies pins the critical section.
     static SERIAL_LOOP_TEST: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn centered_cosine_bails_on_missing_or_mismatched_input() {
+        let v = vec![1.0, 0.0, 0.0];
+        let mean = vec![0.1, 0.1, 0.1];
+        assert!(centered_cosine(&[], &v, &mean).is_none());
+        assert!(centered_cosine(&v, &[], &mean).is_none());
+        assert!(centered_cosine(&v, &v, &[]).is_none());
+        assert!(centered_cosine(&v, &[1.0, 0.0], &mean).is_none());
+    }
+
+    #[test]
+    fn a_vector_sitting_on_the_mean_has_no_direction_to_compare() {
+        let mean = vec![0.5, 0.5, 0.0];
+        let other = vec![1.0, 0.0, 0.0];
+        assert!(centered_cosine(&mean, &other, &mean).is_none());
+    }
+
+    /// The finding this whole path exists for: in an anisotropic space raw
+    /// cosine cannot separate topics, and centering can. Measured on a live
+    /// multilingual-e5 store the corpus mean had norm 0.88 and no pair out of
+    /// 79800 fell below 0.666; this reproduces that shape in miniature.
+    #[test]
+    fn centering_separates_topics_that_raw_cosine_cannot() {
+        const DIM: usize = 8;
+        let unit = |topic: usize, jitter: f32| -> Vec<f32> {
+            let mut v = vec![0.0f32; DIM];
+            v[0] = 0.95; // the common-mode component every embedding shares
+            v[1 + topic] = 0.30 + jitter;
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.into_iter().map(|x| x / norm).collect()
+        };
+        let a1 = unit(0, 0.0);
+        let a2 = unit(0, 0.02);
+        let b1 = unit(1, 0.0);
+
+        let raw = |x: &[f32], y: &[f32]| -> f32 { x.iter().zip(y).map(|(p, q)| p * q).sum() };
+        let raw_same = raw(&a1, &a2);
+        let raw_cross = raw(&a1, &b1);
+        assert!(raw_same > 0.99, "same-topic raw cosine {raw_same}");
+        assert!(raw_cross > 0.90, "cross-topic raw cosine {raw_cross}");
+        assert!(
+            raw_same - raw_cross < 0.10,
+            "raw cosine already separates them ({raw_same} vs {raw_cross}),              so this test would not prove anything"
+        );
+
+        let mean: Vec<f32> = (0..DIM).map(|i| (a1[i] + a2[i] + b1[i]) / 3.0).collect();
+        let same = centered_cosine(&a1, &a2, &mean).unwrap();
+        let cross = centered_cosine(&a1, &b1, &mean).unwrap();
+        assert!(
+            same > cross + 0.5,
+            "centering did not separate the topics: same {same}, cross {cross}"
+        );
+    }
+
+    #[test]
+    fn drift_is_one_minus_centered_cosine() {
+        let mean = vec![0.0, 0.0, 0.0];
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        assert!((context_drift(&a, &a, &mean).unwrap() - 0.0).abs() < 1e-5);
+        assert!((context_drift(&a, &b, &mean).unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn drift_mode_reads_the_config() {
+        let mut cfg = test_config();
+
+        cfg.doubt_drift_mode = "off".into();
+        assert_eq!(drift_mode(&cfg), DriftMode::Off);
+
+        cfg.doubt_drift_mode = "shadow".into();
+        assert_eq!(drift_mode(&cfg), DriftMode::Shadow);
+
+        cfg.doubt_drift_mode = "enforce".into();
+        cfg.doubt_drift_threshold = Some(0.7);
+        assert_eq!(drift_mode(&cfg), DriftMode::Enforce(0.7));
+    }
+
+    /// Enforcing without a calibrated threshold must not invent one. Inventing
+    /// a threshold in the wrong embedding space is the bug this path replaces.
+    #[test]
+    fn enforce_without_a_threshold_degrades_to_shadow() {
+        let mut cfg = test_config();
+        cfg.doubt_drift_mode = "enforce".into();
+        cfg.doubt_drift_threshold = None;
+        assert_eq!(drift_mode(&cfg), DriftMode::Shadow);
+    }
+
+    /// Shadow mode is the shipping default, so its contract is worth pinning:
+    /// a drift number is produced and recorded, and no fact state moves. The
+    /// config here points at an unreachable Qdrant, which is exactly the point:
+    /// if shadow mode touched the fact it would have to reach the store and
+    /// this test would fail.
+    #[tokio::test]
+    async fn shadow_mode_measures_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::MindConfig {
+            data_dir: dir.path().to_path_buf(),
+            qdrant_port: 1,
+            doubt_drift_mode: "shadow".into(),
+            ..crate::config::MindConfig::default()
+        };
+
+        let origin = vec![1.0f32, 0.0, 0.0];
+        let id = crate::activity::store_origin_context(&config, &origin).unwrap();
+        let before = crate::activity::drift_observed(&config);
+
+        let current = vec![0.0f32, 1.0, 0.0];
+        let mean = vec![0.0f32, 0.0, 0.0];
+        let state = apply_drift_check(&config, "fact-id", Some(&id), &current, &mean).await;
+
+        assert_eq!(state, None, "shadow mode must not report a doubt state");
+        assert_eq!(
+            crate::activity::drift_observed(&config),
+            before + 1,
+            "shadow mode must still record the observation"
+        );
+    }
+
+    /// A fact written before the origin context existed, or one whose context
+    /// was evicted, has no signal. No signal must never mean a penalty.
+    #[tokio::test]
+    async fn a_fact_without_an_origin_context_is_never_drifted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::MindConfig {
+            data_dir: dir.path().to_path_buf(),
+            qdrant_port: 1,
+            doubt_drift_mode: "enforce".into(),
+            doubt_drift_threshold: Some(0.1),
+            ..crate::config::MindConfig::default()
+        };
+        let v = vec![1.0f32, 0.0, 0.0];
+        assert_eq!(
+            apply_drift_check(&config, "fact-id", None, &v, &v).await,
+            None
+        );
+        assert_eq!(
+            apply_drift_check(&config, "fact-id", Some("evicted"), &v, &v).await,
+            None
+        );
+    }
+
+    /// The chain the write path and the read path share: queries land in the
+    /// activity buffer, its centroid becomes a fact's origin context, and a
+    /// later context is compared against it. Covered here because no unit test
+    /// of the individual pieces proves they are joined up, which is exactly how
+    /// this mechanism came to be dead code.
+    #[test]
+    fn recorded_queries_become_an_origin_context_that_drift_can_compare() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::MindConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..crate::config::MindConfig::default()
+        };
+
+        crate::activity::record_query(&[0.8, 0.6, 0.0]);
+        crate::activity::record_query(&[0.6, 0.8, 0.0]);
+        let context = crate::activity::current_centroid().expect("buffer is not empty");
+        let id = crate::activity::store_origin_context(&config, &context).unwrap();
+        let origin = crate::activity::load_origin_context(&config, &id).unwrap();
+
+        let mean = vec![0.0f32; origin.len()];
+        let same = context_drift(&origin, &context, &mean).unwrap();
+        let elsewhere = context_drift(&origin, &[0.0, 0.0, 1.0], &mean).unwrap();
+        assert!(
+            same < 0.01,
+            "a context should not have drifted from itself: {same}"
+        );
+        assert!(
+            elsewhere > same + 0.5,
+            "an unrelated context should read as drifted: {elsewhere} against {same}"
+        );
+    }
 
     fn test_config() -> crate::config::MindConfig {
         // Minimal config with a sentinel data_dir that the Qdrant

@@ -822,6 +822,7 @@ mod tests {
             valid_until: until.map(str::to_string),
             status: status.map(str::to_string),
             valid: true,
+            ..Default::default()
         };
         // alice: Berlin (STALE loser, has valid_until) + Munich (active). A Single
         // predicate that was corrected — NOT a temporal sequence.
@@ -878,6 +879,7 @@ mod tests {
                 valid_until: None,
                 status: None,
                 valid: true,
+                ..Default::default()
             },
             Fact {
                 id: "2".into(),
@@ -888,6 +890,7 @@ mod tests {
                 valid_until: None,
                 status: None,
                 valid: true,
+                ..Default::default()
             },
             Fact {
                 id: "3".into(),
@@ -898,6 +901,7 @@ mod tests {
                 valid_until: None,
                 status: None,
                 valid: true,
+                ..Default::default()
             },
             Fact {
                 id: "4".into(),
@@ -908,6 +912,7 @@ mod tests {
                 valid_until: None,
                 status: None,
                 valid: true,
+                ..Default::default()
             },
         ];
         let grouped = group_facts_by_predicate(&facts);

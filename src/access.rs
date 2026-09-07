@@ -72,7 +72,17 @@ pub fn record(ids: &[String], now: &str) {
     }
     let pending = PENDING.fetch_add(ids.len() as u64, Ordering::Relaxed) + ids.len() as u64;
     if pending >= FLUSH_EVERY {
-        flush();
+        // `record` is sync and sits inside `storage::search_filtered`, which is
+        // async. Flushing inline would run two fsyncs (temp file, then the
+        // directory) on a Tokio worker thread and stall every other task on it,
+        // so hand the write to the blocking pool when there is a runtime to hand
+        // it to. Outside a runtime (CLI, tests) the inline flush is correct.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(flush);
+            }
+            Err(_) => flush(),
+        }
     }
 }
 
@@ -83,8 +93,15 @@ pub fn record(ids: &[String], now: &str) {
 /// counts stay in memory and retry on the next threshold).
 pub fn flush() {
     PENDING.store(0, Ordering::Relaxed);
-    let Ok(map) = log().lock() else {
-        return;
+    // Copy the counts out under the lock and release it before touching the
+    // disk. The write below ends in two fsyncs, and `record` on the search path
+    // takes this same lock; holding it across the write would put every
+    // concurrent search behind the slowest part of the flush.
+    let map = {
+        let Ok(guard) = log().lock() else {
+            return;
+        };
+        guard.clone()
     };
     let mut merged = load_from_disk();
     for (id, stat) in map.iter() {

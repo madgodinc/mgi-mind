@@ -12,6 +12,10 @@ fn default_pooling() -> String {
     "mean".to_string()
 }
 
+fn default_doubt_drift_mode() -> String {
+    "shadow".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -57,6 +61,24 @@ pub struct MindConfig {
     /// How many dense candidates to fetch and rerank before returning `limit`.
     #[serde(default = "default_rerank_top_k")]
     pub rerank_top_k: usize,
+    /// How the doubt window's context-drift check behaves. `"shadow"` (the
+    /// default) measures drift on every fact query and records it for
+    /// calibration without changing any fact's state; `"enforce"` also applies
+    /// the doubt-window counter, and requires `doubt_drift_threshold` to be
+    /// set; `"off"` skips the check entirely.
+    ///
+    /// It ships in shadow because the threshold cannot be guessed. The
+    /// constant it replaces (0.4, chosen in 384-dim MiniLM space) never fired
+    /// once in 79800 real pairs on a 768-dim multilingual-e5 store. Run
+    /// `mgimind calibrate` after some normal use and it proposes a threshold
+    /// from the drift this install actually produced.
+    #[serde(default = "default_doubt_drift_mode")]
+    pub doubt_drift_mode: String,
+    /// Centered-cosine drift above which a fact query counts as "surfaced out
+    /// of context". `None` until calibration proposes one; enforce mode without
+    /// it is a configuration error rather than a silent fallback to a guess.
+    #[serde(default)]
+    pub doubt_drift_threshold: Option<f32>,
     /// v1.5 Phase 6: install profile selecting per-mode confidence-score
     /// anchors. Default `chat-only` matches the legacy single-user behaviour
     /// — existing configs that pre-date v1.5 deserialise unchanged.
@@ -103,6 +125,8 @@ impl Default for MindConfig {
             rerank_enabled: true,
             rerank_model: default_rerank_model(),
             rerank_top_k: default_rerank_top_k(),
+            doubt_drift_mode: default_doubt_drift_mode(),
+            doubt_drift_threshold: None,
             install_mode: crate::install_mode::InstallMode::default(),
             write_quota_per_min: default_write_quota_per_min(),
         }

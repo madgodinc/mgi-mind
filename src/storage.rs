@@ -2150,6 +2150,10 @@ pub async fn search_filtered(
 
     let embedding = embedder::embed_query(config, query).await?;
     check_dim(&embedding, config)?;
+    // The doubt window needs to know what this session is currently about. The
+    // search path is the only place that signal already exists as a vector, so
+    // recording it here costs no extra inference.
+    crate::activity::record_query(&embedding);
     let (s_idx, s_val) = sparse_vector(query);
 
     // Fetch a wider candidate set so the reranker has room to re-order (#22).
@@ -3534,6 +3538,74 @@ pub async fn remove_skill(config: &MindConfig, name: &str) -> Result<bool> {
 }
 
 /// Scroll an entire collection, following pagination to the end (audit #10).
+/// Sample up to `n` dense vectors from the memories collection, for the corpus
+/// mean that every drift comparison centers against. A sample, not a full scan:
+/// the mean of a few hundred vectors is stable to three decimals in this space,
+/// and a full scan on a cold start would cost far more than that precision is
+/// worth.
+pub async fn sample_dense_vectors(config: &MindConfig, n: usize) -> Result<Vec<Vec<f32>>> {
+    let client = get_client(config).await?;
+    if !client
+        .collection_exists(MEMORIES_COLLECTION)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<Vec<f32>> = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    while out.len() < n {
+        let want = (n - out.len()).min(SCROLL_PAGE as usize) as u32;
+        let mut builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+            .limit(want)
+            .with_payload(false)
+            .with_vectors(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+
+        let response = client.scroll(builder).await?;
+        if response.result.is_empty() {
+            break;
+        }
+        for point in response.result {
+            if let Some(v) = dense_vector_of(point) {
+                out.push(v);
+            }
+        }
+
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+
+    Ok(out)
+}
+
+/// Pull the named dense vector out of a retrieved point. Memories carry a named
+/// pair (dense + sparse); the single-vector arm covers a collection created
+/// before the hybrid split.
+fn dense_vector_of(point: qdrant_client::qdrant::RetrievedPoint) -> Option<Vec<f32>> {
+    use qdrant_client::qdrant::vector_output::Vector;
+    use qdrant_client::qdrant::vectors_output::VectorsOptions;
+
+    let dense_data = |v: qdrant_client::qdrant::VectorOutput| match v.into_vector() {
+        Vector::Dense(d) => Some(d.data),
+        _ => None,
+    };
+
+    match point.vectors?.vectors_options? {
+        VectorsOptions::Vector(single) => dense_data(single),
+        VectorsOptions::Vectors(named) => named
+            .vectors
+            .into_iter()
+            .find(|(name, _)| name == DENSE_VEC)
+            .and_then(|(_, v)| dense_data(v)),
+    }
+}
+
 pub async fn scroll_all(
     client: &Qdrant,
     collection: &str,

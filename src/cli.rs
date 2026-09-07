@@ -1182,7 +1182,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::viewer::run(config, true).await
         }
         Commands::Calibrate => {
-            cmd_calibrate();
+            cmd_calibrate().await;
             Ok(())
         }
         Commands::ServeHttp {
@@ -1873,7 +1873,7 @@ async fn cmd_migrate_v14_cardinality(output: Option<&str>, apply: bool) -> Resul
 /// through the live duel formulas and shows the match rate plus every
 /// documented divergence, so the number the README cites is reproducible from
 /// the CLI.
-fn cmd_calibrate() {
+async fn cmd_calibrate() {
     let report = crate::calibration::run_calibration();
     println!("Validity-model behavioral calibration");
     println!(
@@ -1905,6 +1905,80 @@ fn cmd_calibrate() {
          against real data (they are not; see TODO(phase-4-calibration)). Retrieval\n\
          recall (R@k) is the separately measured number; see BENCHMARKS.md."
     );
+
+    cmd_calibrate_drift().await;
+}
+
+/// Report the doubt window's drift distribution and propose a threshold from it.
+///
+/// The constant this replaces was chosen in 384-dim MiniLM space and carried
+/// into a 768-dim multilingual-e5 store, where it could not fire: no pair out of
+/// 79800 sampled from a live store fell below the cosine it required. Nothing
+/// here proposes a number the install has not produced itself.
+async fn cmd_calibrate_drift() {
+    println!("\nDoubt window: context drift");
+
+    let Ok(config) = crate::config::MindConfig::load() else {
+        println!("  store not initialised, nothing to measure.");
+        return;
+    };
+
+    if crate::activity::corpus_mean(&config).await.is_none() {
+        println!("  corpus mean unavailable (empty store); drift is inactive.");
+    } else if let Some(anisotropy) = crate::activity::cached_anisotropy(&config) {
+        println!(
+            "  anisotropy: {anisotropy:.3}  (norm of the corpus mean vector: 0 is isotropic, 1 is every embedding pointing the same way)"
+        );
+        if anisotropy > 0.5 {
+            println!(
+                "  most of any raw cosine here is common-mode, which is why drift is measured on centered vectors."
+            );
+        }
+    }
+
+    let samples = crate::activity::drift_samples(&config);
+    let observed = crate::activity::drift_observed(&config);
+    println!(
+        "  mode: {} | observations: {} lifetime, {} kept | recent-activity buffer: {}/{}",
+        config.doubt_drift_mode,
+        observed,
+        samples.len(),
+        crate::activity::recent_len(),
+        crate::activity::RECENT_CAP
+    );
+
+    const MIN_SAMPLES: usize = 200;
+    if samples.len() < MIN_SAMPLES {
+        println!(
+            "  not enough observations to propose a threshold ({} of {} needed). Keep using the store in shadow mode and run this again.",
+            samples.len(),
+            MIN_SAMPLES
+        );
+        return;
+    }
+
+    let mut sorted = samples;
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct = |p: f32| sorted[((p * (sorted.len() - 1) as f32) as usize).min(sorted.len() - 1)];
+    println!(
+        "  drift percentiles: p50={:.3} p75={:.3} p90={:.3} p95={:.3} p99={:.3}",
+        pct(0.50),
+        pct(0.75),
+        pct(0.90),
+        pct(0.95),
+        pct(0.99)
+    );
+
+    println!(
+        "  proposed doubt_drift_threshold: {:.3}  (p90, so one retrieval in ten counts as out of context; the window needs {} consecutive drifted retrievals and any single in-context one resets the counter)",
+        pct(0.90),
+        crate::doubt::DOUBT_WINDOW_N_RETRIEVALS
+    );
+    if config.doubt_drift_threshold.is_none() {
+        println!(
+            "  set it in config.json and switch doubt_drift_mode to \"enforce\" to act on it."
+        );
+    }
 }
 
 /// Duel winner policy, in ONE place so the dry-run display and the apply path
@@ -4490,6 +4564,7 @@ mod export_instructions_tests {
             valid_until: None,
             status: None,
             valid: true,
+            ..Default::default()
         };
         let procs = [proc(
             "windows build",
@@ -4539,6 +4614,7 @@ mod redo_duels_tests {
             valid_until: None,
             status: None,
             valid: true,
+            ..Default::default()
         }
     }
 
