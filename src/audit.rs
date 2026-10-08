@@ -85,6 +85,12 @@ pub enum AuditOp {
     Archive,
     /// An archived memory was restored to search. `target` = the memory id.
     Restore,
+    /// v2.7: a memory was moved to a different library by `mgimind relibrary`.
+    /// `target` = the NEW point id (library-addressed ids change on a move);
+    /// `note` carries `"moved from <old_library>:<old_id>"`. The old id's own
+    /// prior history stays under the old id — the hash chain cannot be
+    /// rewritten, so `audit show <new_id>` starts fresh from this event.
+    Relibrary,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
@@ -342,6 +348,7 @@ fn emit_pulse(event: &AuditEvent) {
         | AuditOp::Quarantine
         | AuditOp::Archive
         | AuditOp::Restore
+        | AuditOp::Relibrary
         | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)

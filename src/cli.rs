@@ -276,6 +276,36 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// v2.7: move memories from one library to another. Point ids are
+    /// content-addressed (uuid5 of library + content), so there is no
+    /// "rename" — this recomputes the destination id, copies the point there
+    /// with the SAME vectors (no re-embedding) and payload, rewrites any
+    /// `cited_by` reference and the access journal, then deletes the old
+    /// point. Dry-run by default: pass --apply to actually write. Give at
+    /// least one of --source-match / --content-match / --ids-file; given
+    /// together, a point must match ALL of them. Idempotent: re-running after
+    /// a crash finishes the job without duplicating anything.
+    Relibrary {
+        /// Library to move memories out of.
+        #[arg(long)]
+        from: String,
+        /// Library to move memories into (created in libraries.json if missing).
+        #[arg(long)]
+        to: String,
+        /// Case-insensitive regex against each point's `source` tag.
+        #[arg(long)]
+        source_match: Option<String>,
+        /// Case-insensitive regex against each point's stored content.
+        #[arg(long)]
+        content_match: Option<String>,
+        /// Path to a file with one point id per line to move explicitly.
+        #[arg(long)]
+        ids_file: Option<String>,
+        /// Actually write. Without it, only reports what would move.
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// v1.4 Phase 1: prepare the existing memory base for the validity
     /// model. Computes dependant counts per fact, proposes predicate
     /// cardinalities, and backfills confirmation history where derivable.
@@ -1054,6 +1084,24 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Extractor { what } => cmd_extractor(what).await,
         Commands::Migrate { purge } => cmd_migrate(purge).await,
         Commands::Reindex { yes } => cmd_reindex(yes).await,
+        Commands::Relibrary {
+            from,
+            to,
+            source_match,
+            content_match,
+            ids_file,
+            apply,
+        } => {
+            cmd_relibrary(
+                &from,
+                &to,
+                source_match.as_deref(),
+                content_match.as_deref(),
+                ids_file.as_deref(),
+                apply,
+            )
+            .await
+        }
         Commands::Config { what } => cmd_config(what).await,
         Commands::Outcome {
             memory_id,
@@ -1767,6 +1815,113 @@ async fn cmd_reindex(yes: bool) -> Result<()> {
         ),
         None => println!("No existing memories: nothing to back up."),
     }
+    Ok(())
+}
+
+async fn cmd_relibrary(
+    from: &str,
+    to: &str,
+    source_match: Option<&str>,
+    content_match: Option<&str>,
+    ids_file: Option<&str>,
+    apply: bool,
+) -> Result<()> {
+    use regex::RegexBuilder;
+
+    let compile = |pattern: &str| -> Result<regex::Regex> {
+        RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("invalid regex: {pattern}"))
+    };
+
+    let ids = match ids_file {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading --ids-file {path}"))?;
+            Some(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        }
+        None => None,
+    };
+
+    let opts = crate::relibrary::Options {
+        from: from.to_string(),
+        to: to.to_string(),
+        source_match: source_match.map(compile).transpose()?,
+        content_match: content_match.map(compile).transpose()?,
+        ids,
+        apply,
+    };
+    crate::relibrary::validate(&opts)?;
+
+    let config = crate::config::load_cached()?;
+    let report = crate::relibrary::run(&config, opts).await?;
+
+    if !apply {
+        println!(
+            "DRY RUN: {} memory(ies) in '{from}' match the selector. Re-run with --apply to move them to '{to}'.",
+            report.matched
+        );
+    } else {
+        if report.created_library {
+            println!("Created destination library '{to}'.");
+        }
+        println!(
+            "Moved {} of {} matched memory(ies) to '{to}'.",
+            report.moved, report.matched
+        );
+        if report.skipped_collision > 0 {
+            println!(
+                "Skipped {} match(es): an unrelated memory already occupies the destination id.",
+                report.skipped_collision
+            );
+            for c in &report.collisions {
+                println!(
+                    "  collision: {} (from) -> {} (already occupied in '{to}')",
+                    c.old_id, c.new_id
+                );
+            }
+        }
+        if report.signals_rewritten > 0 {
+            println!(
+                "Repointed cited_by references on {} other memory(ies).",
+                report.signals_rewritten
+            );
+        }
+        if report.access_rekeyed > 0 {
+            println!(
+                "Renamed {} access-journal entry(ies).",
+                report.access_rekeyed
+            );
+        }
+        if !report.kv_warnings.is_empty() {
+            println!(
+                "NOTE: {} moved id(s) still appear in kv_store.json (opaque agent key-value \
+                 store, not auto-rewritten) — check manually: {}",
+                report.kv_warnings.len(),
+                report.kv_warnings.join(", ")
+            );
+        }
+    }
+
+    if !report.sample.is_empty() {
+        println!("\nSample ({} of {}):", report.sample.len(), report.matched);
+        for s in &report.sample {
+            print!("  id: {}", s.id);
+            if let Some(src) = &s.source {
+                print!("  source: {src}");
+            }
+            println!();
+            println!("    {}", s.content_preview);
+        }
+    }
+
     Ok(())
 }
 

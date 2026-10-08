@@ -30,6 +30,7 @@ mod procedure;
 mod provenance;
 mod pulse;
 mod relevance;
+mod relibrary;
 mod reranker;
 mod retrieval_policy;
 mod secrets;

@@ -507,14 +507,14 @@ fn registered_libraries() -> Vec<String> {
         .unwrap_or_else(|_| load_libraries_from_disk())
 }
 
-fn is_registered(name: &str) -> bool {
+pub(crate) fn is_registered(name: &str) -> bool {
     lib_cache()
         .lock()
         .map(|g| g.iter().any(|l| l == name))
         .unwrap_or(false)
 }
 
-fn register_library(name: &str) -> Result<()> {
+pub(crate) fn register_library(name: &str) -> Result<()> {
     let mut libs = lib_cache().lock().expect("library cache mutex poisoned");
     if !libs.iter().any(|l| l == name) {
         libs.push(name.to_string());
@@ -3631,6 +3631,127 @@ pub async fn scroll_all(
     }
 
     Ok(out)
+}
+
+/// Scroll every `memory`-typed point of one library, WITH its raw vectors
+/// (`relibrary` needs these to re-upsert under a new id without re-embedding).
+/// Procedures are excluded server-side: their id is `PROC_NAMESPACE(error, fix)`,
+/// independent of `library`, so moving one between libraries would not even
+/// change its id — relibrary does not apply to them.
+pub(crate) async fn scroll_library_full(
+    client: &Qdrant,
+    library: &str,
+) -> Result<Vec<qdrant_client::qdrant::RetrievedPoint>> {
+    let filter = Filter {
+        must: vec![Condition::matches("library", library.to_string())],
+        must_not: vec![Condition::matches("type", TYPE_PROCEDURE.to_string())],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(MEMORIES_COLLECTION)
+            .filter(filter.clone())
+            .limit(SCROLL_PAGE)
+            .with_payload(true)
+            .with_vectors(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        out.extend(response.result);
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Rebuild the named dense+sparse vectors of a retrieved point for re-upsert,
+/// with no re-embedding. `None` only when the point carries no vectors at all
+/// (should not happen for a live memory point, but a missing match is safer
+/// than a panic on an unexpected shape).
+pub(crate) fn named_vectors_of(
+    point: &qdrant_client::qdrant::RetrievedPoint,
+) -> Option<NamedVectors> {
+    use qdrant_client::qdrant::vector_output::Vector as VOut;
+    use qdrant_client::qdrant::vectors_output::VectorsOptions;
+
+    fn to_vector(v: qdrant_client::qdrant::VectorOutput) -> Option<Vector> {
+        match v.into_vector() {
+            VOut::Dense(d) => Some(Vector::new_dense(d.data)),
+            VOut::Sparse(s) => Some(Vector::new_sparse(s.indices, s.values)),
+            _ => None,
+        }
+    }
+
+    match point.vectors.clone()?.vectors_options? {
+        VectorsOptions::Vector(single) => {
+            Some(NamedVectors::default().add_vector(DENSE_VEC, to_vector(single)?))
+        }
+        VectorsOptions::Vectors(named) => {
+            let mut out = NamedVectors::default();
+            for (name, v) in named.vectors {
+                if let Some(vec) = to_vector(v) {
+                    out = out.add_vector(name, vec);
+                }
+            }
+            Some(out)
+        }
+    }
+}
+
+/// Batch-fetch full points (payload + vectors) by id, for the collision check in
+/// `relibrary`. Missing ids are simply absent from the result map.
+pub(crate) async fn get_full_points(
+    client: &Qdrant,
+    collection: &str,
+    ids: &[String],
+) -> HashMap<String, qdrant_client::qdrant::RetrievedPoint> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    let pids: Vec<qdrant_client::qdrant::PointId> =
+        ids.iter().map(|id| id.clone().into()).collect();
+    let Ok(resp) = client
+        .get_points(
+            GetPointsBuilder::new(collection, pids)
+                .with_payload(true)
+                .with_vectors(true),
+        )
+        .await
+    else {
+        return out;
+    };
+    for point in resp.result {
+        let id = point.id.as_ref().map(format_point_id).unwrap_or_default();
+        out.insert(id, point);
+    }
+    out
+}
+
+/// Upsert one fully-formed point (new id, carried-over vectors, carried-over
+/// payload) into the memories collection. Thin wrapper so `relibrary` does not
+/// need to import the qdrant-client upsert plumbing itself.
+pub(crate) async fn upsert_full_point(
+    client: &Qdrant,
+    id: &str,
+    vectors: NamedVectors,
+    payload: HashMap<String, qdrant_client::qdrant::Value>,
+) -> Result<()> {
+    client
+        .upsert_points(
+            UpsertPointsBuilder::new(
+                MEMORIES_COLLECTION,
+                vec![PointStruct::new(id.to_string(), vectors, payload)],
+            )
+            .wait(true),
+        )
+        .await
+        .context("Failed to upsert a relibraried point")?;
+    Ok(())
 }
 
 /// Recent memories, newest first. Single collection + a datetime index on

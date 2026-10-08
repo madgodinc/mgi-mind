@@ -162,6 +162,19 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it. This is a breaking change that also disrupts existing local tooling, so
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
+- **✅ Shipped: v2.7.0 (2026-10-08), `mgimind relibrary` — move memories between
+  libraries.** Point ids are content-addressed (`uuid5(library + content)`),
+  so there was no supported way to move a memory to a different library short
+  of delete-and-re-add by hand, losing `created_at`, dedup, and anything that
+  referenced its old id. `relibrary --from <lib> --to <lib>
+  (--source-match <regex> | --content-match <regex> | --ids-file <path>)
+  [--apply]` recomputes the destination id, copies the point with its exact
+  vectors (no re-embedding) and full payload, deletes the old point, and
+  repoints `cited_by` references plus the access journal. Dry-run by default;
+  a destination id already occupied by unrelated content is reported, not
+  clobbered; a crash between the upsert and the delete resumes cleanly on the
+  next run via a `relibrary_source_id` marker. CLI only — the same
+  anti-tool-sprawl call `reindex`/`migrate` already made.
 - **✅ Shipped: v2.6.0 (2026-10-08), consistent backups, an honest doctor, and
   the doubt window wired up.** `backup`/`restore` now go through Qdrant's own
   snapshot API when it answers (create -> download -> delete the remote copy)

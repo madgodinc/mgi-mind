@@ -222,6 +222,16 @@ pub fn is_initialized() -> bool {
     config_path().exists()
 }
 
+/// Serializes unit tests that override `MGIMIND_HOME`. The env var is
+/// process-global mutable state, and `cargo test` runs unit tests on multiple
+/// threads by default, so two such tests can stomp each other's override
+/// mid-body otherwise. Shared across modules (not one lock per file) so it
+/// actually serializes every test that touches this var, regardless of which
+/// module it lives in. Every test that calls
+/// `std::env::set_var("MGIMIND_HOME", ...)` must hold this for its whole body.
+#[cfg(test)]
+pub(crate) static MGIMIND_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::MindConfig;

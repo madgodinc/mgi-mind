@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.7.0: `relibrary` — move memories between libraries
+
+- **New CLI command: `mgimind relibrary --from <lib> --to <lib> (--source-match
+  <regex> | --content-match <regex> | --ids-file <path>) [--apply]`.** Point
+  ids in the single-collection layout are content-addressed
+  (`uuid5(library + content)`), so there was no supported way to move a
+  memory to a different library short of deleting and re-adding it by hand
+  (losing `created_at`, dedup history, and anything that referenced its old
+  id). `relibrary` does the move properly: it recomputes the id the
+  destination library would assign, copies the point there with the exact
+  same dense+sparse vectors (no re-embedding) and the full payload carried
+  over (`created_at`, `source`, `author`, `type`, `quarantined`,
+  `external_signals_v15`, and chunk position for a long document split across
+  several points), deletes the old point, and repoints any `cited_by`
+  reference anywhere in the store plus the access-journal entry that followed
+  it. Dry-run by default; `--apply` writes. A destination id already occupied
+  by unrelated content is left alone and reported, not clobbered. Crash-safe:
+  re-running after an interruption finishes the job without duplicating
+  anything (a `relibrary_source_id` marker on the moved point is how a resumed
+  run tells "this move already landed" apart from "someone else's point is
+  already here"). CLI only, by design — a destructive cross-library regex
+  match across the whole store is exactly the kind of operation the anti-sprawl
+  rule keeps off the MCP tool surface; `reindex` and `migrate` set the same
+  precedent.
+
 ## 2.6.0: consistent backups, an honest doctor, and the doubt window wired up
 
 - **`backup`/`restore` are now consistent under live writes.** Previously a

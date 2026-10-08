@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[最新版本：v2.6.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.6.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[最新版本：v2.7.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.7.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 面向 AI 助手的本地长期记忆。一个 Rust 程序，本地 Qdrant 向量数据库，本地
 ONNX 模型。通过 MCP 协议，Claude Code 等助手可以自己读写记忆。同时也是一个普通的
@@ -120,7 +120,7 @@ claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
 ### 安装器选项
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`：装到非 `~/.local/bin` 的位置。
-- `MGIMIND_TAG=v2.6.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
+- `MGIMIND_TAG=v2.7.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
 - `SKIP_DOCTOR=1 curl ... | sh`：只放下程序；之后自己运行 `init` + `doctor --fix`。
 
 ### 手动安装（不用脚本）
@@ -422,7 +422,7 @@ mgimind 不安装驱动、不添加网卡，也不改动任何路由、DNS 或�
 
 ## 状态与审计
 
-当前版本：**2.6.0**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
+当前版本：**2.7.0**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
 日志和临时 viewer、0.11.x 的隔离层 + best-effort retrieval 策略、
 0.12.x 的 viewer 波次、0.13.x 的 session liveness、以及 0.14.x 的
 procedural-memory 护城河（LongMemEval baseline + 来自 20 个公开仓库的

@@ -2179,3 +2179,503 @@ async fn backup_and_restore_round_trip_facts_through_qdrant_snapshots() {
         "fact should come back after restore, got: {restored}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `mgimind relibrary` (v2.7) integration tests.
+//
+// Needs the embedding model (relibrary reads real stored memories), so these
+// are gated the same as the add/search tests above. Each test gets its own
+// pair of libraries named after the test + pid, and drops both at the end
+// regardless of assertions.
+// ---------------------------------------------------------------------------
+
+/// Helper: run one `mgimind` CLI invocation against an isolated test home.
+fn run_cli(mind: &Path, ort: &str, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(bin())
+        .args(args)
+        .env("MGIMIND_HOME", mind)
+        .env("ORT_DYLIB_PATH", ort)
+        .output()
+        .expect("spawn mgimind");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Extract the first `id: <token>` from CLI text output (search/browse render
+/// one such token per record). Mirrors the convention already used above by
+/// `near_dup_ingest_is_recoverable_not_dropped` for quarantine ids.
+fn first_id(text: &str) -> Option<String> {
+    text.split("id: ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .map(str::to_string)
+}
+
+/// Count `id: ` occurrences — one per browse/search record, so this is a
+/// record count without needing to parse the full render format.
+fn count_records(text: &str) -> usize {
+    text.matches("id: ").count()
+}
+
+/// Dry run matches and samples but writes nothing: the destination library is
+/// not created, the source library is untouched, and nothing is ever moved
+/// without `--apply`.
+#[test]
+fn relibrary_dry_run_reports_without_writing() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let pid = std::process::id();
+    let from = format!("itrb_dry_from_{pid}");
+    let to = format!("itrb_dry_to_{pid}");
+
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &from]);
+    assert!(ok, "create failed: {e}");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &[
+            "add",
+            &from,
+            "CreepiDota Path beta notes on the tutorial flow.",
+        ],
+    );
+    assert!(ok, "add failed: {e}");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &["add", &from, "Completely unrelated gardening notes."],
+    );
+    assert!(ok, "add failed: {e}");
+
+    let (ok, out, err) = run_cli(
+        &mind,
+        &ort,
+        &[
+            "relibrary",
+            "--from",
+            &from,
+            "--to",
+            &to,
+            "--content-match",
+            "creepidota",
+        ],
+    );
+    assert!(ok, "relibrary dry run failed: {err}");
+    assert!(
+        out.contains("DRY RUN"),
+        "dry run should say so, got:\n{out}"
+    );
+    assert!(
+        out.contains("1 memory"),
+        "exactly one memory should match, got:\n{out}"
+    );
+
+    // Nothing written: the destination library was never created, and the
+    // source library still holds both memories.
+    let list = run_cli(&mind, &ort, &["list"]).1;
+    assert!(
+        !list.contains(&to),
+        "dry run must not create the destination library, got:\n{list}"
+    );
+    let browse_from = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    assert_eq!(
+        count_records(&browse_from),
+        2,
+        "dry run must not move anything, got:\n{browse_from}"
+    );
+
+    let _ = run_cli(&mind, &ort, &["drop", &from]);
+    let _ = run_cli(&mind, &ort, &["drop", &to]);
+}
+
+/// Apply moves the matching memory; an unrelated memory in the same library
+/// stays put; re-running the identical command afterward matches nothing and
+/// does not duplicate anything (idempotent / safely resumable).
+#[test]
+fn relibrary_apply_moves_memory_and_rerun_is_a_noop() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let pid = std::process::id();
+    let from = format!("itrb_apply_from_{pid}");
+    let to = format!("itrb_apply_to_{pid}");
+
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &from]);
+    assert!(ok, "create failed: {e}");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &["add", &from, "CreepiDota Path beta notes on matchmaking."],
+    );
+    assert!(ok, "add failed: {e}");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &["add", &from, "Unrelated memory that must stay behind."],
+    );
+    assert!(ok, "add failed: {e}");
+
+    let relibrary_args = [
+        "relibrary",
+        "--from",
+        from.as_str(),
+        "--to",
+        to.as_str(),
+        "--content-match",
+        "creepidota",
+        "--apply",
+    ];
+
+    let (ok, out, err) = run_cli(&mind, &ort, &relibrary_args);
+    assert!(ok, "relibrary apply failed: {err}");
+    assert!(
+        out.contains("Moved 1 of 1"),
+        "first apply should move exactly one, got:\n{out}"
+    );
+
+    let search_to = run_cli(
+        &mind,
+        &ort,
+        &[
+            "search",
+            "creepidota matchmaking",
+            "--library",
+            &to,
+            "--tier",
+            "3",
+        ],
+    )
+    .1;
+    assert!(
+        search_to.contains("matchmaking"),
+        "moved memory should be searchable in '{to}', got:\n{search_to}"
+    );
+    let browse_from = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    assert_eq!(
+        count_records(&browse_from),
+        1,
+        "only the unrelated memory should remain in '{from}', got:\n{browse_from}"
+    );
+    assert!(browse_from.contains("Unrelated memory"));
+
+    // Re-running the identical command must be a safe no-op: the selector no
+    // longer matches anything in `from` (the point already left), so nothing
+    // moves and nothing duplicates.
+    let (ok, out2, err2) = run_cli(&mind, &ort, &relibrary_args);
+    assert!(ok, "second relibrary apply failed: {err2}");
+    assert!(
+        out2.contains("Moved 0 of 0"),
+        "re-run must match nothing, got:\n{out2}"
+    );
+    let browse_to = run_cli(&mind, &ort, &["browse", "--library", &to]).1;
+    assert_eq!(
+        count_records(&browse_to),
+        1,
+        "re-running must not duplicate the moved memory, got:\n{browse_to}"
+    );
+
+    let _ = run_cli(&mind, &ort, &["drop", &from]);
+    let _ = run_cli(&mind, &ort, &["drop", &to]);
+}
+
+/// A crash between the new upsert and the old delete must resume cleanly on
+/// the next run, not duplicate. Simulated by re-adding the identical content
+/// back into `from` after a completed move: content-addressed ids mean this
+/// recreates exactly the state a crash would have left (the old point back,
+/// the already-moved new point still marked with its `relibrary_source_id`).
+#[test]
+fn relibrary_resumes_after_a_simulated_crash_without_duplicating() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let pid = std::process::id();
+    let from = format!("itrb_resume_from_{pid}");
+    let to = format!("itrb_resume_to_{pid}");
+    let content = "CreepiDota Path beta notes on the resume scenario.";
+
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &from]);
+    assert!(ok, "create failed: {e}");
+    let (ok, _o, e) = run_cli(&mind, &ort, &["add", &from, content, "--source", "itrb"]);
+    assert!(ok, "add failed: {e}");
+    let old_id = first_id(&run_cli(&mind, &ort, &["browse", "--library", &from]).1)
+        .expect("original memory should have an id");
+
+    let relibrary_args = [
+        "relibrary",
+        "--from",
+        from.as_str(),
+        "--to",
+        to.as_str(),
+        "--content-match",
+        "resume scenario",
+        "--apply",
+    ];
+    let (ok, out, err) = run_cli(&mind, &ort, &relibrary_args);
+    assert!(ok, "first relibrary apply failed: {err}");
+    assert!(out.contains("Moved 1 of 1"), "got:\n{out}");
+
+    // Simulate the crash: the old point is back (same content -> same
+    // content-addressed id as `old_id`), while the moved point at the
+    // destination (carrying `relibrary_source_id = old_id`) was never touched.
+    let (ok, _o, e) = run_cli(&mind, &ort, &["add", &from, content, "--source", "itrb"]);
+    assert!(ok, "resurrect add failed: {e}");
+    let resurrected_id = first_id(&run_cli(&mind, &ort, &["browse", "--library", &from]).1)
+        .expect("resurrected memory should have an id");
+    assert_eq!(
+        resurrected_id, old_id,
+        "content-addressed id must be identical on re-add"
+    );
+
+    // Resume: must complete (moved, not a reported collision) and must not
+    // duplicate the destination.
+    let (ok, out2, err2) = run_cli(&mind, &ort, &relibrary_args);
+    assert!(ok, "resume apply failed: {err2}");
+    assert!(
+        out2.contains("Moved 1 of 1"),
+        "the resumed move must complete as a move, not a collision, got:\n{out2}"
+    );
+    assert!(
+        !out2.contains("Skipped"),
+        "a resumed move must not be reported as a collision, got:\n{out2}"
+    );
+
+    let browse_from = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    assert_eq!(
+        count_records(&browse_from),
+        0,
+        "source must be empty again after the resume, got:\n{browse_from}"
+    );
+    let browse_to = run_cli(&mind, &ort, &["browse", "--library", &to]).1;
+    assert_eq!(
+        count_records(&browse_to),
+        1,
+        "destination must hold exactly one copy, never a duplicate, got:\n{browse_to}"
+    );
+
+    let _ = run_cli(&mind, &ort, &["drop", &from]);
+    let _ = run_cli(&mind, &ort, &["drop", &to]);
+}
+
+/// A genuine collision — an unrelated memory already occupying the id the
+/// destination library would assign — is left untouched on both sides and
+/// reported, not silently clobbered or duplicated.
+#[test]
+fn relibrary_collision_is_skipped_and_reported() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let pid = std::process::id();
+    let from = format!("itrb_collide_from_{pid}");
+    let to = format!("itrb_collide_to_{pid}");
+    let content = "CreepiDota Path beta notes shared verbatim by coincidence.";
+
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &from]);
+    assert!(ok, "create from failed: {e}");
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &to]);
+    assert!(ok, "create to failed: {e}");
+
+    // The destination already independently holds this exact content — NOT
+    // produced by a relibrary move, so it carries no `relibrary_source_id`
+    // marker pointing back at the source point.
+    let (ok, _o, e) = run_cli(&mind, &ort, &["add", &to, content]);
+    assert!(ok, "add to destination failed: {e}");
+    let (ok, _o, e) = run_cli(&mind, &ort, &["add", &from, content]);
+    assert!(ok, "add to source failed: {e}");
+
+    let (ok, out, err) = run_cli(
+        &mind,
+        &ort,
+        &[
+            "relibrary",
+            "--from",
+            &from,
+            "--to",
+            &to,
+            "--content-match",
+            "coincidence",
+            "--apply",
+        ],
+    );
+    assert!(ok, "relibrary apply failed: {err}");
+    assert!(
+        out.contains("Skipped 1") && out.contains("collision"),
+        "a genuine collision must be reported, got:\n{out}"
+    );
+
+    // Untouched on both sides: the source still has its own copy, the
+    // destination was not overwritten into holding two.
+    let browse_from = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    assert_eq!(
+        count_records(&browse_from),
+        1,
+        "collision must leave the source point alone, got:\n{browse_from}"
+    );
+    let browse_to = run_cli(&mind, &ort, &["browse", "--library", &to]).1;
+    assert_eq!(
+        count_records(&browse_to),
+        1,
+        "collision must not duplicate the destination point, got:\n{browse_to}"
+    );
+
+    let _ = run_cli(&mind, &ort, &["drop", &from]);
+    let _ = run_cli(&mind, &ort, &["drop", &to]);
+}
+
+/// A long memory is stored as several chunk points sharing one `source` tag
+/// (`storage::add_memory`'s chunking). Selecting by that shared source must
+/// move every chunk, and `export --format md` must still reassemble them into
+/// the original text afterward — proof that `chunk_index` / `chunk_total` /
+/// `chunk_overlap` survived the move untouched.
+#[test]
+fn relibrary_moves_every_chunk_of_a_long_document_and_export_still_reassembles_it() {
+    let (Some(port), Ok(models), Ok(ort)) = (
+        qdrant_port(),
+        std::env::var("MGIMIND_IT_MODELS"),
+        std::env::var("ORT_DYLIB_PATH"),
+    ) else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT, MGIMIND_IT_MODELS and ORT_DYLIB_PATH to run");
+        return;
+    };
+    let model_src = std::path::Path::new(&models).join("multilingual-e5-base");
+    if !model_src.join("model.onnx").exists() {
+        eprintln!("SKIP: no multilingual-e5-base model under MGIMIND_IT_MODELS");
+        return;
+    }
+    let (_home, mind) = setup_model_home(&port, &model_src);
+    let pid = std::process::id();
+    let from = format!("itrb_chunk_from_{pid}");
+    let to = format!("itrb_chunk_to_{pid}");
+    let source_tag = format!("itrb-chunk-doc-{pid}");
+
+    // Comfortably over CHUNK_CHARS (500) so `add` splits it into several
+    // points, all sharing this one `source` tag.
+    let first_marker = "ChunkStartMarkerAlpha";
+    let last_marker = "ChunkEndMarkerOmega";
+    let filler = "The quick brown fox jumps over the lazy dog. ".repeat(40);
+    let long_content = format!("{first_marker} {filler} {last_marker}");
+
+    let (ok, _o, e) = run_cli(&mind, &ort, &["create", &from]);
+    assert!(ok, "create failed: {e}");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &["add", &from, &long_content, "--source", &source_tag],
+    );
+    assert!(ok, "add long document failed: {e}");
+
+    let browse_before = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    let chunk_count = count_records(&browse_before);
+    assert!(
+        chunk_count > 1,
+        "the long document should split into multiple chunks, got:\n{browse_before}"
+    );
+
+    let (ok, out, err) = run_cli(
+        &mind,
+        &ort,
+        &[
+            "relibrary",
+            "--from",
+            &from,
+            "--to",
+            &to,
+            "--source-match",
+            &format!("^{source_tag}$"),
+            "--apply",
+        ],
+    );
+    assert!(ok, "relibrary apply failed: {err}");
+    assert!(
+        out.contains(&format!("Moved {chunk_count} of {chunk_count}")),
+        "every chunk should move, got:\n{out}"
+    );
+
+    let browse_to = run_cli(&mind, &ort, &["browse", "--library", &to]).1;
+    assert_eq!(
+        count_records(&browse_to),
+        chunk_count,
+        "all chunks should now live in '{to}', got:\n{browse_to}"
+    );
+    let browse_from_after = run_cli(&mind, &ort, &["browse", "--library", &from]).1;
+    assert_eq!(
+        count_records(&browse_from_after),
+        0,
+        "no chunk should remain in '{from}', got:\n{browse_from_after}"
+    );
+
+    // Export reassembles by (source, created_at) + chunk_index — if those
+    // fields had been dropped or reset by the move, this would come back as
+    // disjoint fragments instead of the original text in order.
+    let export_dir = tempfile::tempdir().expect("tempdir for export");
+    let (ok, _o, e) = run_cli(
+        &mind,
+        &ort,
+        &[
+            "export",
+            "--format",
+            "md",
+            "--output",
+            export_dir.path().to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "export failed: {e}");
+    let exported = std::fs::read_to_string(export_dir.path().join(format!("{to}.md")))
+        .expect("export should have written a file for the destination library");
+    let start_pos = exported.find(first_marker).expect("start marker present");
+    let end_pos = exported.find(last_marker).expect("end marker present");
+    assert!(
+        start_pos < end_pos,
+        "reassembled export should keep chunk order, got:\n{exported}"
+    );
+
+    let _ = run_cli(&mind, &ort, &["drop", &from]);
+    let _ = run_cli(&mind, &ort, &["drop", &to]);
+}

@@ -273,8 +273,10 @@ Data / maintenance: `mind_import`, `mind_export`, `mind_doctor`, `mind_consolida
 asks "how much duplicate memory do I have?" before suggesting they run the CLI.
 
 Admin actions are CLI-only (the user runs them): `mgimind serve`, `mgimind migrate`,
-`mgimind drop`, `mgimind backup` / `restore`. The MCP server itself is `mgimind mcp`,
-which the user wires into their AI client once; it starts Qdrant automatically.
+`mgimind drop`, `mgimind backup` / `restore`, `mgimind relibrary` (move memories
+between libraries — a destructive, regex-matched, cross-library operation; dry-run
+by default). The MCP server itself is `mgimind mcp`, which the user wires into
+their AI client once; it starts Qdrant automatically.
 
 ## A good session, end to end
 
@@ -317,4 +319,4 @@ which the user wires into their AI client once; it starts Qdrant automatically.
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v2.6.0 | Apache-2.0 | Mad God Inc
+MGI-Mind v2.7.0 | Apache-2.0 | Mad God Inc

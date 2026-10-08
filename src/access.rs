@@ -116,6 +116,45 @@ pub fn flush() {
     }
 }
 
+/// Rename journal entries after a `relibrary` move (old id -> new id). Merges
+/// with any stat already at the new id using the same policy as `flush` (max
+/// count, latest `last_access`) so a point that already had hits before the
+/// move does not lose them. Updates both the on-disk journal and the
+/// in-process cache, so a long-lived MCP process does not flush a stale entry
+/// back under the old id later. Returns how many ids were actually renamed.
+pub fn rekey_ids(mapping: &HashMap<String, String>) -> usize {
+    if mapping.is_empty() {
+        return 0;
+    }
+
+    fn merge_in(map: &mut HashMap<String, AccessStat>, mapping: &HashMap<String, String>) -> usize {
+        let mut renamed = 0;
+        for (old_id, new_id) in mapping {
+            let Some(stat) = map.remove(old_id) else {
+                continue;
+            };
+            let entry = map.entry(new_id.clone()).or_default();
+            entry.count = entry.count.max(stat.count);
+            if stat.last_access > entry.last_access {
+                entry.last_access = stat.last_access;
+            }
+            renamed += 1;
+        }
+        renamed
+    }
+
+    let mut on_disk = load_from_disk();
+    let renamed = merge_in(&mut on_disk, mapping);
+    if renamed > 0 {
+        let _ = serde_json::to_string(&on_disk)
+            .map(|json| crate::util::atomic_write_str(&journal_path(), &json));
+    }
+    if let Ok(mut in_proc) = log().lock() {
+        merge_in(&mut in_proc, mapping);
+    }
+    renamed
+}
+
 /// Read the merged access journal (on-disk + in-process). Used by consolidation
 /// to decide what to decay. Does not mutate anything.
 pub fn snapshot() -> HashMap<String, AccessStat> {
@@ -139,12 +178,15 @@ mod tests {
     // Each test isolates the data dir via MGIMIND_HOME so the journal path is a
     // temp dir. The in-process LOG is a process global, so we don't assert on
     // cross-test in-memory state — we assert on the journal file via flush/load.
+    // MGIMIND_HOME_TEST_LOCK serializes every test in the crate that overrides
+    // this env var — see its doc comment in config.rs.
 
     #[test]
     fn flush_then_load_roundtrips_counts() {
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: tests in this module run single-threaded w.r.t. this env var
-        // (no other test reads MGIMIND_HOME concurrently in this crate's unit set).
         unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
 
         let path = dir.path().join("access_journal.json");
@@ -168,5 +210,54 @@ mod tests {
     fn record_empty_is_noop() {
         // Must not panic or write anything for an empty id list.
         record(&[], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn rekey_merges_into_an_existing_entry_by_max_count_latest_access() {
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
+
+        let mut seed: HashMap<String, AccessStat> = HashMap::new();
+        seed.insert(
+            "old-id".into(),
+            AccessStat {
+                count: 5,
+                last_access: Some("2026-01-01T00:00:00Z".into()),
+            },
+        );
+        seed.insert(
+            "new-id".into(),
+            AccessStat {
+                count: 2,
+                last_access: Some("2026-02-01T00:00:00Z".into()),
+            },
+        );
+        crate::util::atomic_write_str(&journal_path(), &serde_json::to_string(&seed).unwrap())
+            .unwrap();
+
+        let mut mapping = HashMap::new();
+        mapping.insert("old-id".to_string(), "new-id".to_string());
+        let renamed = rekey_ids(&mapping);
+        assert_eq!(renamed, 1);
+
+        let after = load_from_disk();
+        assert!(!after.contains_key("old-id"), "old key must be gone");
+        let merged = after.get("new-id").expect("new key must exist");
+        assert_eq!(merged.count, 5, "keeps the larger count");
+        assert_eq!(
+            merged.last_access.as_deref(),
+            Some("2026-02-01T00:00:00Z"),
+            "keeps the later timestamp"
+        );
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+    }
+
+    #[test]
+    fn rekey_empty_mapping_is_noop() {
+        assert_eq!(rekey_ids(&HashMap::new()), 0);
     }
 }
