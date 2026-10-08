@@ -11,6 +11,10 @@
 //! user delete a memory through a button that goes through the same
 //! audited write path as the CLI.
 
+// Handlers return an axum `Response` as their error so a guard can `?` straight
+// out of them; it is large by nature, and boxing it would buy nothing here.
+#![allow(clippy::result_large_err)]
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -60,8 +64,7 @@ impl AppState {
     /// Fail-closed guard for endpoints a confined viewer must not serve at all
     /// (they span all libraries or mutate). `Ok(())` when unconfined. The `Err`
     /// is an axum `Response` (large by nature) so it can `?` straight out of a
-    /// handler — the same shape those handlers already return.
-    #[allow(clippy::result_large_err)]
+    /// handler, the same shape those handlers already return.
     fn allow_broad(&self) -> Result<(), Response> {
         if self.confined() {
             return Err((
