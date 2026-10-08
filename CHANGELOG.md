@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.7.1: a cross-process audit lock, and a stale MCP library cache
+
+- **The audit chain could break under concurrent writers, and now it can't.**
+  `audit verify` found a break in Mad's live log (31.8k lines). Root cause: the
+  chain tip (`prev_hash` of the next line) was cached in a process-lifetime
+  static, seeded once from the file tail. mgi-mind runs as several separate
+  OS processes against the same `MGIMIND_HOME` at once — a long-running MCP
+  server per connected agent, `serve-http`, one-shot CLI calls — and each had
+  its own stale copy of "the last line". Two processes racing an append each
+  wrote a `prev_hash` pointing at a line the other had since superseded, and
+  the chain broke at whichever line lost the race. The fix: `audit::record`
+  now takes a cross-process advisory lock (a sibling `audit.log.lock` file)
+  around reading the real tail and appending, with no in-memory cache at
+  all — every writer re-reads the true tip fresh while holding the lock, so
+  there is nothing left to go stale.
+- **`audit verify` now reports every break in the log, not just the first, and
+  distinguishes a live concern from a documented one.** A single early break
+  used to end the scan right there, hiding whatever followed it. `verify` now
+  scans the whole file and reports every break it finds. New command:
+  `mgimind audit reanchor --reason "<what you found>"` appends a normally-
+  chained event acknowledging the current break(s) — it never rewrites or
+  removes the broken line, it just records that the gap is understood. From
+  then on `audit verify` passes: it only fails on a break nobody has
+  acknowledged yet. The historical break on Mad's live log (pre-dating this
+  fix) is exactly the case this is for.
+- **A long-running MCP server couldn't see a library created after it
+  started.** The library registry (`libraries.json`) is cached in-process on
+  first access to avoid re-reading it on every `mind_add`; the cache was never
+  invalidated, so a library created by a *different* process (the CLI,
+  `mgimind relibrary`, another MCP session) stayed invisible until restart —
+  `mind_add` reported `Library 'x' not found` for a library that plainly
+  existed. `is_registered` now reloads the registry from disk once on a cache
+  miss before concluding the library doesn't exist; the common case (library
+  already known) still never touches disk.
+- **`mind_ingest`'s `library` argument description now says what the default
+  is for.** It silently defaulted to `"projects"` with no indication that
+  most mgi-mind instances split memory by project and that `"projects"` is the
+  catch-all, not a safe generic choice. The default is unchanged (dropping it
+  would break existing callers that omit the argument); the tool description
+  now tells a caller to pass the project's own library and look it up first.
+- **Three `storage.rs` backup/restore tests were flaky under `cargo test`'s
+  default parallelism.** They set/clear the process-wide `MGIMIND_HOME` env
+  var under their own lock, a *different* lock than the one `access.rs` and
+  `relibrary.rs` tests use for the same env var — so the two groups could
+  still race each other. All tests that override `MGIMIND_HOME` now share one
+  lock (`config::MGIMIND_HOME_TEST_LOCK`, promoted to a `tokio::sync::Mutex`
+  so the async backup tests can hold it across an `.await`).
+
 ## 2.7.0: `relibrary` — move memories between libraries
 
 - **New CLI command: `mgimind relibrary --from <lib> --to <lib> (--source-match

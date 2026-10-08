@@ -27,7 +27,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Operations we record. Everything that mutates the store goes through one
 /// of these variants. Read operations are NOT audited (they go through
@@ -91,6 +90,15 @@ pub enum AuditOp {
     /// prior history stays under the old id — the hash chain cannot be
     /// rewritten, so `audit show <new_id>` starts fresh from this event.
     Relibrary,
+    /// v2.7.1: an operator acknowledged a historical, pre-existing chain break
+    /// found by `verify()` — `mgimind audit reanchor --reason ...`. Does NOT
+    /// touch the broken line or anything before it; it only appends a new,
+    /// normally-chained event that carries `ack_breaks` (the acknowledged break
+    /// line numbers) in `note`'s companion field. After this event, `verify()`
+    /// stops reporting those line numbers as unacknowledged — the segment
+    /// starting here is held to full tamper-evidence as normal, while the
+    /// documented gap before it is no longer mistaken for new tampering.
+    Reanchor,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
@@ -131,6 +139,12 @@ pub struct AuditEvent {
     /// `audit verify` treats a run of `None`s as an unverified legacy prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_hash: Option<String>,
+    /// v2.7.1, `Reanchor` events only: the 1-based line numbers of chain breaks
+    /// this event acknowledges. `verify()` unions this across every `Reanchor`
+    /// line in the log and treats any break whose line number appears here as
+    /// explained, not as a tamper signal. `None` for every other op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_breaks: Option<Vec<usize>>,
 }
 
 fn default_actor() -> String {
@@ -149,6 +163,7 @@ impl AuditEvent {
             after: None,
             note: None,
             prev_hash: None,
+            ack_breaks: None,
         }
     }
 
@@ -194,24 +209,18 @@ fn current_path() -> Option<&'static PathBuf> {
     AUDIT_PATH.get().and_then(|opt| opt.as_ref())
 }
 
-/// Record an event. Never panics, never fails the caller. A logging failure
-/// is itself logged via `tracing::warn` but does not propagate up — the mutate
-/// operation has already succeeded by the time we're here, and refusing to
-/// return success because we couldn't write a log line would be the wrong
-/// tradeoff.
-/// Chain tip: BLAKE3 hex of the last line written this process, so the next
-/// `record` chains to it without re-reading the file. Seeded once from the file
-/// tail on the first write. Only ever touched while holding `AUDIT_LOCK`.
-static LAST_HASH: Mutex<Option<String>> = Mutex::new(None);
-static LAST_HASH_SEEDED: AtomicBool = AtomicBool::new(false);
-
 /// BLAKE3 hex of a log line's exact bytes (the string as written, no newline).
 fn hash_line(line: &str) -> String {
     blake3::hash(line.as_bytes()).to_hex().to_string()
 }
 
 /// Hash of the last non-empty line already in `path`, or None if empty/absent.
-/// Read once to continue the chain across process restarts.
+/// Always re-read from disk at write time (see `record`) rather than cached —
+/// a cache is exactly what broke the chain in production: a long-running MCP
+/// server, a `serve-http` process and one-shot CLI invocations each append to
+/// the same file, and a process-lifetime "last hash" goes stale the moment a
+/// DIFFERENT process appends. Re-reading the tail is the only way one process
+/// can know what another just wrote.
 fn seed_last_hash(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     content
@@ -221,7 +230,64 @@ fn seed_last_hash(path: &Path) -> Option<String> {
         .map(hash_line)
 }
 
-pub fn record(mut event: AuditEvent) {
+/// Sibling lock file for the cross-process critical section (`<audit log>.lock`,
+/// e.g. `audit.log.lock`). A dedicated zero-byte file rather than locking
+/// `audit.log` itself, so a plain `tail -f audit.log` from another tool never
+/// contends with it.
+fn lock_file_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+/// Append one event to `path`: read the real chain tip fresh and write the
+/// new line, under a cross-process lock so no two writers can race the tip.
+/// Pure over a path (no global state) so tests can drive it directly; `record`
+/// and `reanchor` are thin wrappers that resolve the configured path and
+/// decide how to handle an error.
+///
+/// `AUDIT_LOCK` (a process-local mutex, taken by the caller) only serializes
+/// writers WITHIN this process. That is not enough on its own: mgi-mind runs
+/// as several separate processes against the same MGIMIND_HOME at once (a
+/// long-running MCP server per connected agent, `serve-http`, one-shot CLI
+/// calls). Before v2.7.1 the chain tip was cached in a process-lifetime
+/// static, seeded once from the file tail; two processes racing an append
+/// each wrote a `prev_hash` pointing at a line the OTHER process had since
+/// superseded, and the chain broke at whichever line lost the race — this is
+/// the root cause of the production break (pre-existing, same in a backup
+/// predating this fix). The fix is the cross-process advisory lock below
+/// around the read-tail + append, with NO in-memory cache: every writer
+/// re-reads the real tip fresh while holding the lock, so there is nothing
+/// left to go stale.
+fn append_event(path: &Path, mut event: AuditEvent) -> Result<()> {
+    let lock_path = lock_file_path(path);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock_file).context("acquiring cross-process audit lock")?;
+    // `lock_file` is dropped (and the OS releases the flock) at the end of
+    // this function either way — a crash mid-write can't wedge it.
+
+    event.prev_hash = seed_last_hash(path);
+    let line = serde_json::to_string(&event).context("serializing audit event")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    writeln!(file, "{line}").context("writing audit line")?;
+    Ok(())
+}
+
+/// Record an event. Never panics, never fails the caller. A logging failure
+/// is itself logged via `tracing::warn` but does not propagate up — the mutate
+/// operation has already succeeded by the time we're here, and refusing to
+/// return success because we couldn't write a log line would be the wrong
+/// tradeoff.
+pub fn record(event: AuditEvent) {
     // Emit a live pulse for the viewer's graph, independent of whether the
     // audit FILE is enabled — the visual feed should pulse even on a system
     // that has audit logging turned off.
@@ -230,51 +296,48 @@ pub fn record(mut event: AuditEvent) {
     let Some(path) = current_path() else {
         return; // disabled
     };
-
-    // Single-writer through the global mutex; `LAST_HASH` is only touched here,
-    // so the same lock serializes the chain-tip update. Open-append-write-close
-    // per event keeps state simple and OS-level append-mode handles concurrent
-    // process safety if it ever matters.
     let _guard = match AUDIT_LOCK.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(), // poisoned mutex: still write, audit is best-effort
     };
-    let mut last = LAST_HASH.lock().unwrap_or_else(|p| p.into_inner());
-    if !LAST_HASH_SEEDED.swap(true, Ordering::SeqCst) {
-        *last = seed_last_hash(path);
+    if let Err(e) = append_event(path, event) {
+        tracing::warn!("audit: failed to record event: {e:#}");
     }
-    // Chain this entry to the previous line (tamper-evidence, v2.4).
-    event.prev_hash = last.clone();
-
-    let line = match serde_json::to_string(&event) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("audit: failed to serialize event: {e}");
-            return; // chain tip unchanged — nothing was written
-        }
-    };
-    let mut file = match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!("audit: failed to open {}: {e}", path.display());
-            return;
-        }
-    };
-    if let Err(e) = writeln!(file, "{line}") {
-        tracing::warn!("audit: failed to write line: {e}");
-        return; // do NOT advance the chain tip on a failed write
-    }
-    *last = Some(hash_line(&line));
 }
 
 /// Result of `audit verify`: hash-chain integrity over the log file.
+///
+/// A log can carry more than one kind of gap, and this struct keeps them
+/// distinct rather than collapsing to a single pass/fail bit:
+/// - lines before the chain existed at all (no `prev_hash` field, not counted
+///   in `breaks` — there is nothing to check);
+/// - a genuine break, where `prev_hash` is present but does not match the hash
+///   of the line before it;
+/// - a break an operator has since acknowledged with `mgimind audit reanchor`,
+///   after confirming the cause (e.g. the pre-v2.7.1 concurrent-writer race).
+///
+/// `verify` only fails on the third category being NON-empty of the first —
+/// i.e. on `unacknowledged`.
 #[derive(Debug)]
 pub struct AuditVerifyReport {
     /// Total lines in the log.
     pub total: usize,
     /// Lines that carry a `prev_hash` (the chained suffix — legacy lines don't).
+    /// This is NOT "lines verified so far before giving up" — every chained
+    /// line in the whole file is checked, even past a break, so a log can
+    /// report several distinct breaks in one `verify` call.
     pub chained: usize,
-    /// 1-based line number of the first chain break, or None if intact.
+    /// 1-based line numbers of every chain break found, in file order.
+    pub breaks: Vec<usize>,
+    /// Subset of `breaks` covered by at least one `Reanchor` event's
+    /// `ack_breaks` anywhere in the log.
+    pub acknowledged: Vec<usize>,
+    /// `breaks` minus `acknowledged` — what still needs an operator's
+    /// attention. Empty means the chain is either fully intact or every break
+    /// in it has been explained.
+    pub unacknowledged: Vec<usize>,
+    /// First entry of `unacknowledged`, or None. Kept for callers that only
+    /// want a single line number (e.g. the CLI's headline message).
     pub broken_at: Option<usize>,
 }
 
@@ -287,32 +350,103 @@ pub fn verify() -> Result<AuditVerifyReport> {
 /// Verify a specific audit file's chain (pure over the file; used by tests).
 /// Every entry that carries `prev_hash` must equal the BLAKE3 of the previous
 /// line's exact bytes; entries without it (the legacy prefix) are counted but
-/// not checked. Reports the 1-based line number of the first break.
+/// not checked. Scans the WHOLE file rather than stopping at the first break,
+/// so a log with several distinct breaks reports all of them, and collects
+/// every `Reanchor` event's `ack_breaks` to tell an explained break apart from
+/// an unexplained one.
 pub fn verify_path(path: &Path) -> Result<AuditVerifyReport> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
     let mut chained = 0;
+    let mut breaks = Vec::new();
+    let mut acknowledged_set = std::collections::BTreeSet::new();
+
+    // Line 0 can't be checked against a predecessor, but it can still be a
+    // Reanchor event (a fresh log re-anchored before anything else was ever
+    // written to it is a degenerate but valid case), so parse it for ack_breaks.
+    if let Some(acked) = lines
+        .first()
+        .and_then(|l| serde_json::from_str::<AuditEvent>(l).ok())
+        .and_then(|ev0| ev0.ack_breaks)
+    {
+        acknowledged_set.extend(acked);
+    }
+
     for i in 1..lines.len() {
         let ev: AuditEvent = match serde_json::from_str(lines[i]) {
             Ok(e) => e,
             Err(_) => continue, // unparseable line — can't check its own link
         };
+        if let Some(acked) = ev.ack_breaks {
+            acknowledged_set.extend(acked);
+        }
         if let Some(ph) = ev.prev_hash.as_deref() {
             chained += 1;
             if ph != hash_line(lines[i - 1]) {
-                return Ok(AuditVerifyReport {
-                    total: lines.len(),
-                    chained,
-                    broken_at: Some(i + 1),
-                });
+                breaks.push(i + 1); // 1-based line number of the offending line
             }
         }
     }
+
+    let unacknowledged: Vec<usize> = breaks
+        .iter()
+        .copied()
+        .filter(|b| !acknowledged_set.contains(b))
+        .collect();
+    let broken_at = unacknowledged.first().copied();
+    let acknowledged: Vec<usize> = breaks
+        .iter()
+        .copied()
+        .filter(|b| acknowledged_set.contains(b))
+        .collect();
+
     Ok(AuditVerifyReport {
         total: lines.len(),
         chained,
-        broken_at: None,
+        breaks,
+        acknowledged,
+        unacknowledged,
+        broken_at,
     })
+}
+
+/// Acknowledge every currently-unacknowledged chain break in `path` by
+/// appending a `Reanchor` event. Does not touch the broken line or anything
+/// before it: history is never rewritten. The new event chains normally from
+/// the current tip and carries the acknowledged break line numbers, so
+/// `verify()` stops flagging them from here on while everything from this
+/// event forward is held to full tamper-evidence same as always.
+///
+/// Refuses when there is nothing unacknowledged, so it can't be run as a
+/// reflex — reanchoring is a deliberate record that a specific, investigated
+/// gap is explained, not a routine step. Pure over a path so tests can drive
+/// it directly; `reanchor` is the thin wrapper over the configured log.
+pub fn reanchor_path(
+    path: &Path,
+    reason: impl Into<String>,
+    actor: impl Into<String>,
+) -> Result<AuditEvent> {
+    let report = verify_path(path)?;
+    if report.unacknowledged.is_empty() {
+        anyhow::bail!("audit chain has no unacknowledged break; nothing to reanchor");
+    }
+    let mut event = AuditEvent::new(AuditOp::Reanchor, "", "audit-chain")
+        .actor(actor)
+        .note(reason.into());
+    event.ack_breaks = Some(report.unacknowledged.clone());
+    append_event(path, event.clone())?;
+    Ok(event)
+}
+
+/// Acknowledge every currently-unacknowledged break in the configured audit
+/// log — `mgimind audit reanchor --reason ...`. See `reanchor_path`.
+pub fn reanchor(reason: impl Into<String>, actor: impl Into<String>) -> Result<AuditEvent> {
+    let path = current_path().ok_or_else(|| anyhow::anyhow!("audit logging is disabled"))?;
+    let _guard = match AUDIT_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    reanchor_path(path, reason, actor)
 }
 
 /// Map an audit event to a live graph pulse. Writes (Add/FactAdd/...) are
@@ -349,6 +483,7 @@ fn emit_pulse(event: &AuditEvent) {
         | AuditOp::Archive
         | AuditOp::Restore
         | AuditOp::Relibrary
+        | AuditOp::Reanchor
         | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)
@@ -581,5 +716,138 @@ mod tests {
         assert!(!json.contains("\"after\""));
         assert!(!json.contains("\"before\""));
         assert!(json.contains("secret-skipped"));
+    }
+
+    /// Two concurrent "processes" (here: threads, each with its own open file
+    /// handle and NO shared in-memory state, mirroring separate OS processes)
+    /// append through `append_event` at once. Before the cross-process lock
+    /// this raced exactly like the production break: both read the same stale
+    /// tail, both wrote a `prev_hash` pointing at it, and the loser's line
+    /// broke the chain. With the lock, every append reads the tail fresh under
+    /// mutual exclusion, so the result is a strictly valid chain regardless of
+    /// interleaving.
+    #[test]
+    fn append_event_is_cross_process_safe_under_concurrency() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        std::fs::write(&path, "").unwrap();
+
+        let mut handles = Vec::new();
+        for n in 0..8 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..10 {
+                    let ev = AuditEvent::new(AuditOp::Add, "lib", format!("t{n}-{i}"));
+                    append_event(&path, ev).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let report = verify_path(&path).unwrap();
+        assert_eq!(report.total, 80, "all 80 concurrent appends landed");
+        assert!(
+            report.breaks.is_empty(),
+            "no break under concurrent writers once the tip is always read fresh under \
+             the lock, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_every_break_not_just_the_first() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+
+        // Three independent chains concatenated, as a migration/log-merge
+        // would produce: each internally consistent, but line 2 and line 4
+        // (1-based) don't chain to what precedes them.
+        let a0 = AuditEvent::new(AuditOp::Add, "lib", "a0");
+        let l_a0 = serde_json::to_string(&a0).unwrap();
+        let b0 = AuditEvent::new(AuditOp::Add, "lib", "b0"); // prev_hash: None — a fresh segment
+        let l_b0 = serde_json::to_string(&b0).unwrap();
+        let mut b1 = AuditEvent::new(AuditOp::Add, "lib", "b1");
+        b1.prev_hash = Some(hash_line("something that was never actually written"));
+        let l_b1 = serde_json::to_string(&b1).unwrap();
+        std::fs::write(&path, format!("{l_a0}\n{l_b0}\n{l_b1}\n")).unwrap();
+
+        let report = verify_path(&path).unwrap();
+        // l_b0 carries no prev_hash (not "chained"), so only l_b1 is a checked,
+        // broken link in this file.
+        assert_eq!(report.breaks, vec![3]);
+        assert_eq!(report.unacknowledged, vec![3]);
+        assert_eq!(report.broken_at, Some(3));
+    }
+
+    #[test]
+    fn reanchor_acknowledges_the_break_and_verify_then_passes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+
+        // A two-line log with a broken second line (simulates the production
+        // break: `prev_hash` present but pointing at the wrong predecessor).
+        let e0 = AuditEvent::new(AuditOp::Add, "lib", "a");
+        let l0 = serde_json::to_string(&e0).unwrap();
+        let mut e1 = AuditEvent::new(AuditOp::Add, "lib", "b");
+        e1.prev_hash = Some(hash_line("not the real previous line"));
+        let l1 = serde_json::to_string(&e1).unwrap();
+        std::fs::write(&path, format!("{l0}\n{l1}\n")).unwrap();
+
+        let before = verify_path(&path).unwrap();
+        assert_eq!(before.unacknowledged, vec![2]);
+
+        let reanchor_event =
+            reanchor_path(&path, "root cause: migration concatenated two logs", "test")
+                .expect("reanchor must succeed when there is an unacknowledged break");
+        assert_eq!(reanchor_event.op, AuditOp::Reanchor);
+        assert_eq!(reanchor_event.ack_breaks, Some(vec![2]));
+
+        let after = verify_path(&path).unwrap();
+        assert!(
+            after.unacknowledged.is_empty(),
+            "the acknowledged break must no longer be reported, got {after:?}"
+        );
+        assert_eq!(after.breaks, vec![2], "the raw break is still on record");
+        assert_eq!(after.acknowledged, vec![2]);
+
+        // Re-running with nothing left unacknowledged is refused, not a silent
+        // no-op — reanchor is a deliberate action, never a reflex.
+        let again = reanchor_path(&path, "second attempt", "test");
+        assert!(again.is_err());
+    }
+
+    #[test]
+    fn reanchor_event_itself_chains_and_appends_without_rewriting_history() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let e0 = AuditEvent::new(AuditOp::Add, "lib", "a");
+        let l0 = serde_json::to_string(&e0).unwrap();
+        let mut e1 = AuditEvent::new(AuditOp::Add, "lib", "b");
+        e1.prev_hash = Some(hash_line("wrong"));
+        let l1 = serde_json::to_string(&e1).unwrap();
+        std::fs::write(&path, format!("{l0}\n{l1}\n")).unwrap();
+
+        reanchor_path(&path, "explained break", "test").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "reanchor only APPENDS, never removes a line"
+        );
+        assert_eq!(lines[0], l0, "original first line untouched");
+        assert_eq!(
+            lines[1], l1,
+            "the broken line itself is left exactly as it was"
+        );
+
+        // The new third line chains correctly to the (still broken) second
+        // line — the new segment starting here is fully verifiable going
+        // forward even though it follows a historical gap.
+        let ev2: AuditEvent = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(ev2.op, AuditOp::Reanchor);
+        assert_eq!(ev2.prev_hash.as_deref(), Some(hash_line(lines[1]).as_str()));
     }
 }

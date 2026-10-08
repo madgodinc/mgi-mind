@@ -463,7 +463,9 @@ pub enum Commands {
         archive_cold: bool,
     },
     /// Inspect the audit log of mutations (add/update/delete/library/etc).
-    /// Read-only: the log itself is append-only and never edited by hand.
+    /// Every existing line is append-only and never edited or removed by any
+    /// subcommand here, including `reanchor` — that one appends an
+    /// acknowledgment event, it does not touch history.
     Audit {
         #[command(subcommand)]
         action: AuditAction,
@@ -738,10 +740,25 @@ pub enum AuditAction {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
-    /// Verify the audit log's tamper-evidence hash-chain and report the first
-    /// break (if any). Exits non-zero on a break. Legacy lines written before
-    /// the chain existed are counted but not checked.
+    /// Verify the audit log's tamper-evidence hash-chain and report every
+    /// break found. Exits non-zero only when a break is UNACKNOWLEDGED — one
+    /// closed by `mgimind audit reanchor` no longer fails the gate. Legacy
+    /// lines written before the chain existed are counted but not checked.
     Verify,
+    /// Acknowledge every currently-unacknowledged chain break and move on.
+    /// Appends a new, normally-chained event recording which break line(s) are
+    /// now explained — it does NOT edit or remove the broken line, so the
+    /// historical gap stays on the record, just no longer flagged as fresh
+    /// tampering. Use only after investigating the break's actual cause (see
+    /// `mgimind audit verify` and `mgimind audit show <id>` around it); fails
+    /// if there is nothing unacknowledged.
+    Reanchor {
+        /// Why the break is believed explained, e.g. "pre-2.7.1 concurrent
+        /// writers without a cross-process lock, fixed in this release".
+        /// Stored verbatim in the event's `note`.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1212,6 +1229,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cmd_audit_writes(since_hours, limit).await
             }
             AuditAction::Verify => cmd_audit_verify().await,
+            AuditAction::Reanchor { reason } => cmd_audit_reanchor(reason).await,
         },
         Commands::Viewer {
             no_open,
@@ -1430,23 +1448,69 @@ async fn cmd_audit_list(
 
 async fn cmd_audit_verify() -> Result<()> {
     let report = crate::audit::verify()?;
-    match report.broken_at {
-        None => {
-            println!(
-                "audit chain intact: {} line(s), {} chained (any earlier legacy lines unverified).",
-                report.total, report.chained
-            );
-            Ok(())
-        }
-        Some(n) => {
-            println!(
-                "AUDIT CHAIN BROKEN at line {n} of {} ({} chained): the log was altered at or \
-                 before this line.",
-                report.total, report.chained
-            );
-            anyhow::bail!("audit chain verification failed at line {n}")
-        }
+    // `chained` counts lines that carry a `prev_hash` field at all — i.e. ones
+    // written by a binary new enough to chain. Lines from before the chain
+    // existed (or written by a process that never set it) have none and are
+    // not part of this count; they are not "unverified", there is simply
+    // nothing on them to check.
+    if report.unacknowledged.is_empty() && report.breaks.is_empty() {
+        println!(
+            "audit chain intact: {} line(s), {} carry a hash link to the line before them \
+             (the rest predate the tamper-evidence chain or were written without it).",
+            report.total, report.chained
+        );
+        return Ok(());
     }
+    if report.unacknowledged.is_empty() {
+        println!(
+            "audit chain OK: {} line(s), {} chained. {} historical break(s) at line(s) {:?} \
+             were acknowledged via `mgimind audit reanchor` and no longer fail verification.",
+            report.total,
+            report.chained,
+            report.acknowledged.len(),
+            report.acknowledged
+        );
+        return Ok(());
+    }
+    let n = report.broken_at.expect("unacknowledged is non-empty");
+    println!(
+        "AUDIT CHAIN BROKEN at line {n} of {} ({} chained): a line's prev_hash does not match \
+         the BLAKE3 of the line before it — either tampering, or a known-explainable gap not \
+         yet acknowledged.",
+        report.total, report.chained
+    );
+    if report.unacknowledged.len() > 1 {
+        println!(
+            "  {} unacknowledged break(s) total, at line(s): {:?}",
+            report.unacknowledged.len(),
+            report.unacknowledged
+        );
+    }
+    if !report.acknowledged.is_empty() {
+        println!(
+            "  ({} other break(s) already acknowledged, at line(s): {:?})",
+            report.acknowledged.len(),
+            report.acknowledged
+        );
+    }
+    println!(
+        "  Investigate before acknowledging (`mgimind audit show <id>` around this line, check \
+         for concurrent writers / a log merge / CRLF). Once the cause is understood, close it \
+         with: mgimind audit reanchor --reason \"<what you found>\""
+    );
+    anyhow::bail!("audit chain verification failed at line {n}")
+}
+
+async fn cmd_audit_reanchor(reason: String) -> Result<()> {
+    let event = crate::audit::reanchor(reason, "cli")?;
+    let breaks = event.ack_breaks.clone().unwrap_or_default();
+    println!(
+        "Acknowledged {} break(s) at line(s) {breaks:?}. Appended a new, normally-chained audit \
+         event recording this; the broken line itself was left untouched.",
+        breaks.len()
+    );
+    println!("`mgimind audit verify` will now pass for these break(s).");
+    Ok(())
 }
 
 async fn cmd_audit_show(id: &str) -> Result<()> {
@@ -1566,6 +1630,9 @@ fn print_audit_event(ev: &crate::audit::AuditEvent) {
     }
     if let Some(note) = &ev.note {
         println!("  note:   {note}");
+    }
+    if let Some(breaks) = &ev.ack_breaks {
+        println!("  acknowledges break(s) at line(s): {breaks:?}");
     }
 }
 

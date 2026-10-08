@@ -229,8 +229,21 @@ pub fn is_initialized() -> bool {
 /// actually serializes every test that touches this var, regardless of which
 /// module it lives in. Every test that calls
 /// `std::env::set_var("MGIMIND_HOME", ...)` must hold this for its whole body.
+///
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: some of these tests are
+/// `#[tokio::test]` and hold the guard across an `.await` (backup/restore in
+/// `storage.rs`). A std mutex guard held across an await point doesn't just
+/// get flagged by clippy — before this was unified, `storage.rs` worked
+/// around it by keeping a SEPARATE lock for its own three backup tests, which
+/// serialized them against each other but not against `access.rs` /
+/// `relibrary.rs` tests setting the SAME env var — the actual cause of those
+/// tests being flaky under `cargo test`'s default parallelism. One lock,
+/// shared by every test that touches `MGIMIND_HOME`, closes that gap. Sync
+/// tests (`#[test]`) take it with `.blocking_lock()`; async tests
+/// (`#[tokio::test]`) take it with `.lock().await`.
 #[cfg(test)]
-pub(crate) static MGIMIND_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static MGIMIND_HOME_TEST_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(test)]
 mod tests {

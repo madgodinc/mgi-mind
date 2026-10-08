@@ -1408,7 +1408,7 @@ fn tool_definitions() -> Vec<Value> {
                         "items": { "type": "object" }
                     },
                     "raw": { "type": "string", "description": "Raw text for heuristic extraction (used only when candidates is omitted)" },
-                    "library": { "type": "string", "default": "projects", "description": "Target library for memory candidates" }
+                    "library": { "type": "string", "default": "projects", "description": "Target library for memory candidates. Pass the library of the PROJECT this content is about (e.g. its project name) — most mgi-mind instances split memory by project, and 'projects' is the catch-all for cross-project or unclassified notes, not a safe generic choice. The default exists so the call doesn't fail when omitted, not as a recommendation; look up the right library (mind_context or mind_search) before relying on it." }
                 }
             }
         }),

@@ -599,9 +599,7 @@ mod tests {
         // MGIMIND_HOME_TEST_LOCK serializes every test in the crate that
         // overrides this process-global env var — see its doc comment in
         // config.rs. Required here since `cargo test` runs threads in parallel.
-        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
         std::fs::write(
@@ -619,9 +617,7 @@ mod tests {
 
     #[test]
     fn kv_scan_is_empty_when_file_is_absent() {
-        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
         let ids = ["whatever".to_string()];

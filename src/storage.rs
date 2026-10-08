@@ -507,7 +507,33 @@ fn registered_libraries() -> Vec<String> {
         .unwrap_or_else(|_| load_libraries_from_disk())
 }
 
+/// Overwrite the in-process cache with whatever is on disk right now. Used by
+/// `is_registered` on a cache miss: a library created by a DIFFERENT process
+/// (the CLI, another MCP session, `mgimind relibrary`) never reaches a
+/// long-running process's cache otherwise — it was seeded once, at first
+/// access, and nothing here was invalidating it. Symptom before this fix: a
+/// library created hours into an MCP server's lifetime was invisible to it
+/// until restart, with `mind_add` reporting "Library not found" for a library
+/// that plainly existed.
+fn refresh_lib_cache_from_disk() {
+    let fresh = load_libraries_from_disk();
+    if let Ok(mut cache) = lib_cache().lock() {
+        *cache = fresh;
+    }
+}
+
 pub(crate) fn is_registered(name: &str) -> bool {
+    let hit = lib_cache()
+        .lock()
+        .map(|g| g.iter().any(|l| l == name))
+        .unwrap_or(false);
+    if hit {
+        return true;
+    }
+    // Miss: reload from disk once before concluding the library doesn't
+    // exist, in case another process registered it after we cached. The
+    // common case (library already known) never pays this extra read.
+    refresh_lib_cache_from_disk();
     lib_cache()
         .lock()
         .map(|g| g.iter().any(|l| l == name))
@@ -5188,6 +5214,46 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn is_registered_reloads_the_registry_on_a_miss() {
+        // Reproduces the production bug: a long-running process's LIB_CACHE
+        // (a process-wide `OnceCell`, seeded once from whatever
+        // `MGIMIND_HOME` pointed at on first touch) never saw a library
+        // registered by a DIFFERENT process afterward — `mind_add` reported
+        // "Library not found" for a library that plainly existed on disk.
+        // This test can't control when LIB_CACHE was first seeded (some
+        // earlier test in this binary may have already touched it), but that
+        // is exactly the point: `is_registered` must still find a library
+        // that is on disk right now under the CURRENT `MGIMIND_HOME`, even if
+        // its name was never seen before by this process.
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
+
+        let lib = format!("smoke-lib-{}", uuid::Uuid::new_v4().simple());
+        assert!(
+            !is_registered(&lib),
+            "a library that was never registered must read as absent"
+        );
+
+        // Simulate "a different process registered it": write libraries.json
+        // directly, bypassing this process's `register_library` (which would
+        // also update its own cache and defeat the point of this test).
+        std::fs::write(
+            libraries_path(),
+            serde_json::to_string(&vec![&lib]).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            is_registered(&lib),
+            "is_registered must reload the registry from disk on a miss \
+             instead of trusting a cache that never saw this write"
+        );
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+    }
+
     #[test]
     fn deterministic_id_is_stable_and_content_addressed() {
         let a = deterministic_id("lib", "hello world");
@@ -5480,15 +5546,16 @@ mod tests {
     }
 
     // The three backup/restore tests below all set/clear the process-wide
-    // MGIMIND_HOME env var, so they cannot run concurrently with each other -
-    // same hazard as `doubt.rs`'s SERIAL_LOOP_TEST, but these tests hold the
-    // guard across an `.await`, so a `tokio::sync::Mutex` instead of a std one.
-    static SERIAL_BACKUP_TEST: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
-        once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+    // MGIMIND_HOME env var, so they cannot run concurrently with each other OR
+    // with any other test in the crate that overrides it (access.rs,
+    // relibrary.rs) — hence the single shared `MGIMIND_HOME_TEST_LOCK` rather
+    // than a lock local to this file. See its doc comment in config.rs: a
+    // separate per-file lock here is exactly what let these three race against
+    // access.rs/relibrary.rs tests under `cargo test`'s default parallelism.
 
     #[tokio::test]
     async fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
-        let _serial = SERIAL_BACKUP_TEST.lock().await;
+        let _serial = crate::config::MGIMIND_HOME_TEST_LOCK.lock().await;
         // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
         let base =
             std::env::temp_dir().join(format!("mgimind-bk-test-{}", uuid::Uuid::new_v4().simple()));
@@ -5539,7 +5606,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_backup_excludes_models_and_round_trips_everything_else() {
-        let _serial = SERIAL_BACKUP_TEST.lock().await;
+        let _serial = crate::config::MGIMIND_HOME_TEST_LOCK.lock().await;
         let base = std::env::temp_dir().join(format!(
             "mgimind-bk-plain-{}",
             uuid::Uuid::new_v4().simple()
@@ -5581,7 +5648,7 @@ mod tests {
         // `qdrant-snapshots/` entries, just ordinary paths. `restore` must
         // still extract one correctly - the whole point of keeping
         // `restore_archive`'s "no snapshot paths -> nothing to upload" branch.
-        let _serial = SERIAL_BACKUP_TEST.lock().await;
+        let _serial = crate::config::MGIMIND_HOME_TEST_LOCK.lock().await;
         let base = std::env::temp_dir().join(format!(
             "mgimind-bk-oldfmt-{}",
             uuid::Uuid::new_v4().simple()

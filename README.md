@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v2.7.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.7.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Latest release: v2.7.1](https://github.com/madgodinc/mgi-mind/releases/tag/v2.7.1)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
@@ -274,7 +274,7 @@ a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`: install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.7.0 curl ... | sh`: pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v2.7.1 curl ... | sh`: pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh`: just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -656,7 +656,7 @@ trust.
 
 ## Status and audit
 
-Current version: **2.7.0** (semver-stable since v1.0.0). The 0.x line built
+Current version: **2.7.1** (semver-stable since v1.0.0). The 0.x line built
 the foundation: the audit log and ephemeral viewer (0.10), the quarantine
 layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
 session liveness (0.13), and procedural memory (0.14, benchmarked on

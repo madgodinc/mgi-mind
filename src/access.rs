@@ -183,9 +183,7 @@ mod tests {
 
     #[test]
     fn flush_then_load_roundtrips_counts() {
-        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
 
@@ -214,9 +212,7 @@ mod tests {
 
     #[test]
     fn rekey_merges_into_an_existing_entry_by_max_count_latest_access() {
-        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::MGIMIND_HOME_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MGIMIND_HOME", dir.path()) };
 

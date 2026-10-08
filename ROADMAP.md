@@ -162,6 +162,22 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it. This is a breaking change that also disrupts existing local tooling, so
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
+- **✅ Shipped: v2.7.1 (2026-10-08), a cross-process audit lock and a stale MCP
+  library cache.** `audit verify` found a pre-existing break in production: the
+  hash-chain tip was cached per-process, so concurrent writers (a long-running
+  MCP server, `serve-http`, one-shot CLI calls) each wrote `prev_hash` against
+  their own stale view of the tip. `audit::record` now takes a cross-process
+  advisory lock and re-reads the real tail fresh on every write; `audit
+  verify` reports every break in the log instead of stopping at the first, and
+  `mgimind audit reanchor --reason ...` acknowledges a known, investigated
+  break without rewriting history, after which `verify` passes. Separately: a
+  long-running MCP server's library cache never saw a library created by a
+  different process (`mind_add` reporting "Library not found" for a library
+  that existed) — `is_registered` now reloads the registry from disk once on a
+  cache miss. `mind_ingest`'s `library` argument description now says to pass
+  the project's own library instead of leaning on the `"projects"` default.
+  Three flaky `storage.rs` backup tests (an `MGIMIND_HOME` lock separate from
+  `access.rs`/`relibrary.rs`'s) now share one lock.
 - **✅ Shipped: v2.7.0 (2026-10-08), `mgimind relibrary` — move memories between
   libraries.** Point ids are content-addressed (`uuid5(library + content)`),
   so there was no supported way to move a memory to a different library short
