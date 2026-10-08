@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v2.5.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.5.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Latest release: v2.6.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.6.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Local long-term memory for AI assistants. One Rust binary, a local Qdrant
 vector database, local ONNX models. Speaks MCP, so Claude Code and other
@@ -274,7 +274,7 @@ a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`: install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.5.0 curl ... | sh`: pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v2.6.0 curl ... | sh`: pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh`: just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -529,7 +529,7 @@ applies.
 | `mgimind mcp` | Run as the MCP server over stdio (what your assistant connects to). One warm process; starts Qdrant automatically. |
 | `mgimind serve` / `mgimind stop` | Start / stop the bundled Qdrant by hand (rarely needed, `mcp` does it for you). |
 | `mgimind migrate [--purge]` | Re-embed legacy per-library collections into the single `memories` collection. Idempotent. `--purge` deletes the old collections afterward. |
-| `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar of the whole data directory. |
+| `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar of the data directory. When Qdrant answers, each collection is captured through its own snapshot API instead of a raw copy of `qdrant/storage`, so a concurrent write can't corrupt the backup; `models/` is always excluded (re-downloadable via `doctor --fix`). `--encrypt` wraps the same archive in AES-256-GCM. |
 | `mgimind export [--format json\|md] [--output <dir>]` | Export memories to files. `md` rejoins the fragments of a chunked document back into one block, in order. |
 | `mgimind import <obsidian\|markdown> <path> [--library <l>]` | Import a folder of markdown (recursively, chunked). |
 | `mgimind doctor [--fix]` | Health check; `--fix` downloads anything missing. |
@@ -549,6 +549,7 @@ Config lives at `~/mgimind/config.json`. Fields that affect retrieval:
 | `rerank_model` | `bge-reranker-base` | Reranker directory under `models/`. |
 | `rerank_top_k` | `20` | How many candidates to fetch and rerank before returning `limit`. |
 | `qdrant_port` | `6334` | Qdrant gRPC port. |
+| `qdrant_http_port` | none | Qdrant's REST port, for `backup`/`restore` snapshots and the `doctor` report. Derived as `qdrant_port - 1` (Qdrant's own default pairing) when unset; set this only if your server doesn't follow that pairing. |
 | `qdrant_api_key` | none | If set, Qdrant starts with it and the client authenticates. |
 
 ## Languages and the reranker
@@ -637,7 +638,7 @@ Every socket mgi-mind opens is bound to loopback:
 
 | Component | Port | Bind |
 |---|---|---|
-| Qdrant HTTP | 6333 | `127.0.0.1` |
+| Qdrant HTTP | `qdrant_http_port`, derived as `qdrant_port - 1` by default | `127.0.0.1` |
 | Qdrant gRPC | `qdrant_port`, 6334 by default | `127.0.0.1` |
 | `mind_visualize` | 4173 | `127.0.0.1` |
 | `mgimind viewer` | random, printed at startup | `127.0.0.1` |
@@ -654,7 +655,7 @@ trust.
 
 ## Status and audit
 
-Current version: **2.5.0** (semver-stable since v1.0.0). The 0.x line built
+Current version: **2.6.0** (semver-stable since v1.0.0). The 0.x line built
 the foundation: the audit log and ephemeral viewer (0.10), the quarantine
 layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
 session liveness (0.13), and procedural memory (0.14, benchmarked on

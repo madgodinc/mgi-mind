@@ -4509,29 +4509,240 @@ pub async fn reindex(config: &MindConfig, backup_dir: &std::path::Path) -> Resul
     })
 }
 
-/// Native gzip+tar backup of the data dir - no `tar` shellout (audit #19).
-pub fn backup(output: &str) -> Result<()> {
+// ===== Backup / restore =====
+//
+// A plain `tar` of the whole data dir (the pre-2.6 shape) has two problems:
+// it includes `models/`, which is just re-downloadable weights
+// (`mgimind doctor --fix` rebuilds it) and dominates the archive for zero
+// recovery value, and it copies `qdrant/storage` as raw files while Qdrant
+// may still be writing to them - a copy taken mid-write is not a point in
+// time, it is whatever happened to be on disk, which can fail to load at
+// all. Qdrant's own snapshot API exists for exactly this: ask it for a
+// consistent point-in-time copy of a collection instead of reading its files
+// out from under it.
+//
+// So: when the configured Qdrant answers, each collection is snapshotted
+// (create -> download -> delete the remote copy, keeping only our download)
+// and `qdrant/` is left out of the raw walk; when it does not answer, there
+// is nothing to race (nothing is writing), so the raw directory is archived
+// exactly as before this fix. `models/` is excluded either way.
+const SNAPSHOT_ARCHIVE_DIR: &str = "qdrant-snapshots";
+
+/// Should this top-level entry of `mind_home` go into the archive? `models/`
+/// never does; `qdrant/` does only when there was no consistent snapshot to
+/// stand in for it. Pure, so the exclusion rule is unit-tested without
+/// touching a filesystem or a network.
+fn archive_entry_included(name: &str, qdrant_snapshotted: bool) -> bool {
+    !(name == "models" || (name == "qdrant" && qdrant_snapshotted))
+}
+
+/// The collection name a downloaded snapshot's archive path belongs to, or
+/// `None` for anything outside `qdrant-snapshots/` - i.e. an ordinary data-dir
+/// file, restored by plain extraction instead of an upload to Qdrant. Pure
+/// inverse of the path `snapshot_collections_to` writes into the archive.
+fn snapshot_collection_name(archive_path: &std::path::Path) -> Option<&str> {
+    archive_path
+        .strip_prefix(SNAPSHOT_ARCHIVE_DIR)
+        .ok()?
+        .to_str()?
+        .strip_suffix(".snapshot")
+}
+
+/// Ask Qdrant to snapshot every collection, download each one into `dest_dir`
+/// as `<collection>.snapshot`, then delete the remote copy - the downloaded
+/// file is the only copy meant to outlive this call. Returns the collection
+/// names snapshotted (possibly empty, on a fresh store). An error here
+/// (including "nothing answers on this port") is the caller's signal to fall
+/// back to a raw directory copy; it is not surfaced as a backup failure.
+async fn snapshot_collections_to(
+    config: &MindConfig,
+    dest_dir: &std::path::Path,
+) -> Result<Vec<String>> {
+    let client = get_client(config).await?;
+    let collections = client
+        .list_collections()
+        .await
+        .context("listing Qdrant collections")?;
+    let rest_api_uri = format!("http://127.0.0.1:{}", config.resolved_qdrant_http_port());
+
+    let mut names = Vec::with_capacity(collections.collections.len());
+    for col in &collections.collections {
+        let created = client
+            .create_snapshot(col.name.as_str())
+            .await
+            .with_context(|| format!("creating a snapshot of '{}'", col.name))?;
+        let Some(desc) = created.snapshot_description else {
+            anyhow::bail!("Qdrant returned no snapshot description for '{}'", col.name);
+        };
+
+        let out_path = dest_dir.join(format!("{}.snapshot", col.name));
+        client
+            .download_snapshot(
+                qdrant_client::qdrant::SnapshotDownloadBuilder::new(
+                    out_path.clone(),
+                    col.name.as_str(),
+                )
+                .snapshot_name(desc.name.clone())
+                .rest_api_uri(rest_api_uri.clone()),
+            )
+            .await
+            .with_context(|| format!("downloading the snapshot of '{}'", col.name))?;
+
+        // Best-effort: an orphaned remote snapshot wastes Qdrant's disk but
+        // corrupts nothing, and the file we just downloaded is what the
+        // backup actually depends on - a delete failure should not fail it.
+        if let Err(e) = client
+            .delete_snapshot(qdrant_client::qdrant::DeleteSnapshotRequestBuilder::new(
+                col.name.as_str(),
+                desc.name.as_str(),
+            ))
+            .await
+        {
+            eprintln!(
+                "  [warn] could not delete the remote snapshot '{}' of '{}': {e}",
+                desc.name, col.name
+            );
+        }
+        names.push(col.name.clone());
+    }
+    Ok(names)
+}
+
+/// Write the gzip+tar archive for this store to `writer`: the snapshots (if
+/// Qdrant answers) plus every other file under `mind_home`, minus `models/`
+/// and (when snapshotted) `qdrant/`. Shared by the plain and encrypted backup
+/// paths so they build the exact same archive shape.
+async fn write_archive<W: std::io::Write>(config: &MindConfig, writer: W) -> Result<()> {
     let home = crate::config::mind_home();
-    let file = std::fs::File::create(output)
-        .with_context(|| format!("Failed to create backup file {output}"))?;
-    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let enc = flate2::write::GzEncoder::new(writer, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
-    tar.append_dir_all(".", &home)
-        .context("Failed to archive data directory")?;
+
+    let snapshot_tmp = tempfile::tempdir().context("creating a temp dir for Qdrant snapshots")?;
+    let snapshotted = snapshot_collections_to(config, snapshot_tmp.path()).await;
+    if let Err(e) = &snapshotted {
+        eprintln!(
+            "  [warn] could not take Qdrant snapshots ({e}) - archiving qdrant/storage directly \
+             instead. That copy is only consistent if nothing was writing to it; stop Qdrant \
+             first if this store is live."
+        );
+    }
+    if let Ok(names) = &snapshotted {
+        for name in names {
+            let path = snapshot_tmp.path().join(format!("{name}.snapshot"));
+            let mut f = std::fs::File::open(&path)
+                .with_context(|| format!("reopening the downloaded snapshot for '{name}'"))?;
+            tar.append_file(format!("{SNAPSHOT_ARCHIVE_DIR}/{name}.snapshot"), &mut f)
+                .with_context(|| format!("archiving the snapshot for '{name}'"))?;
+        }
+    }
+
+    let qdrant_snapshotted = snapshotted.is_ok();
+    for entry in
+        std::fs::read_dir(&home).with_context(|| format!("reading data dir {}", home.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !archive_entry_included(&name, qdrant_snapshotted) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            tar.append_dir_all(name.as_ref(), &path)
+        } else {
+            tar.append_path_with_name(&path, name.as_ref())
+        }
+        .with_context(|| format!("archiving {}", path.display()))?;
+    }
+
     tar.into_inner()?.finish()?;
     Ok(())
 }
 
-/// Native gzip+tar restore - no `tar` shellout (audit #19).
-pub fn restore(input: &str) -> Result<()> {
+/// Extract an archive written by `write_archive` from `reader`, restoring
+/// every snapshot through Qdrant's upload API and extracting everything else
+/// in place under `mind_home`. Also accepts a pre-2.6 archive (a plain tar of
+/// the whole data dir, no `qdrant-snapshots/` entries): every path then takes
+/// the "ordinary file" branch and extracts exactly as it used to.
+async fn restore_archive<R: std::io::Read>(config: &MindConfig, reader: R) -> Result<()> {
     let home = crate::config::mind_home();
     std::fs::create_dir_all(&home)?;
+
+    let snapshot_tmp = tempfile::tempdir().context("creating a temp dir for snapshot restore")?;
+    let mut snapshots: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+    let dec = flate2::read::GzDecoder::new(reader);
+    let mut archive = tar::Archive::new(dec);
+    for entry in archive.entries().context("reading the backup archive")? {
+        let mut entry = entry.context("reading a backup archive entry")?;
+        let path = entry
+            .path()
+            .context("reading an archive entry's path")?
+            .into_owned();
+        match snapshot_collection_name(&path) {
+            Some(collection) => {
+                let out_path = snapshot_tmp.path().join(format!("{collection}.snapshot"));
+                let mut out = std::fs::File::create(&out_path)
+                    .with_context(|| format!("staging the snapshot for '{collection}'"))?;
+                std::io::copy(&mut entry, &mut out)
+                    .with_context(|| format!("extracting the snapshot for '{collection}'"))?;
+                snapshots.push((collection.to_string(), out_path));
+            }
+            None => {
+                entry
+                    .unpack_in(&home)
+                    .with_context(|| format!("extracting {}", path.display()))?;
+            }
+        }
+    }
+
+    if snapshots.is_empty() {
+        // Old-format archive, or a backup taken while Qdrant was unreachable
+        // (raw `qdrant/` dir, just extracted above like any other path) -
+        // either way there is nothing left to recover through the API.
+        return Ok(());
+    }
+
+    let rest_api_uri = format!("http://127.0.0.1:{}", config.resolved_qdrant_http_port());
+    let http = reqwest::Client::new();
+    for (collection, path) in &snapshots {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading the staged snapshot for '{collection}'"))?;
+        let part =
+            reqwest::multipart::Part::bytes(bytes).file_name(format!("{collection}.snapshot"));
+        let form = reqwest::multipart::Form::new().part("snapshot", part);
+        let url =
+            format!("{rest_api_uri}/collections/{collection}/snapshots/upload?priority=snapshot");
+        let resp = http
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .with_context(|| {
+                format!("uploading the snapshot for '{collection}' - is Qdrant running on {rest_api_uri}?")
+            })?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("restoring collection '{collection}' failed: HTTP {status}: {body}");
+        }
+    }
+    Ok(())
+}
+
+/// Back up this store to `output` (gzip+tar). See the module-level comment
+/// above for the consistency rationale.
+pub async fn backup(config: &MindConfig, output: &str) -> Result<()> {
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("Failed to create backup file {output}"))?;
+    write_archive(config, file).await
+}
+
+/// Restore a backup written by `backup` (or an old-format plain tar).
+pub async fn restore(config: &MindConfig, input: &str) -> Result<()> {
     let file = std::fs::File::open(input)
         .with_context(|| format!("Failed to open backup file {input}"))?;
-    let dec = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(dec);
-    archive.unpack(&home).context("Failed to extract backup")?;
-    Ok(())
+    restore_archive(config, file).await
 }
 
 // ===== Encrypted backup (roadmap v1.2 local half) =====
@@ -4546,22 +4757,14 @@ pub fn restore(input: &str) -> Result<()> {
 const BACKUP_MAGIC: &[u8; 7] = b"MGIBK1\0";
 
 /// Write an encrypted backup of the whole data dir to `output`, protected by
-/// `passphrase`. The archive is built in memory, then encrypted; nothing
-/// plaintext touches disk.
-pub fn backup_encrypted(output: &str, passphrase: &str) -> Result<()> {
+/// `passphrase`. The archive is built in memory (same snapshot-or-raw shape
+/// as `backup` - see `write_archive`), then encrypted; nothing plaintext
+/// touches disk.
+pub async fn backup_encrypted(config: &MindConfig, output: &str, passphrase: &str) -> Result<()> {
     use rand::RngCore;
 
-    let home = crate::config::mind_home();
-
-    // gzip+tar the data dir into an in-memory buffer.
     let mut archive: Vec<u8> = Vec::new();
-    {
-        let enc = flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
-        let mut tar = tar::Builder::new(enc);
-        tar.append_dir_all(".", &home)
-            .context("Failed to archive data directory")?;
-        tar.into_inner()?.finish()?;
-    }
+    write_archive(config, &mut archive).await?;
 
     // Fresh per-backup salt → key, then encrypt the archive bytes.
     let mut salt = [0u8; 32];
@@ -4597,7 +4800,7 @@ fn write_ciphertext(path: &std::path::Path, ct: &Ciphertext) -> Result<()> {
 }
 
 /// Restore an encrypted backup written by `backup_encrypted`.
-pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
+pub async fn restore_encrypted(config: &MindConfig, input: &str, passphrase: &str) -> Result<()> {
     let data =
         std::fs::read(input).with_context(|| format!("Failed to read encrypted backup {input}"))?;
     if data.len() < BACKUP_MAGIC.len() + 32 {
@@ -4616,13 +4819,7 @@ pub fn restore_encrypted(input: &str, passphrase: &str) -> Result<()> {
     let archive = crate::vault::decrypt_with_key(blob, &key)
         .context("backup decryption failed: wrong passphrase?")?;
 
-    let home = crate::config::mind_home();
-    std::fs::create_dir_all(&home)?;
-    let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
-    let mut tar = tar::Archive::new(dec);
-    tar.unpack(&home)
-        .context("Failed to extract encrypted backup")?;
-    Ok(())
+    restore_archive(config, std::io::Cursor::new(archive)).await
 }
 
 #[cfg(test)]
@@ -5121,9 +5318,57 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
+    fn archive_entry_included_excludes_models_and_snapshotted_qdrant() {
+        // models/ never goes in - re-downloadable, would dominate the archive.
+        assert!(!archive_entry_included("models", false));
+        assert!(!archive_entry_included("models", true));
+        // qdrant/ goes in raw ONLY when there was no consistent snapshot.
+        assert!(archive_entry_included("qdrant", false));
+        assert!(!archive_entry_included("qdrant", true));
+        // Everything else (sessions, config.json, vault, ...) always goes in.
+        assert!(archive_entry_included("sessions", true));
+        assert!(archive_entry_included("config.json", false));
+    }
+
+    #[test]
+    fn snapshot_collection_name_parses_only_its_own_archive_paths() {
+        assert_eq!(
+            snapshot_collection_name(std::path::Path::new("qdrant-snapshots/memories.snapshot")),
+            Some("memories")
+        );
+        // Anything else is an ordinary data-dir path, extracted in place.
+        assert_eq!(
+            snapshot_collection_name(std::path::Path::new("sessions/foo.md")),
+            None
+        );
+        assert_eq!(
+            snapshot_collection_name(std::path::Path::new("qdrant/storage/wal")),
+            None
+        );
+    }
+
+    /// A config whose gRPC port nothing listens on, so `get_client` calls in
+    /// these tests fail fast (connection refused) instead of hanging on a real
+    /// Qdrant - exercising the "Qdrant unreachable" fallback deliberately,
+    /// same convention `doubt.rs` uses for the same reason.
+    fn unreachable_qdrant_config() -> MindConfig {
+        MindConfig {
+            qdrant_port: 1,
+            ..MindConfig::default()
+        }
+    }
+
+    // The three backup/restore tests below all set/clear the process-wide
+    // MGIMIND_HOME env var, so they cannot run concurrently with each other -
+    // same hazard as `doubt.rs`'s SERIAL_LOOP_TEST, but these tests hold the
+    // guard across an `.await`, so a `tokio::sync::Mutex` instead of a std one.
+    static SERIAL_BACKUP_TEST: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+        once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    #[tokio::test]
+    async fn encrypted_backup_round_trips_and_rejects_wrong_passphrase() {
+        let _serial = SERIAL_BACKUP_TEST.lock().await;
         // Isolate MGIMIND_HOME to a temp dir so backup/restore touch only it.
-        // (Serial-safe: uses a unique dir; env is set/cleared within the test.)
         let base =
             std::env::temp_dir().join(format!("mgimind-bk-test-{}", uuid::Uuid::new_v4().simple()));
         let home = base.join("home");
@@ -5133,11 +5378,14 @@ mod tests {
 
         let bk = base.join("out.enc");
         let bk_s = bk.to_str().unwrap();
+        let config = unreachable_qdrant_config();
 
         // Backup encrypted, then wipe the home, then restore.
         // SAFETY: test-only, single-threaded within this test body.
         unsafe { std::env::set_var("MGIMIND_HOME", &home) };
-        backup_encrypted(bk_s, "correct horse battery staple").unwrap();
+        backup_encrypted(&config, bk_s, "correct horse battery staple")
+            .await
+            .unwrap();
 
         // The blob must not contain the plaintext marker.
         let raw = std::fs::read(&bk).unwrap();
@@ -5151,14 +5399,98 @@ mod tests {
         // Wrong passphrase must fail (AES-GCM auth tag).
         std::fs::remove_dir_all(&home).unwrap();
         assert!(
-            restore_encrypted(bk_s, "wrong passphrase").is_err(),
+            restore_encrypted(&config, bk_s, "wrong passphrase")
+                .await
+                .is_err(),
             "wrong passphrase must not restore"
         );
 
         // Correct passphrase round-trips the marker back.
-        restore_encrypted(bk_s, "correct horse battery staple").unwrap();
+        restore_encrypted(&config, bk_s, "correct horse battery staple")
+            .await
+            .unwrap();
         let restored = std::fs::read(&marker).unwrap();
         assert_eq!(restored, b"crescendo-secret-state");
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn plain_backup_excludes_models_and_round_trips_everything_else() {
+        let _serial = SERIAL_BACKUP_TEST.lock().await;
+        let base = std::env::temp_dir().join(format!(
+            "mgimind-bk-plain-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("models/some-model")).unwrap();
+        std::fs::write(home.join("models/some-model/weights.bin"), b"heavy").unwrap();
+        std::fs::write(home.join("config.json"), b"{}").unwrap();
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::write(home.join("sessions/one.md"), b"session body").unwrap();
+
+        let bk = base.join("out.tar.gz");
+        let bk_s = bk.to_str().unwrap();
+        let config = unreachable_qdrant_config();
+
+        unsafe { std::env::set_var("MGIMIND_HOME", &home) };
+        backup(&config, bk_s).await.unwrap();
+
+        std::fs::remove_dir_all(&home).unwrap();
+        restore(&config, bk_s).await.unwrap();
+
+        assert!(
+            !home.join("models").exists(),
+            "models/ must never come back from a backup"
+        );
+        assert_eq!(
+            std::fs::read(home.join("sessions/one.md")).unwrap(),
+            b"session body"
+        );
+        assert_eq!(std::fs::read(home.join("config.json")).unwrap(), b"{}");
+
+        unsafe { std::env::remove_var("MGIMIND_HOME") };
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn restore_accepts_an_old_format_plain_archive() {
+        // Pre-2.6 archives are a flat tar of the whole data dir: no
+        // `qdrant-snapshots/` entries, just ordinary paths. `restore` must
+        // still extract one correctly - the whole point of keeping
+        // `restore_archive`'s "no snapshot paths -> nothing to upload" branch.
+        let _serial = SERIAL_BACKUP_TEST.lock().await;
+        let base = std::env::temp_dir().join(format!(
+            "mgimind-bk-oldfmt-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let old_archive = base.join("old.tar.gz");
+        std::fs::create_dir_all(&base).unwrap();
+        {
+            let file = std::fs::File::create(&old_archive).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            let mut header = tar::Header::new_gnu();
+            let data = b"pre-2.6 config";
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "config.json", &data[..])
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+
+        let home = base.join("home");
+        let config = unreachable_qdrant_config();
+        unsafe { std::env::set_var("MGIMIND_HOME", &home) };
+        restore(&config, old_archive.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(home.join("config.json")).unwrap(),
+            b"pre-2.6 config"
+        );
 
         unsafe { std::env::remove_var("MGIMIND_HOME") };
         let _ = std::fs::remove_dir_all(&base);

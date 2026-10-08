@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Последний релиз: v2.5.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.5.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Последний релиз: v2.6.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.6.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 Локальная долговременная память для ИИ-ассистентов. Один бинарник на Rust,
 локальная векторная БД Qdrant, локальные ONNX-модели. Говорит по MCP, так
@@ -139,7 +139,7 @@ Qdrant ложатся рядом с самим бинарником `mgimind`, �
 ### Флаги инсталлятора
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`: поставить не в `~/.local/bin`.
-- `MGIMIND_TAG=v2.5.0 curl ... | sh`: закрепить релиз вместо `latest`.
+- `MGIMIND_TAG=v2.6.0 curl ... | sh`: закрепить релиз вместо `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh`: только положить бинарник; `init` + `doctor --fix` потом сам.
 
 ### Ручная установка (без скрипта)
@@ -347,7 +347,7 @@ fsync директории), так что краш оставляет либо 
 | `mgimind mcp` | Запустить как MCP-сервер по stdio (то, к чему подключается ассистент). Один тёплый процесс; стартует Qdrant сам. |
 | `mgimind serve` / `mgimind stop` | Старт/стоп встроенного Qdrant вручную (редко нужно, `mcp` делает это сам). |
 | `mgimind migrate [--purge]` | Переэмбеддить старые библиотечно-разделённые коллекции в единую `memories`. Идемпотентно. `--purge` удаляет старые коллекции после. |
-| `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar всей директории данных. |
+| `mgimind backup <file>` / `mgimind restore <file>` | gzip+tar директории данных. Если Qdrant отвечает, каждая коллекция снимается через его собственный API снапшотов вместо прямого копирования `qdrant/storage` (которое не переживёт параллельную запись); `models/` исключается всегда (их пересоздаёт `doctor --fix`). `--encrypt` оборачивает тот же архив в AES-256-GCM. |
 | `mgimind export [--format json\|md] [--output <dir>]` | Экспортировать памяти в файлы. |
 | `mgimind import <obsidian\|markdown> <path> [--library <l>]` | Импорт папки markdown (рекурсивно, с дроблением). |
 | `mgimind doctor [--fix]` | Health-check; `--fix` качает то, что отсутствует. |
@@ -367,6 +367,7 @@ fsync директории), так что краш оставляет либо 
 | `rerank_model` | `bge-reranker-base` | Директория реранкера под `models/`. |
 | `rerank_top_k` | `20` | Сколько кандидатов брать и реранкать перед возвратом `limit`. |
 | `qdrant_port` | `6334` | gRPC-порт Qdrant. |
+| `qdrant_http_port` | нет | REST-порт Qdrant для снапшотов `backup`/`restore` и отчёта `doctor`. Если не задан, выводится как `qdrant_port - 1` (пара портов по умолчанию у самого Qdrant); задавайте только если ваш сервер этой паре не следует. |
 | `qdrant_api_key` | нет | Если задан, Qdrant стартует с ним и клиент аутентифицируется. |
 
 ## Языки и реранкер
@@ -454,7 +455,7 @@ fsync директории), так что краш оставляет либо 
 
 | Компонент | Порт | Бинд |
 |---|---|---|
-| Qdrant HTTP | 6333 | `127.0.0.1` |
+| Qdrant HTTP | `qdrant_http_port`, по умолчанию выводится как `qdrant_port - 1` | `127.0.0.1` |
 | Qdrant gRPC | `qdrant_port`, по умолчанию 6334 | `127.0.0.1` |
 | `mind_visualize` | 4173 | `127.0.0.1` |
 | `mgimind viewer` | случайный, печатается при старте | `127.0.0.1` |
@@ -471,7 +472,7 @@ mgimind не ставит драйверов, не добавляет сетев
 
 ## Статус и аудит
 
-Текущая версия: **2.5.0** (semver-стабильная с v1.0.0). Поверх
+Текущая версия: **2.6.0** (semver-стабильная с v1.0.0). Поверх
 audit-лога 0.10.x и эфемерного viewer'а, карантина 0.11.x и
 best-effort retrieval, viewer-волны 0.12.x, session liveness 0.13.x и
 procedural-memory дома 0.14.x (LongMemEval baseline + Д6 датасет из

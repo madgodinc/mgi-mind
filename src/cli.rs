@@ -2311,9 +2311,22 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
         }
     }
 
-    // Check Qdrant binary
+    // Check Qdrant binary and whether this store's configured Qdrant answers.
+    // Order matters: a missing bundled binary is only a problem when nothing
+    // is serving requests. A configured external Qdrant (systemd service,
+    // Docker, another host reached over a tunnel) needs no local copy at all,
+    // so that case is an FYI, not a failure.
+    let configured_grpc_port = config::load_cached().map(|c| c.qdrant_port).unwrap_or(6334);
+    let qdrant_reachable = is_qdrant_running();
+
     if is_qdrant_available() {
         let _ = writeln!(out, "[OK]   Qdrant binary");
+    } else if qdrant_reachable {
+        let _ = writeln!(
+            out,
+            "[INFO] Qdrant binary not found, but the configured Qdrant server \
+             at 127.0.0.1:{configured_grpc_port} answers - no local binary needed"
+        );
     } else {
         let _ = writeln!(out, "[FAIL] Qdrant binary not found");
         if fix {
@@ -2339,8 +2352,11 @@ pub(crate) async fn run_doctor(fix: bool) -> Result<String> {
     }
 
     // Check Qdrant running
-    if is_qdrant_running() {
-        let _ = writeln!(out, "[OK]   Qdrant server (running)");
+    if qdrant_reachable {
+        let _ = writeln!(
+            out,
+            "[OK]   Qdrant server (running, 127.0.0.1:{configured_grpc_port})"
+        );
     } else {
         let _ = writeln!(
             out,
@@ -2687,17 +2703,22 @@ fn network_section() -> (String, usize) {
     use std::fmt::Write;
     use std::net::SocketAddr;
 
-    // The bundled Qdrant keeps its own default HTTP port; only the gRPC port the
-    // client dials is configurable.
-    let grpc = crate::config::load_cached()
-        .map(|c| c.qdrant_port)
-        .unwrap_or(6334);
+    // Only `qdrant_port` (gRPC) is configurable; the HTTP port is derived from
+    // it (see `MindConfig::resolved_qdrant_http_port`) rather than hardcoded to
+    // the bundled default, so this reports the actual pair for a relocated
+    // external server too (e.g. 6343/6344), not always "6333".
+    let cfg = crate::config::load_cached().ok();
+    let grpc = cfg.as_ref().map(|c| c.qdrant_port).unwrap_or(6334);
+    let http = cfg
+        .as_ref()
+        .map(|c| c.resolved_qdrant_http_port())
+        .unwrap_or(grpc.saturating_sub(1));
     let host_ip = primary_local_ip();
 
     let mut out = String::from("\nNetwork footprint:\n");
     let mut issues = 0;
     for (name, port) in [
-        ("Qdrant HTTP", 6333u16),
+        ("Qdrant HTTP", http),
         ("Qdrant gRPC", grpc),
         ("Visualizer", 4173),
     ] {
@@ -2769,6 +2790,37 @@ pub(crate) async fn run_delete(library: &str, id: &str) -> Result<String> {
     Ok(format!("Deleted from '{library}' [id: {id}]"))
 }
 
+/// Render a session file's header (first 10 lines) and, if it has ended, its
+/// `[end]` footer (`ended =`, `summary =`). A flat `take(10)` used to cut every
+/// *ended* session exactly before the footer - the header's 7-ish lines plus
+/// the blank padding around the `---` separators land right at line 10, so
+/// `[Last Session]` never showed how or why the session ended, only that it
+/// started. Pure string surgery, so it is unit-tested without a session file.
+fn render_last_session(out: &mut String, session: &str) {
+    use std::fmt::Write;
+    match session.find("\n[end]\n") {
+        Some(idx) => {
+            let head = &session[..idx];
+            let footer = &session[idx + 1..]; // drop the leading \n, keep "[end]\n..."
+            let head_lines: Vec<&str> = head.lines().take(10).collect();
+            for line in &head_lines {
+                let _ = writeln!(out, "{line}");
+            }
+            if head.lines().count() > head_lines.len() {
+                let _ = writeln!(out, "  ...");
+            }
+            for line in footer.lines() {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+        None => {
+            for line in session.lines().take(10) {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+}
+
 /// Build the compact session-start briefing as a string (last session, key
 /// facts, libraries, vault status). Shared by the `context` CLI command and the
 /// `mind_context` MCP tool so both render identically.
@@ -2804,17 +2856,24 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
             .await;
 
         if let Ok(response) = scroll {
+            let now = chrono::Utc::now().to_rfc3339();
             for point in &response.result {
                 let p = &point.payload;
                 let subj = crate::storage::extract_string_pub(p, "subject").unwrap_or_default();
                 let pred = crate::storage::extract_string_pub(p, "predicate").unwrap_or_default();
                 let obj = crate::storage::extract_string_pub(p, "object").unwrap_or_default();
                 let valid = crate::storage::extract_string_pub(p, "valid").unwrap_or_default();
-                let status = crate::storage::extract_string_pub(p, "status").unwrap_or_default();
-                // Bug fix (issue #25, PR #26): exclude dampened losers and
-                // superseded history from the doctor summary so the user
-                // sees the post-duel canonical state, not entombed tombstones.
-                if valid == "true" && status != "stale" && status != "superseded" {
+                let valid_until = crate::storage::extract_string_pub(p, "valid_until");
+                // Currently valid means BOTH signals agree it still is: the
+                // `valid` flag (flipped by an explicit invalidate) and
+                // `valid_until` (set to the retirement time by a lost duel or
+                // a superseding write - see `fact_valid_at`). Either one
+                // saying "not current" is enough to drop it from this
+                // snapshot, so stale/superseded/invalidated facts never show
+                // up here as if they still held.
+                let currently_valid = valid == "true"
+                    && crate::knowledge::fact_valid_at(None, valid_until.as_deref(), &now);
+                if currently_valid {
                     let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}");
                 }
             }
@@ -2892,10 +2951,7 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
         let _ = writeln!(out);
     }
     let _ = writeln!(out, "[Last Session]");
-    // Only include the first 10 lines of the session.
-    for line in session.lines().take(10) {
-        let _ = writeln!(out, "{line}");
-    }
+    render_last_session(&mut out, &session);
     let _ = writeln!(out);
     let _ = writeln!(out, "[Knowledge Graph - {facts_count} facts]");
     if facts_summary.is_empty() {
@@ -3172,8 +3228,10 @@ pub(crate) async fn run_fact_invalidate(id: &str) -> Result<String> {
 /// A `None` here lands as "unknown" — no surface should rely on that.
 pub(crate) async fn run_fact_invalidate_authored(id: &str, actor: Option<&str>) -> Result<String> {
     let config = crate::config::load_cached()?;
-    crate::knowledge::invalidate_fact_authored(&config, id, actor).await?;
-    Ok(format!("Fact '{id}' invalidated."))
+    let valid_until = crate::knowledge::invalidate_fact_authored(&config, id, actor).await?;
+    Ok(format!(
+        "Fact '{id}' invalidated (valid_until = {valid_until})."
+    ))
 }
 
 async fn cmd_session_start(agent: &str) -> Result<()> {
@@ -3239,6 +3297,7 @@ pub(crate) async fn run_session_end(agent: &str, summary: &str) -> Result<String
 }
 
 async fn cmd_backup(output: &str, encrypt: bool) -> Result<()> {
+    let config = crate::config::load_cached()?;
     if encrypt {
         let pass = crate::vault::prompt_password("Set backup passphrase: ")?;
         let confirm = crate::vault::prompt_password("Confirm backup passphrase: ")?;
@@ -3246,25 +3305,26 @@ async fn cmd_backup(output: &str, encrypt: bool) -> Result<()> {
             anyhow::bail!("Passphrases do not match: backup aborted.");
         }
         println!("Backing up (encrypted) to {output}...");
-        crate::storage::backup_encrypted(output, &pass)?;
+        crate::storage::backup_encrypted(&config, output, &pass).await?;
         println!("Encrypted backup complete. Keep the passphrase safe: it cannot be recovered.");
     } else {
         println!("Backing up to {output}...");
-        crate::storage::backup(output)?;
+        crate::storage::backup(&config, output).await?;
         println!("Backup complete.");
     }
     Ok(())
 }
 
 async fn cmd_restore(input: &str, encrypt: bool) -> Result<()> {
+    let config = crate::config::load_cached()?;
     if encrypt {
         let pass = crate::vault::prompt_password("Backup passphrase: ")?;
         println!("Restoring (encrypted) from {input}...");
-        crate::storage::restore_encrypted(input, &pass)?;
+        crate::storage::restore_encrypted(&config, input, &pass).await?;
         println!("Restore complete.");
     } else {
         println!("Restoring from {input}...");
-        crate::storage::restore(input)?;
+        crate::storage::restore(&config, input).await?;
         println!("Restore complete.");
     }
     Ok(())
@@ -3811,9 +3871,28 @@ pub fn is_qdrant_available() -> bool {
     qdrant_binary_path().exists()
 }
 
+/// Whether something answers on loopback at `port` - the plain "can I open a
+/// TCP connection" probe behind both `is_qdrant_running` and `doctor`'s
+/// configured-server check. Short timeout: a closed port refuses instantly, so
+/// this only waits out an actual firewall drop, not a real listener.
+fn is_qdrant_reachable(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
+/// Is *this store's* Qdrant up - the gRPC port `get_client` actually dials,
+/// read fresh from config so a custom `qdrant_port` (an external server, e.g.
+/// on a non-default port) is checked for real instead of against the bundled
+/// default. Falls back to that default only pre-init, when there is no
+/// config yet to read.
 pub fn is_qdrant_running() -> bool {
-    // Check if we can connect
-    std::net::TcpStream::connect("127.0.0.1:6334").is_ok()
+    let port = crate::config::load_cached()
+        .map(|c| c.qdrant_port)
+        .unwrap_or(6334);
+    is_qdrant_reachable(port)
 }
 
 const QDRANT_VERSION: &str = "1.18.1";
@@ -4036,7 +4115,10 @@ pub(crate) async fn ensure_qdrant_running() -> Result<()> {
 
 async fn cmd_serve() -> Result<()> {
     if is_qdrant_running() {
-        println!("Qdrant is already running on port 6334.");
+        let port = crate::config::load_cached()
+            .map(|c| c.qdrant_port)
+            .unwrap_or(6334);
+        println!("Qdrant is already running on port {port}.");
         return Ok(());
     }
 
@@ -4596,6 +4678,40 @@ mod export_instructions_tests {
 
         let empty = render_profile(&std::collections::BTreeMap::new(), &[], &[], &[]);
         assert!(empty.contains("Empty profile"));
+    }
+}
+
+#[cfg(test)]
+mod last_session_tests {
+    use super::render_last_session;
+
+    #[test]
+    fn active_session_shows_only_the_header() {
+        let session = "[session]\nagent = bib\nstarted = 2026-10-08T00:00:00+00:00\nstatus = active\n\n---\n\n";
+        let mut out = String::new();
+        render_last_session(&mut out, session);
+        assert!(out.contains("status = active"));
+        assert!(!out.contains("[end]"));
+    }
+
+    #[test]
+    fn ended_session_shows_the_end_footer_too() {
+        // Shape produced by `session::end`: header with status flipped to
+        // "completed", then a blank-padded `---` separator, then `[end]`.
+        let session = "[session]\nagent = bib\nstarted = 2026-10-08T00:00:00+00:00\n\
+                       status = completed\n\n---\n\n---\n\n[end]\n\
+                       ended = 2026-10-08T01:00:00+00:00\nsummary = did the thing\n";
+        let mut out = String::new();
+        render_last_session(&mut out, session);
+        assert!(out.contains("status = completed"));
+        assert!(
+            out.contains("ended = 2026-10-08T01:00:00+00:00"),
+            "missing ended timestamp:\n{out}"
+        );
+        assert!(
+            out.contains("summary = did the thing"),
+            "missing summary:\n{out}"
+        );
     }
 }
 

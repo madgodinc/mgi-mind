@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[最新版本：v2.5.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.5.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[最新版本：v2.6.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.6.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 面向 AI 助手的本地长期记忆。一个 Rust 程序，本地 Qdrant 向量数据库，本地
 ONNX 模型。通过 MCP 协议，Claude Code 等助手可以自己读写记忆。同时也是一个普通的
@@ -120,7 +120,7 @@ claude mcp add mgimind -- /home/you/.local/bin/mgimind mcp
 ### 安装器选项
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`：装到非 `~/.local/bin` 的位置。
-- `MGIMIND_TAG=v2.5.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
+- `MGIMIND_TAG=v2.6.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
 - `SKIP_DOCTOR=1 curl ... | sh`：只放下程序；之后自己运行 `init` + `doctor --fix`。
 
 ### 手动安装（不用脚本）
@@ -314,7 +314,7 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 | `mgimind mcp` | 以 stdio 模式运行 MCP 服务器（助手连接的就是这个）。一个常驻进程；自动启动 Qdrant。 |
 | `mgimind serve` / `mgimind stop` | 手动启动 / 停止内置 Qdrant（一般不用，`mcp` 会自己处理）。 |
 | `mgimind migrate [--purge]` | 把老的按库分开的集合重新嵌入到统一的 `memories` 集合。幂等。`--purge` 会在之后删除老集合。 |
-| `mgimind backup <file>` / `mgimind restore <file>` | 整个数据目录的 gzip+tar。 |
+| `mgimind backup <file>` / `mgimind restore <file>` | 数据目录的 gzip+tar。Qdrant 可访问时，每个集合通过它自己的快照 API 采集，而不是直接拷贝可能正在被写入的 `qdrant/storage`；`models/` 始终被排除（`doctor --fix` 可重新下载）。`--encrypt` 把同样的归档包进 AES-256-GCM。 |
 | `mgimind export [--format json\|md] [--output <dir>]` | 把记忆导出到文件。 |
 | `mgimind import <obsidian\|markdown> <path> [--library <l>]` | 导入一个 markdown 文件夹（递归，会切分）。 |
 | `mgimind doctor [--fix]` | 健康检查；`--fix` 会下载缺失的内容。 |
@@ -334,6 +334,7 @@ fsync 目录），所以崩溃后留下的要么是旧文件，要么是新文�
 | `rerank_model` | `bge-reranker-base` | `models/` 下的重排器目录。 |
 | `rerank_top_k` | `20` | 在返回 `limit` 之前取并重排多少候选。 |
 | `qdrant_port` | `6334` | Qdrant gRPC 端口。 |
+| `qdrant_http_port` | 无 | Qdrant 的 REST 端口，供 `backup`/`restore` 快照和 `doctor` 报告使用。未设置时按 `qdrant_port - 1` 推导（Qdrant 自身的默认配对）；只有服务器不遵循这个配对时才需要设置。 |
 | `qdrant_api_key` | 无 | 如果设置，Qdrant 会以此启动，客户端用它认证。 |
 
 ## 语言与重排器
@@ -406,7 +407,7 @@ mgi-mind 打开的每一个套接字都绑定在 loopback 上：
 
 | 组件 | 端口 | 绑定 |
 |---|---|---|
-| Qdrant HTTP | 6333 | `127.0.0.1` |
+| Qdrant HTTP | `qdrant_http_port`，默认按 `qdrant_port - 1` 推导 | `127.0.0.1` |
 | Qdrant gRPC | `qdrant_port`，默认 6334 | `127.0.0.1` |
 | `mind_visualize` | 4173 | `127.0.0.1` |
 | `mgimind viewer` | 随机，启动时打印 | `127.0.0.1` |
@@ -421,7 +422,7 @@ mgimind 不安装驱动、不添加网卡，也不改动任何路由、DNS 或�
 
 ## 状态与审计
 
-当前版本：**2.5.0**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
+当前版本：**2.6.0**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
 日志和临时 viewer、0.11.x 的隔离层 + best-effort retrieval 策略、
 0.12.x 的 viewer 波次、0.13.x 的 session liveness、以及 0.14.x 的
 procedural-memory 护城河（LongMemEval baseline + 来自 20 个公开仓库的

@@ -1,6 +1,6 @@
 [package]
 name = "mgi-mind"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2024"
 authors = ["Mad God Inc <mad.god.inc@gmail.com>"]
 description = "AI-native second brain. Self-hosted, token-optimized memory for AI assistants."
@@ -108,7 +108,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Native HTTP + archive extraction (replaces curl/tar/unzip shellouts) — audit #19
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }

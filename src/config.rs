@@ -26,6 +26,15 @@ pub struct MindConfig {
     pub data_dir: PathBuf,
     pub model_name: String,
     pub qdrant_port: u16,
+    /// Qdrant's REST/HTTP port, for the snapshot API (`backup`/`restore`) and
+    /// the `doctor` network-footprint report - everything else talks gRPC.
+    /// `None` (the common case) derives it as `qdrant_port - 1`, Qdrant's own
+    /// default pairing (6333/6334, and still true of a relocated pair like
+    /// 6343/6344): the two ports are independent settings on the Qdrant side,
+    /// not a guaranteed offset, so a server that does not follow its own
+    /// convention sets this explicitly instead of being guessed at.
+    #[serde(default)]
+    pub qdrant_http_port: Option<u16>,
     /// Embedding dimension. Stored so a model swap can be detected (audit #11).
     #[serde(default = "default_vector_size")]
     pub vector_size: u64,
@@ -116,6 +125,7 @@ impl Default for MindConfig {
             data_dir: mind_home(),
             model_name: "multilingual-e5-base".to_string(),
             qdrant_port: 6334,
+            qdrant_http_port: None,
             vector_size: 768,
             qdrant_api_key: None,
             pooling: "mean".to_string(),
@@ -149,6 +159,13 @@ impl MindConfig {
         let path = config_path();
         let content = serde_json::to_string_pretty(self)?;
         crate::util::atomic_write_str(&path, &content)
+    }
+
+    /// The HTTP port to use for Qdrant's REST snapshot API: the explicit
+    /// override if one is set, otherwise `qdrant_port - 1` (see the field doc).
+    pub fn resolved_qdrant_http_port(&self) -> u16 {
+        self.qdrant_http_port
+            .unwrap_or_else(|| self.qdrant_port.saturating_sub(1))
     }
 }
 
@@ -261,5 +278,18 @@ mod tests {
         let json = r#"{"version":"0.1.0","data_dir":"/tmp/x","model_name":"all-MiniLM-L6-v2","qdrant_port":6334}"#;
         let cfg: MindConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.install_mode, InstallMode::ChatOnly);
+    }
+
+    #[test]
+    fn http_port_derives_from_grpc_port_unless_overridden() {
+        let mut cfg = MindConfig {
+            qdrant_port: 6344,
+            qdrant_http_port: None,
+            ..MindConfig::default()
+        };
+        assert_eq!(cfg.resolved_qdrant_http_port(), 6343);
+
+        cfg.qdrant_http_port = Some(9999);
+        assert_eq!(cfg.resolved_qdrant_http_port(), 9999);
     }
 }

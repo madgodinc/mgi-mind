@@ -1,7 +1,50 @@
 # Changelog
 
-## Unreleased
+## 2.6.0: consistent backups, an honest doctor, and the doubt window wired up
 
+- **`backup`/`restore` are now consistent under live writes.** Previously a
+  plain tar of the whole data directory, including `qdrant/storage` - a raw
+  copy of files Qdrant might be mid-write to - and `models/`, which is just
+  re-downloadable weights. When the configured Qdrant answers, `backup` now
+  takes a snapshot of each collection through Qdrant's own API (create ->
+  download -> delete the remote copy) and archives those instead of the raw
+  directory; `models/` is excluded either way (`doctor --fix` rebuilds it).
+  `restore` recovers each collection through Qdrant's snapshot-upload API, and
+  still accepts an old-format archive unchanged. The encrypted variant
+  (`--encrypt`) goes through the same path.
+- **`doctor` no longer reports a missing Qdrant binary as a failure when the
+  configured server already answers.** `[FAIL] Qdrant binary not found` fired
+  even when an external Qdrant (a systemd service, Docker, a remote host) was
+  up and reachable on the configured port - a missing bundled binary is only a
+  problem when nothing can serve requests. It is `[INFO]` in that case now,
+  `[FAIL]` only when nothing answers. The "Qdrant server (running)" check and
+  `mgimind serve`/`stop` messages also read the configured `qdrant_port`
+  instead of assuming the bundled default of 6334.
+- **`doctor`'s network footprint reports the HTTP port this store actually
+  uses, not a hardcoded 6333.** Only `qdrant_port` (gRPC) was ever
+  configurable; the report still printed "Qdrant HTTP :6333" even when gRPC
+  was moved elsewhere, which is wrong wherever the pair isn't the bundled
+  default (a relocated external server on 6343/6344, for one). It is now
+  derived as `qdrant_port - 1` (Qdrant's own default pairing), overridable
+  with the new `qdrant_http_port` config field for a server that does not
+  follow it.
+- **`context`'s `[Last Session]` block showed only the session's start header,
+  never how it ended.** A flat `take(10)` lines cut every *ended* session
+  exactly before its `[end]` section (`ended =`, `summary =`), so the one
+  thing worth knowing at session start - what happened last time - was the one
+  thing missing. It now always includes the footer when the session has one.
+- **`context`'s Knowledge Graph section could list facts that were no longer
+  current.** It filtered on `status != "stale"/"superseded"` as a proxy for
+  validity; the actual signal is `valid_until`, and a fact can carry
+  `valid_until` in the past without either status string set. It now checks
+  `valid_until` directly (unset or in the future), the same half-open-interval
+  rule `fact_valid_at` already used everywhere else.
+- **`fact invalidate` now records when, not just that.** It flipped `valid` to
+  `false` but never set `valid_until`, the field every other way a fact
+  retires (`dampen_loser`, `mark_superseded`) already stamps - losing the
+  timestamp for anything that reads the raw payload rather than going through
+  the queries that already exclude `valid=false` outright. The CLI now reports
+  the `valid_until` it wrote.
 - **The doubt window measures context drift, and the threshold it used could
   never fire.** Half of the mechanism was never connected: `centroid`,
   `is_context_drifted` and `apply_doubt_check_to_fact` had no caller outside

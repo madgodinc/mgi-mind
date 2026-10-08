@@ -778,7 +778,7 @@ fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
 /// `created_at` (legacy) is treated as always-having-existed (`at < valid_until`
 /// only). Pure, so it is unit-tested without Qdrant. Timestamps compared as
 /// RFC3339 strings (lexicographic == chronological for uniform UTC).
-fn fact_valid_at(created_at: Option<&str>, valid_until: Option<&str>, at: &str) -> bool {
+pub(crate) fn fact_valid_at(created_at: Option<&str>, valid_until: Option<&str>, at: &str) -> bool {
     let after_start = created_at.is_none_or(|from| from <= at);
     let before_end = valid_until.is_none_or(|until| at < until);
     after_start && before_end
@@ -929,12 +929,14 @@ pub async fn query_fact_as_of(
 /// calls (e.g. an agent over HTTP hiding facts by id) left no trace of who did
 /// it or what disappeared. This makes invalidation answerable from the audit
 /// log like every other write. `actor` is the caller identity (token-derived on
-/// HTTP, the `agent` arg on MCP, "cli" on the terminal).
+/// HTTP, the `agent` arg on MCP, "cli" on the terminal). Returns the
+/// `valid_until` timestamp it just wrote, so callers can surface it rather
+/// than silently recording a fact nobody can see was closed off.
 pub async fn invalidate_fact_authored(
     config: &MindConfig,
     id: &str,
     actor: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     // Hold the cross-process facts lock so an invalidate can't race a concurrent
     // add_fact's duel (e.g. process A resolving a duel against the very fact
     // process B is invalidating). Closes the add-vs-invalidate hole the circle-3
@@ -961,8 +963,18 @@ pub async fn invalidate_fact_authored(
 
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
 
+    // Both signals, not just `valid`: `query_fact_as_of`/`query_facts` already
+    // hard-exclude `valid=false` server-side (an invalidated fact is treated
+    // as a retracted mistake, never "what used to be true"), but that left
+    // `valid_until` the only one of the three retirement paths with no record
+    // of WHEN it happened - `dampen_loser` and `mark_superseded` both stamp
+    // it, invalidate alone did not. Closing that gap matters for anything
+    // that reads the raw payload (an audit, a future reader, `fact_valid_at`
+    // itself) rather than going through those two filtered queries.
+    let now = chrono::Utc::now().to_rfc3339();
     let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
     payload.insert("valid".into(), "false".into());
+    payload.insert("valid_until".into(), now.clone().into());
 
     client
         .set_payload(
@@ -997,7 +1009,7 @@ pub async fn invalidate_fact_authored(
         .before(storage::truncate_for_audit(&triple)),
     );
 
-    Ok(())
+    Ok(now)
 }
 
 // ===== v1.4 Phase 0 step 3: cardinality registry + conflict events =====

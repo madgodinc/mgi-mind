@@ -162,6 +162,24 @@ headline retrieval path, so unless a line says "bench" it ships without a new
   it. This is a breaking change that also disrupts existing local tooling, so
   it is **held pending an explicit go/no-go** and takes the next free minor
   when scheduled.
+- **✅ Shipped: v2.6.0 (2026-10-08), consistent backups, an honest doctor, and
+  the doubt window wired up.** `backup`/`restore` now go through Qdrant's own
+  snapshot API when it answers (create -> download -> delete the remote copy)
+  instead of a raw copy of `qdrant/storage` that could land mid-write, and
+  drop `models/` from the archive either way; the encrypted variant goes
+  through the same path, and an old-format archive still restores. `doctor`
+  no longer fails on a missing bundled Qdrant binary when the configured
+  server already answers (now `[INFO]`), and its network-footprint report
+  derives the HTTP port instead of hardcoding 6333. `context`'s
+  `[Last Session]` block now shows how a session ended, not just how it
+  started, and its Knowledge Graph section filters on `valid_until` directly
+  rather than a `status` string proxy. `fact invalidate` now stamps
+  `valid_until`, matching the other two ways a fact retires. Plus the eleven
+  commits already queued on `main`: the doubt window's context-drift check
+  wired up and calibrated against a real store, typed skills (`mind_skill`),
+  chunked-document reassembly on export, the access journal fsync moved off
+  the search path, session-recovery no longer leaking inherited flags, and
+  `vault store --stdin`.
 - **✅ Shipped: v2.5.0 (2026-07-19), macOS install path fixed end to end.**
   An audit of every step from `install.sh` to a warm embedder, prompted by an
   install that failed on someone else's MacBook. Intel Macs are back in the
