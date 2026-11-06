@@ -3661,7 +3661,7 @@ async fn cmd_skill(action: SkillAction) -> Result<()> {
         }
         SkillAction::List => crate::skill::list(&config).await?,
         SkillAction::Show { name } => crate::skill::show(&config, &name).await?,
-        SkillAction::Rm { name } => crate::skill::remove(&config, &name).await?,
+        SkillAction::Rm { name } => crate::skill::remove(&config, &name, Some("cli")).await?,
         SkillAction::Match { task, limit } => {
             crate::skill::match_task(&config, &task, limit).await?
         }
@@ -3679,7 +3679,7 @@ async fn cmd_block(action: BlockAction) -> Result<()> {
     match action {
         BlockAction::Set { name, content } => {
             let text = content.join(" ");
-            let n = crate::storage::set_block(&name, &text)?;
+            let n = crate::storage::set_block(&name, &text, "cli")?;
             println!("Pinned block '{n}' set ({} bytes).", text.len());
         }
         BlockAction::Get { name } => {
@@ -3700,7 +3700,7 @@ async fn cmd_block(action: BlockAction) -> Result<()> {
             }
         }
         BlockAction::Rm { name } => {
-            if crate::storage::remove_block(&name)? {
+            if crate::storage::remove_block(&name, "cli")? {
                 println!("Removed block '{name}'.");
             } else {
                 println!("(no block '{name}')");

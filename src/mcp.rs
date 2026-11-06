@@ -466,7 +466,11 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                         arg_str(args, "name").ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
                     let content = arg_str(args, "content")
                         .ok_or_else(|| anyhow::anyhow!("missing 'content'"))?;
-                    let n = crate::storage::set_block(name, content)?;
+                    let n = crate::storage::set_block(
+                        name,
+                        content,
+                        arg_str(args, "agent").unwrap_or("mcp"),
+                    )?;
                     Ok(format!("Pinned block '{n}' set."))
                 }
                 "get" => {
@@ -493,7 +497,10 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 "remove" => {
                     let name =
                         arg_str(args, "name").ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
-                    let existed = crate::storage::remove_block(name)?;
+                    let existed = crate::storage::remove_block(
+                        name,
+                        arg_str(args, "agent").unwrap_or("mcp"),
+                    )?;
                     Ok(if existed {
                         format!("Removed block '{name}'.")
                     } else {
@@ -532,7 +539,9 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 }
                 "list" => crate::skill::list(cfg).await,
                 "show" => crate::skill::show(cfg, need("name")?).await,
-                "remove" => crate::skill::remove(cfg, need("name")?).await,
+                "remove" => {
+                    crate::skill::remove(cfg, need("name")?, Some(agent.unwrap_or("mcp"))).await
+                }
                 "outcome" => {
                     let name = need("name")?;
                     let worked = arg_bool(args, "worked", true);

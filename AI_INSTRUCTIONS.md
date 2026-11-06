@@ -548,9 +548,12 @@ counts.
 
 Facts: `mind_fact` with `action` add / query / invalidate / restore.
 `mind_predicate` for cardinality (single / temporal-single / multi).
-Invalidate is final: re-adding the exact same triple afterward refuses
-(verdict `invalidated`) instead of reviving it - use `action=restore` to
-bring it back. `action=add` takes an optional `valid_from` (when the fact
+Invalidate is final: re-adding the same triple afterward, even one that
+differs only in case or whitespace, refuses (verdict `invalidated`, with the
+invalidated fact's id) instead of reviving it - use `action=restore` on that
+id to bring it back. Re-adding a value that lost a duel within the last
+`flip_back_window_hours` (default 24) lands `contested` rather than flipping
+the winner back. `action=add` takes an optional `valid_from` (when the fact
 became true in the world, as opposed to when it was recorded);
 `action=query` with `as_of` takes an optional `world_time=true` to resolve
 against `valid_from` instead of the default record-time axis.
@@ -621,4 +624,4 @@ their AI client once; it starts Qdrant automatically.
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v2.8.2 | Apache-2.0 | Mad God Inc
+MGI-Mind v2.9.0 | Apache-2.0 | Mad God Inc

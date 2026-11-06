@@ -186,13 +186,30 @@ pub async fn show(config: &MindConfig, name: &str) -> Result<String> {
 }
 
 /// Delete a skill and its outcome history.
-pub async fn remove(config: &MindConfig, name: &str) -> Result<String> {
+pub async fn remove(config: &MindConfig, name: &str, actor: Option<&str>) -> Result<String> {
     let name = normalize_name(name)?;
-    Ok(if storage::remove_skill(config, &name).await? {
-        format!("Removed skill '{name}'.")
-    } else {
-        format!("No skill named '{name}'.")
-    })
+    let Some(hit) = storage::get_skill(config, &name).await? else {
+        return Ok(format!("No skill named '{name}'."));
+    };
+    if !storage::remove_skill(config, &name).await? {
+        return Ok(format!("No skill named '{name}'."));
+    }
+    crate::audit::record(
+        crate::audit::AuditEvent::new(
+            crate::audit::AuditOp::SkillRemove,
+            "_skills".to_string(),
+            hit.id.clone(),
+        )
+        .actor(actor.unwrap_or("unknown"))
+        .before(format!(
+            "skill '{name}'
+when: {}
+{}",
+            hit.when.trim(),
+            hit.body.trim_end()
+        )),
+    );
+    Ok(format!("Removed skill '{name}'."))
 }
 
 /// Record how applying a skill went. `verify` promotes it to verified on

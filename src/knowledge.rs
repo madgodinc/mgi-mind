@@ -250,6 +250,12 @@ pub struct Fact {
     /// facts have no `valid_from` and stay valid without migration; record-time
     /// `as_of` queries and `fact_valid_at` ignore this field entirely.
     pub valid_from: Option<String>,
+    /// WORLD-time end: when this value stopped being true in the world. Set
+    /// only when a successor that carries a `valid_from` displaces this fact,
+    /// to that successor's `valid_from`, so a backdated successor no longer
+    /// overlaps its predecessor on the world axis. `None` means "the world end
+    /// is unknown" and the world-time query falls back to `valid_until`.
+    pub world_until: Option<String>,
     /// The lifecycle status wire string (active/superseded/stale/...). `None` for
     /// legacy facts with no status field (read as active). CRITICAL distinction:
     /// `valid_until` is set by BOTH `mark_superseded` (status=superseded — a
@@ -280,6 +286,86 @@ fn extract_string(
             None
         }
     })
+}
+
+/// Loose comparison key for the tombstone check: whitespace runs collapsed,
+/// ends trimmed, case folded. The fact id stays the exact string (changing it
+/// would re-key every stored fact); this key is only used to refuse a
+/// near-identical re-assertion of an explicitly invalidated triple.
+pub(crate) fn tombstone_key(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// True when this triple was retired by a duel (stale or superseded) less than
+/// `window_hours` before `now` (`flip_back_window_hours` in config, 24 by
+/// default, 0 = off). Inside that window a re-asserted loser that would win
+/// the duel lands `contested` instead, so two values cannot ping-pong; outside
+/// it the normal duel applies. Pure, so it is unit-tested.
+pub(crate) fn is_recent_flip_back(
+    status: Option<&str>,
+    valid_until: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    window_hours: u32,
+) -> bool {
+    if window_hours == 0 {
+        return false;
+    }
+    let retired = matches!(
+        status.and_then(EntryStatus::parse),
+        Some(EntryStatus::Stale) | Some(EntryStatus::Superseded)
+    );
+    let Some(until) = valid_until.and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok()) else {
+        return false;
+    };
+    retired
+        && now.signed_duration_since(until.with_timezone(&chrono::Utc))
+            < chrono::Duration::hours(i64::from(window_hours))
+}
+
+/// Id of an explicitly invalidated fact whose (subject, predicate, object)
+/// matches this one under `tombstone_key`, if any. Scans only `valid=false`
+/// rows, which are few: invalidate is an explicit, rare action.
+async fn find_invalidated_variant(
+    client: &qdrant_client::Qdrant,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> Result<Option<String>> {
+    let want = (
+        tombstone_key(subject),
+        tombstone_key(predicate),
+        tombstone_key(object),
+    );
+    let filter = Filter::must([Condition::matches("valid", "false".to_string())]);
+    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
+    loop {
+        let mut builder = ScrollPointsBuilder::new(storage::FACTS_COLLECTION)
+            .filter(filter.clone())
+            .limit(256)
+            .with_payload(true);
+        if let Some(o) = offset.clone() {
+            builder = builder.offset(o);
+        }
+        let response = client.scroll(builder).await?;
+        for point in &response.result {
+            let f = fact_from_point(point);
+            if (
+                tombstone_key(&f.subject),
+                tombstone_key(&f.predicate),
+                tombstone_key(&f.object),
+            ) == want
+            {
+                return Ok(Some(f.id));
+            }
+        }
+        match response.next_page_offset {
+            Some(next) => offset = Some(next),
+            None => return Ok(None),
+        }
+    }
 }
 
 fn fact_id(subject: &str, predicate: &str, object: &str) -> String {
@@ -441,7 +527,14 @@ async fn add_fact_core(
         &client,
         storage::FACTS_COLLECTION,
         &id,
-        &["created_at", "valid", "confirmations_count", "valid_from"],
+        &[
+            "created_at",
+            "valid",
+            "confirmations_count",
+            "valid_from",
+            "status",
+            "valid_until",
+        ],
     )
     .await;
     let existing_created_at = existing_fields[0].clone();
@@ -451,6 +544,8 @@ async fn add_fact_core(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let existing_valid_from = existing_fields[3].clone();
+    let existing_status = existing_fields[4].clone();
+    let existing_valid_until = existing_fields[5].clone();
 
     // §5b: explicit invalidate is final. `invalidate_fact_authored` is the ONLY
     // writer of `valid = false` (every other retirement path - dampen_loser,
@@ -476,6 +571,32 @@ async fn add_fact_core(
         );
         return Ok((id, "invalidated"));
     }
+    // The same tombstone, read loosely: a variant of an invalidated triple
+    // that differs only in case or whitespace ("Berlin" vs "berlin ") is the
+    // same claim and is refused too. The returned id is the invalidated
+    // row's, so the caller can restore exactly that one.
+    if let Some(variant) = find_invalidated_variant(&client, subject, predicate, object).await? {
+        crate::audit::record(
+            crate::audit::AuditEvent::new(
+                crate::audit::AuditOp::FactAdd,
+                "_facts".to_string(),
+                variant.clone(),
+            )
+            .actor(author.unwrap_or("unknown"))
+            .after(format!("{subject} {predicate} {object}"))
+            .note(
+                "invalidated (refused: differs only in case or whitespace from an explicitly \
+                 invalidated triple; restore that id with mind_fact action=restore)",
+            ),
+        );
+        return Ok((variant, "invalidated"));
+    }
+    let flip_back = is_recent_flip_back(
+        existing_status.as_deref(),
+        existing_valid_until.as_deref(),
+        chrono::Utc::now(),
+        config.flip_back_window_hours,
+    );
 
     // Keep the original created_at on re-add; only updated_at moves.
     let created_at = existing_created_at.unwrap_or_else(|| now.clone());
@@ -559,6 +680,12 @@ async fn add_fact_core(
                 // of a new TemporalSingle value now records the prior value as
                 // `superseded`, instead of leaving it `stale` with no history
                 // distinction.
+                // Flip-back damping: this very triple lost a duel within the
+                // last `flip_back_window_hours`. Re-asserting it would win again
+                // (its count just rose) and the two values would trade places
+                // on every write. Hold both visible as contested instead, and
+                // leave the current winner in place.
+                crate::duel::DuelOutcome::Flip if flip_back => (EntryStatus::Contested, None),
                 crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
                 crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
                 // Quarantine: the duel says the fresh fact is too weak to
@@ -656,6 +783,12 @@ async fn add_fact_core(
     });
     if let Some(loser_id) = loser_to_retire {
         crate::duel::retire_loser(config, cardinality, &loser_id).await?;
+        // World-time end: a successor dated with `valid_from` ends its
+        // predecessor in the world at that instant, not at the moment the
+        // store happened to record the successor.
+        if let Some(vf) = &effective_valid_from {
+            set_fact_payload_field(config, &loser_id, "world_until", vf.clone()).await?;
+        }
     }
 
     // v2.0: surface the duel verdict so a multi-agent caller learns whether its
@@ -913,6 +1046,7 @@ fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
         created_at: extract_string(p, "created_at"),
         valid_until: extract_string(p, "valid_until"),
         valid_from: extract_string(p, "valid_from"),
+        world_until: extract_string(p, "world_until"),
         status: extract_string(p, "status"),
         valid: true,
         origin_context_id: extract_string(p, "origin_context_id"),
@@ -937,19 +1071,22 @@ pub(crate) fn fact_valid_at(created_at: Option<&str>, valid_until: Option<&str>,
 /// `valid_from` (when the fact became true in the world) over `created_at`
 /// (when the store merely learned it); falls back to `created_at` when
 /// `valid_from` is absent, so a fact nobody dated explicitly behaves exactly
-/// like the record-time query would. `valid_until` (when the store retired the
-/// fact) is unchanged - a genuine world-time END axis would need its own
-/// field, out of scope here per the task: record-time retirement is still the
-/// only "until" signal the store has. Pure, so it is unit-tested without Qdrant.
+/// like the record-time query would. The end bound prefers `world_until` (set
+/// when a dated successor displaced this fact: the successor's `valid_from`)
+/// over `valid_until` (when the store retired it), so a backdated successor
+/// and its predecessor do not overlap on the world axis. Pure, so it is
+/// unit-tested without Qdrant.
 pub(crate) fn fact_valid_at_world_time(
     created_at: Option<&str>,
     valid_from: Option<&str>,
+    world_until: Option<&str>,
     valid_until: Option<&str>,
     at: &str,
 ) -> bool {
     let start = valid_from.or(created_at);
     let after_start = start.is_none_or(|from| from <= at);
-    let before_end = valid_until.is_none_or(|until| at < until);
+    let end = world_until.or(valid_until);
+    let before_end = end.is_none_or(|until| at < until);
     after_start && before_end
 }
 
@@ -1083,6 +1220,7 @@ pub async fn query_fact_as_of(
                 fact_valid_at_world_time(
                     f.created_at.as_deref(),
                     f.valid_from.as_deref(),
+                    f.world_until.as_deref(),
                     f.valid_until.as_deref(),
                     at,
                 )
@@ -1850,6 +1988,7 @@ mod tests {
             Some(recorded),
             Some(world),
             None,
+            None,
             "2021-01-01T00:00:00Z"
         ));
         // Record-time would have said this instant predates the fact entirely.
@@ -1860,10 +1999,12 @@ mod tests {
             Some(recorded),
             None,
             None,
+            None,
             "2026-06-01T00:00:00Z"
         ));
         assert!(!fact_valid_at_world_time(
             Some(recorded),
+            None,
             None,
             None,
             "2021-01-01T00:00:00Z"
@@ -1874,9 +2015,69 @@ mod tests {
         assert!(!fact_valid_at_world_time(
             Some(recorded),
             Some(world),
+            None,
             Some(until),
             until
         ));
+    }
+
+    /// A dated successor's `valid_from`, stored as the loser's `world_until`,
+    /// ends the loser on the world axis before the record-time retirement, so
+    /// the two values never overlap there. Without `world_until` the end falls
+    /// back to `valid_until`, as before.
+    #[test]
+    fn world_until_ends_the_predecessor_before_record_retirement() {
+        let recorded = "2026-01-01T00:00:00Z";
+        let from = "2020-01-01T00:00:00Z";
+        let successor_from = "2023-01-01T00:00:00Z";
+        let retired = "2026-11-01T00:00:00Z";
+        assert!(!fact_valid_at_world_time(
+            Some(recorded),
+            Some(from),
+            Some(successor_from),
+            Some(retired),
+            "2024-06-01T00:00:00Z"
+        ));
+        assert!(fact_valid_at_world_time(
+            Some(recorded),
+            Some(from),
+            Some(successor_from),
+            Some(retired),
+            "2022-06-01T00:00:00Z"
+        ));
+        assert!(fact_valid_at_world_time(
+            Some(recorded),
+            Some(from),
+            None,
+            Some(retired),
+            "2024-06-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn tombstone_key_ignores_case_and_whitespace_only() {
+        assert_eq!(tombstone_key("  Berlin "), tombstone_key("berlin"));
+        assert_eq!(tombstone_key("New   York"), tombstone_key("new york"));
+        assert_ne!(tombstone_key("Berlin"), tombstone_key("Berlin2"));
+        assert_eq!(tombstone_key("Мюнхен"), tombstone_key("мюнхен "));
+    }
+
+    #[test]
+    fn flip_back_window_covers_only_recent_duel_losers() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let hour_ago = Some("2026-11-06T11:00:00Z");
+        let two_days_ago = Some("2026-11-04T12:00:00Z");
+        assert!(is_recent_flip_back(Some("stale"), hour_ago, now, 24));
+        assert!(is_recent_flip_back(Some("superseded"), hour_ago, now, 24));
+        assert!(!is_recent_flip_back(Some("stale"), two_days_ago, now, 24));
+        // Active or contested rows were never retired: no damping.
+        assert!(!is_recent_flip_back(Some("active"), hour_ago, now, 24));
+        assert!(!is_recent_flip_back(None, hour_ago, now, 24));
+        assert!(!is_recent_flip_back(Some("stale"), None, now, 24));
+        // Window 0 turns the damping off.
+        assert!(!is_recent_flip_back(Some("stale"), hour_ago, now, 0));
     }
 
     /// Helper: build a `valid = true` fact with a fixed subject/predicate so

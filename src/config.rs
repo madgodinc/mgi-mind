@@ -100,6 +100,15 @@ pub struct MindConfig {
     /// the gate. Pre-v2.0 configs lack the field and take the default.
     #[serde(default = "default_write_quota_per_min")]
     pub write_quota_per_min: u32,
+    /// Hours after a fact loses a duel during which re-asserting it lands
+    /// `contested` instead of flipping the winner back, so two values cannot
+    /// trade places on every write. 0 turns the damping off.
+    #[serde(default = "default_flip_back_window_hours")]
+    pub flip_back_window_hours: u32,
+}
+
+fn default_flip_back_window_hours() -> u32 {
+    24
 }
 
 fn default_write_quota_per_min() -> u32 {
@@ -139,6 +148,7 @@ impl Default for MindConfig {
             doubt_drift_threshold: None,
             install_mode: crate::install_mode::InstallMode::default(),
             write_quota_per_min: default_write_quota_per_min(),
+            flip_back_window_hours: default_flip_back_window_hours(),
         }
     }
 }

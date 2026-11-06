@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.9.0 (2026-11-07)
+
+Answers the limits named in the Agent Memory Atlas report at v2.8.2.
+
+### Added
+
+- **Audit rows for the writes that had none.** `mind_skill action=remove`
+  records `skill_remove` with the removed skill's text; pinned-block writes
+  record `block_set` (with the prior content on overwrite) and
+  `block_remove` (with the removed content).
+- **`mgimind restore` is on the record.** A backup carries its own
+  `audit.log`, which replaced the live one silently. The live log is now
+  copied to `audit.log.pre-restore-<UTC stamp>` before it is overwritten,
+  and a `backup_restore` event naming the backup and that copy is appended
+  to the restored chain.
+- **World-time end for facts.** When a successor with `valid_from`
+  displaces a value, the loser gets `world_until` = that `valid_from`, and
+  the world-time `as_of` query ends it there instead of at the record time
+  of retirement. A backdated successor no longer overlaps its predecessor.
+
+### Changed
+
+- **Invalidate refuses near-identical re-adds.** A re-add that differs from
+  an invalidated triple only in case or whitespace is refused with verdict
+  `invalidated` and the invalidated fact's id. The fact id itself is still
+  the exact string, so no stored fact is re-keyed.
+- **Flip-back damping in the duel.** A value that lost a duel and is
+  re-asserted within `flip_back_window_hours` (new `config.json` key,
+  default 24, `0` = off) lands `contested` instead of flipping the winner
+  back. A first contradiction still wins against a young fact as before.
+
+### Docs
+
+- README: the inheritance mark is process-local, stated as a limit.
+
 ## 2.8.2 (2026-10-21)
 
 ### Added

@@ -41,6 +41,16 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Set one top-level key in an already written `config.json`.
+fn set_config_key(mind: &Path, key: &str, value: serde_json::Value) {
+    let path = mind.join("config.json");
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read config.json"))
+            .expect("parse config.json");
+    cfg[key] = value;
+    std::fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).expect("write config.json");
+}
+
 /// Write `config.json` for `multilingual-e5-base` into `mind`, pointed at `port`.
 /// Built with serde_json so paths are escaped correctly - a `format!` with a raw
 /// Windows path (`C:\...`) would emit invalid JSON.
@@ -2170,6 +2180,32 @@ async fn backup_and_restore_round_trip_facts_through_qdrant_snapshots() {
         restored.contains("lives_in") && restored.contains("Prague"),
         "fact should come back after restore, got: {restored}"
     );
+
+    // The restore rewound audit.log to the backup's copy; it must say so in
+    // the log and keep the pre-restore log beside it.
+    let log = std::fs::read_to_string(mind.join("audit.log")).unwrap_or_default();
+    let last = log
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    assert!(
+        last.contains("\"op\":\"backup_restore\"") && last.contains("pre-restore"),
+        "the last audit row must be the restore event naming the saved log: {log}"
+    );
+    let saved = std::fs::read_dir(&mind)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("audit.log.pre-restore-")
+        });
+    assert!(
+        saved,
+        "the live audit log must be copied aside before restore"
+    );
+    run(&["audit", "verify"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3092,6 +3128,16 @@ fn procedure_and_skill_writes_land_in_the_audit_log() {
     );
     let (_out2, mcp_err2) = run_mcp(&mind, &ort, &outcome_input);
 
+    let remove_input = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"mind_skill","arguments":{
+                "action":"remove","name":skill_name}}}),
+    );
+    let (_out3, _mcp_err3) = run_mcp(&mind, &ort, &remove_input);
+
     let log = std::fs::read_to_string(mind.join("audit.log")).unwrap_or_default();
     let chain =
         format!("audit.log:\n{log}\n--- stderr 1 ---\n{mcp_err}\n--- stderr 2 ---\n{mcp_err2}");
@@ -3124,6 +3170,11 @@ fn procedure_and_skill_writes_land_in_the_audit_log() {
                 .iter()
                 .any(|l| l.contains("\"op\":\"procedure_outcome\"")),
         "expected both a procedure_add and a procedure_outcome row under _skills: {chain}"
+    );
+    assert!(
+        skill_lines.iter().any(|l| l.contains("\"op\":\"skill_remove\"")
+            && l.contains("do the audit-test thing")),
+        "mind_skill action=remove must be audited with the removed body: {chain}"
     );
 
     let (ok, vout, verr) = run_cli(&mind, &ort, &["audit", "verify"]);
@@ -3469,6 +3520,11 @@ fn readding_a_stale_loser_is_a_fresh_duel_that_keeps_its_created_at() {
     write_e5_config(&mind, &port);
     let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
 
+    // This test is about the fair re-duel and created_at, not the flip-back
+    // damping (covered by `flip_back_within_window_lands_contested`), and it
+    // re-adds the loser seconds after it lost, so the damping is turned off.
+    set_config_key(&mind, "flip_back_window_hours", serde_json::json!(0));
+
     let pid = std::process::id();
     let pred = format!("restale_pred_{pid}");
     let subj = format!("restale_subj_{pid}");
@@ -3577,6 +3633,9 @@ fn inherited_fact_discounts_the_duel_challenger_weight() {
     std::fs::create_dir_all(&mind).unwrap();
     write_e5_config(&mind, &port);
     let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+    // The control re-proposes a loser seconds after it lost; with flip-back
+    // damping on, both axes would contest and the discount would be invisible.
+    set_config_key(&mind, "flip_back_window_hours", serde_json::json!(0));
     let pid = std::process::id();
 
     let run_axis = |pred: &str, subj: &str, mark_via_context: bool| -> String {
@@ -3667,6 +3726,8 @@ fn world_time_as_of_differs_from_record_time_as_of() {
             "action":"query","subject":subj,"as_of":"2020-06-01"}}),
         serde_json::json!({"name":"mind_fact","arguments":{
             "action":"query","subject":subj,"as_of":"2020-06-01","world_time":true}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"query","subject":subj,"as_of":"2024-06-01","world_time":true}}),
     ];
     let input = mcp_call_script(&calls);
     let (stdout, stderr) = run_mcp(&mind, &ort, &input);
@@ -3693,6 +3754,171 @@ fn world_time_as_of_differs_from_record_time_as_of() {
         "the later value (valid_from 2023) must not appear yet at 2020-06-01: \
          {world_time:?}\n{chain}"
     );
+
+    // World-time end: value_2023 (valid_from 2023) displaced value_2020, so
+    // value_2020's world end is 2023-01-01, not the moment the store recorded
+    // the successor. At 2024 only the successor holds; no overlap.
+    let world_2024 = results.get(&7).cloned().unwrap_or_default();
+    assert!(
+        !world_2024.0,
+        "world-time query at 2024 must succeed: {chain}"
+    );
+    assert!(
+        world_2024.1.contains("value_2023") && !world_2024.1.contains("value_2020"),
+        "at 2024-06-01 only the successor may hold on the world axis: {world_2024:?}\n{chain}"
+    );
+}
+
+/// Flip-back damping: a value that lost a duel and is re-asserted within
+/// `flip_back_window_hours` (24 by default) lands `contested` instead of
+/// flipping the winner back, so two values cannot trade places on every write.
+/// Both stay visible; the winner is not retired.
+#[test]
+fn flip_back_within_window_lands_contested() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+    let pid = std::process::id();
+    let pred = format!("pingpong_pred_{pid}");
+    let subj = format!("pingpong_subj_{pid}");
+
+    let calls = vec![
+        serde_json::json!({"name":"mind_predicate","arguments":{
+            "action":"register","predicate":pred,"cardinality":"Single"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_B"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"query","subject":subj}}),
+    ];
+    let (stdout, stderr) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
+    let results = parse_mcp_results(&stdout);
+    let chain = format!("stdout parsed: {results:?}\n--- stderr ---\n{stderr}");
+
+    let flip = results.get(&4).cloned().unwrap_or_default().1;
+    assert!(
+        flip.contains("won"),
+        "value_B must first win against a young value_A: {chain}"
+    );
+    let back = results.get(&5).cloned().unwrap_or_default().1;
+    assert!(
+        back.contains("contested") && !back.contains("won"),
+        "re-asserting the loser seconds later must contest, not flip back: {chain}"
+    );
+    let q = results.get(&6).cloned().unwrap_or_default().1;
+    assert!(
+        q.contains("value_A") && q.contains("value_B"),
+        "both values must stay visible while contested: {chain}"
+    );
+}
+
+/// The tombstone is read loosely: a re-assertion that differs from an
+/// explicitly invalidated triple only in case or whitespace is refused too,
+/// and the refusal names the invalidated row's id so it can be restored.
+#[test]
+fn invalidated_triple_refuses_case_and_whitespace_variants() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+    let pid = std::process::id();
+    let subj = format!("tomb_subj_{pid}");
+    let pred = format!("tomb_pred_{pid}");
+
+    let (ok, out, err) = run_cli(&mind, &ort, &["fact", "add", &subj, &pred, "Berlin"]);
+    assert!(ok, "fact add failed: {err}");
+    let id = out
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("fact add must report an id, got: {out}"));
+    let (ok, _o, e) = run_cli(&mind, &ort, &["fact", "invalidate", &id]);
+    assert!(ok, "fact invalidate failed: {e}");
+
+    let variant_subj = format!("  {} ", subj.to_uppercase());
+    let (ok, readd, e) = run_cli(
+        &mind,
+        &ort,
+        &["fact", "add", &variant_subj, &pred, "berlin  "],
+    );
+    assert!(ok, "variant add should still exit 0: {e}");
+    assert!(
+        readd.contains("NOT added") && readd.contains("invalidated") && readd.contains(&id),
+        "a case/whitespace variant of an invalidated triple must be refused, naming its id: {readd}"
+    );
+    let (ok, q, _e) = run_cli(&mind, &ort, &["fact", "query", &subj]);
+    assert!(ok);
+    assert!(
+        !q.to_lowercase().contains("berlin"),
+        "nothing may be revived: {q}"
+    );
+
+    // A genuinely different object is unaffected.
+    let (ok, other, e) = run_cli(&mind, &ort, &["fact", "add", &subj, &pred, "Berlin-Mitte"]);
+    assert!(ok, "different object add failed: {e}");
+    assert!(
+        !other.contains("NOT added"),
+        "a different value must be accepted: {other}"
+    );
+}
+
+/// Pinned-block writes are audited: set (with the prior content on overwrite)
+/// and remove (with the content removed).
+#[test]
+fn pinned_block_writes_land_in_the_audit_log() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+
+    let calls = vec![
+        serde_json::json!({"name":"mind_block","arguments":{
+            "action":"set","name":"audit-block","content":"first text"}}),
+        serde_json::json!({"name":"mind_block","arguments":{
+            "action":"set","name":"audit-block","content":"second text"}}),
+        serde_json::json!({"name":"mind_block","arguments":{
+            "action":"remove","name":"audit-block"}}),
+    ];
+    let (_stdout, stderr) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
+    let log = std::fs::read_to_string(mind.join("audit.log")).unwrap_or_default();
+    let chain = format!("audit.log:\n{log}\n--- stderr ---\n{stderr}");
+    let sets: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("\"op\":\"block_set\"") && l.contains("audit-block"))
+        .collect();
+    assert_eq!(sets.len(), 2, "two block_set rows expected: {chain}");
+    assert!(
+        sets[1].contains("first text") && sets[1].contains("second text"),
+        "the overwrite must carry the prior and the new content: {chain}"
+    );
+    assert!(
+        log.lines().any(|l| l.contains("\"op\":\"block_remove\"")
+            && l.contains("audit-block")
+            && l.contains("second text")),
+        "block remove must be audited with the removed content: {chain}"
+    );
+    let (ok, vout, verr) = run_cli(&mind, &ort, &["audit", "verify"]);
+    assert!(ok && vout.contains("audit chain intact"), "{vout}\n{verr}");
 }
 
 /// Glama tool-definition-quality fix: the 15 deprecated v1.0 singleton

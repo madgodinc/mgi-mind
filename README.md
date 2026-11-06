@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v2.8.2](https://github.com/madgodinc/mgi-mind/releases/tag/v2.8.2)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Latest release: v2.9.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.9.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 <p align="center">
   <a href="https://mcprush.com/madgodinc/mgi-mind-mcp"><img width="380" height="200" src="https://mcprush.com/badge/mgi-mind-mcp/card.svg" alt="MGI-Mind MCP server" loading="lazy" /></a>
@@ -100,7 +100,11 @@ on their own:
   implemented. Nothing is deleted, so the audit log keeps the loser; a
   re-proposed `stale` loser gets a fair new duel against whatever is current,
   keeping its own original `created_at` and confirmation history rather than
-  starting over. Automatic, inside a normal `mind_fact add`.
+  starting over. A loser re-asserted within `flip_back_window_hours` of
+  losing (`config.json`, default 24, `0` turns it off) lands `contested`
+  instead of flipping the winner back, so two values cannot trade places on
+  every write; after the window it gets the normal duel. Automatic, inside a
+  normal `mind_fact add`.
 - **Doubt window.** An entrenched fact has to keep re-justifying itself. Every
   fact query measures how far the current context has drifted from the context
   the fact was written in; after five consecutive drifted retrievals the fact
@@ -125,7 +129,10 @@ on their own:
   conflict. Single-source decay (repeated confirmation from the same source
   counting for less each time) has the formula (`diversity_weighted_count`)
   but no live caller yet - not implemented, no "cannot co-confirm" guarantee
-  today.
+  today. The inherited mark lives in the memory of the process that rendered
+  the briefing: `mgimind context` run from a terminal marks nothing for a
+  separate `mgimind mcp` server. In normal use the agent's own MCP server
+  renders its briefing, so the mark and the duel are in the same process.
 - **Two time axes on facts.** Record-time (`created_at`/`valid_until`: when
   the store learned/retired a value) is bi-temporal with the superseded
   chain: a predicate can be registered (`mind_predicate`) as single-valued,
@@ -136,11 +143,16 @@ on their own:
   true in the world instead of when the store heard about it; `mind_fact
   action=query` with `as_of` + `world_time=true` resolves point-in-time
   queries against it, falling back to record-time per fact when it has no
-  `valid_from`. Existing facts need no migration - they simply have no
+  `valid_from`. When a successor that carries a `valid_from` displaces a
+  value, the old value's world-time end (`world_until`) is set to that
+  `valid_from`, so a backdated successor does not overlap its predecessor on
+  the world axis. Existing facts need no migration - they simply have no
   `valid_from` and behave exactly as before.
 - **Explicit invalidate is final.** `mind_fact action=invalidate` is a
   one-way door: re-adding the same triple afterward refuses (verdict
-  `invalidated`) instead of silently reviving it. `mind_fact
+  `invalidated`) instead of silently reviving it. A re-add that differs
+  only in case or whitespace (`Berlin` vs `berlin `) is refused the same way,
+  and the refusal names the invalidated fact's id. `mind_fact
   action=restore` is the only way back.
 - **Typed outcome signals.** `mind_outcome` records that a remembered fix
   actually worked (`test_passed`, `code_compiled`, `user_confirmed`,
@@ -320,7 +332,7 @@ a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`: install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.8.2 curl ... | sh`: pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v2.9.0 curl ... | sh`: pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh`: just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -703,7 +715,7 @@ trust.
 
 ## Status and audit
 
-Current version: **2.8.2** (semver-stable since v1.0.0). The 0.x line built
+Current version: **2.9.0** (semver-stable since v1.0.0). The 0.x line built
 the foundation: the audit log and ephemeral viewer (0.10), the quarantine
 layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
 session liveness (0.13), and procedural memory (0.14, benchmarked on

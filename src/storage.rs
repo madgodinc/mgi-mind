@@ -647,8 +647,9 @@ fn save_blocks(blocks: &std::collections::BTreeMap<String, String>) -> Result<()
 }
 
 /// Create or overwrite a pinned block, enforcing the size and count caps.
-/// Returns the canonical block name.
-pub fn set_block(name: &str, content: &str) -> Result<String> {
+/// Returns the canonical block name. Audited as `BlockSet` with the prior
+/// content, since a block is rendered into every briefing.
+pub fn set_block(name: &str, content: &str, actor: &str) -> Result<String> {
     let name = normalize_block_name(name)?;
     if content.len() > MAX_BLOCK_BYTES {
         anyhow::bail!(
@@ -660,20 +661,32 @@ pub fn set_block(name: &str, content: &str) -> Result<String> {
     if !blocks.contains_key(&name) && blocks.len() >= MAX_BLOCKS {
         anyhow::bail!("too many pinned blocks ({MAX_BLOCKS} max); remove one first");
     }
-    blocks.insert(name.clone(), content.to_string());
+    let prior = blocks.insert(name.clone(), content.to_string());
     save_blocks(&blocks)?;
+    let mut ev = crate::audit::AuditEvent::new(crate::audit::AuditOp::BlockSet, "", name.clone())
+        .actor(actor)
+        .after(content);
+    if let Some(p) = prior {
+        ev = ev.before(p);
+    }
+    crate::audit::record(ev);
     Ok(name)
 }
 
-/// Remove a pinned block; returns whether it existed.
-pub fn remove_block(name: &str) -> Result<bool> {
+/// Remove a pinned block; returns whether it existed. Audited as `BlockRemove`.
+pub fn remove_block(name: &str, actor: &str) -> Result<bool> {
     let name = normalize_block_name(name)?;
     let mut blocks = load_blocks();
-    let existed = blocks.remove(&name).is_some();
-    if existed {
-        save_blocks(&blocks)?;
-    }
-    Ok(existed)
+    let Some(prior) = blocks.remove(&name) else {
+        return Ok(false);
+    };
+    save_blocks(&blocks)?;
+    crate::audit::record(
+        crate::audit::AuditEvent::new(crate::audit::AuditOp::BlockRemove, "", name)
+            .actor(actor)
+            .before(prior),
+    );
+    Ok(true)
 }
 
 // --- Collection setup -------------------------------------------------------
@@ -4968,10 +4981,53 @@ async fn write_archive<W: std::io::Write>(config: &MindConfig, writer: W) -> Res
 /// in place under `mind_home`. Also accepts a pre-2.6 archive (a plain tar of
 /// the whole data dir, no `qdrant-snapshots/` entries): every path then takes
 /// the "ordinary file" branch and extracts exactly as it used to.
-async fn restore_archive<R: std::io::Read>(config: &MindConfig, reader: R) -> Result<()> {
+///
+/// The archive usually carries its own `audit.log`, which would silently
+/// rewind the live log. Before that entry is unpacked the live log is copied
+/// to `audit.log.pre-restore-<UTC stamp>`, and once the restore finishes a
+/// `BackupRestore` event naming the backup and that copy is appended to the
+/// restored chain, so the rewind is on the record and nothing is lost.
+async fn restore_archive<R: std::io::Read>(
+    config: &MindConfig,
+    reader: R,
+    source: &str,
+) -> Result<()> {
     let home = crate::config::mind_home();
     std::fs::create_dir_all(&home)?;
+    let mut saved_log: Option<std::path::PathBuf> = None;
+    let result = restore_archive_inner(config, reader, &home, &mut saved_log).await;
+    if result.is_ok() {
+        let mut note = format!("restored from {source}");
+        match &saved_log {
+            Some(p) => note.push_str(&format!(
+                "; live audit log before restore kept at {}",
+                p.display()
+            )),
+            None => note.push_str("; backup carried no audit.log, live log untouched"),
+        }
+        crate::audit::record(
+            crate::audit::AuditEvent::new(crate::audit::AuditOp::BackupRestore, "", "store")
+                .note(note),
+        );
+    }
+    result
+}
 
+/// True when an archive entry path is the top-level `audit.log`.
+fn is_audit_log_entry(path: &std::path::Path) -> bool {
+    let rel: std::path::PathBuf = path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    rel == std::path::Path::new("audit.log")
+}
+
+async fn restore_archive_inner<R: std::io::Read>(
+    config: &MindConfig,
+    reader: R,
+    home: &std::path::Path,
+    saved_log: &mut Option<std::path::PathBuf>,
+) -> Result<()> {
     let snapshot_tmp = tempfile::tempdir().context("creating a temp dir for snapshot restore")?;
     let mut snapshots: Vec<(String, std::path::PathBuf)> = Vec::new();
 
@@ -4993,8 +5049,20 @@ async fn restore_archive<R: std::io::Read>(config: &MindConfig, reader: R) -> Re
                 snapshots.push((collection.to_string(), out_path));
             }
             None => {
+                let live = home.join("audit.log");
+                if saved_log.is_none() && is_audit_log_entry(&path) && live.exists() {
+                    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+                    let copy = home.join(format!("audit.log.pre-restore-{stamp}"));
+                    std::fs::copy(&live, &copy).with_context(|| {
+                        format!(
+                            "saving the live audit log to {} before restore",
+                            copy.display()
+                        )
+                    })?;
+                    *saved_log = Some(copy);
+                }
                 entry
-                    .unpack_in(&home)
+                    .unpack_in(home)
                     .with_context(|| format!("extracting {}", path.display()))?;
             }
         }
@@ -5046,7 +5114,7 @@ pub async fn backup(config: &MindConfig, output: &str) -> Result<()> {
 pub async fn restore(config: &MindConfig, input: &str) -> Result<()> {
     let file = std::fs::File::open(input)
         .with_context(|| format!("Failed to open backup file {input}"))?;
-    restore_archive(config, file).await
+    restore_archive(config, file, input).await
 }
 
 // ===== Encrypted backup (roadmap v1.2 local half) =====
@@ -5123,7 +5191,7 @@ pub async fn restore_encrypted(config: &MindConfig, input: &str, passphrase: &st
     let archive = crate::vault::decrypt_with_key(blob, &key)
         .context("backup decryption failed: wrong passphrase?")?;
 
-    restore_archive(config, std::io::Cursor::new(archive)).await
+    restore_archive(config, std::io::Cursor::new(archive), input).await
 }
 
 #[cfg(test)]

@@ -99,6 +99,20 @@ pub enum AuditOp {
     /// starting here is held to full tamper-evidence as normal, while the
     /// documented gap before it is no longer mistaken for new tampering.
     Reanchor,
+    /// A skill was deleted with its outcome history (`mind_skill remove`).
+    /// `library` = "_skills", `target` = the skill's point id, `before` = the
+    /// skill text as it stood, so the removal is answerable from the log.
+    SkillRemove,
+    /// A pinned block was created or overwritten. `target` = block name,
+    /// `before` = the previous content when it existed, `after` = the new one.
+    BlockSet,
+    /// A pinned block was removed. `target` = block name, `before` = its content.
+    BlockRemove,
+    /// `mgimind restore` unpacked a backup over `$MGIMIND_HOME`. The backup may
+    /// carry its own `audit.log`, which replaces the live one; the live log is
+    /// copied aside first and `note` names both the backup and that copy, so
+    /// the rewind is itself on the record and nothing written before it is lost.
+    BackupRestore,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
@@ -465,6 +479,7 @@ fn emit_pulse(event: &AuditEvent) {
             (PulseKind::Write, t)
         }
         AuditOp::FactAdd => (PulseKind::Write, "fact".to_string()),
+        AuditOp::BlockSet => (PulseKind::Write, format!("block:{}", event.target)),
         AuditOp::ProcedureAdd => (PulseKind::Write, format!("mem:{}", event.target)),
         AuditOp::LibraryCreate | AuditOp::LibraryDrop => {
             (PulseKind::Write, format!("lib:{}", event.library))
@@ -484,6 +499,9 @@ fn emit_pulse(event: &AuditEvent) {
         | AuditOp::Restore
         | AuditOp::Relibrary
         | AuditOp::Reanchor
+        | AuditOp::SkillRemove
+        | AuditOp::BlockRemove
+        | AuditOp::BackupRestore
         | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)
