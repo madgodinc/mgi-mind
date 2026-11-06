@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[最新版本：v2.8.2](https://github.com/madgodinc/mgi-mind/releases/tag/v2.8.2)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[最新版本：v2.9.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.9.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 <p align="center">
   <a href="https://mcprush.com/madgodinc/mgi-mind-mcp"><img width="380" height="200" src="https://mcprush.com/badge/mgi-mind-mcp/card.svg" alt="MGI-Mind MCP server" loading="lazy" /></a>
@@ -223,7 +223,7 @@ claude mcp add mgimind -- npx -y mgi-mind mcp
 ### 安装器选项
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`：装到非 `~/.local/bin` 的位置。
-- `MGIMIND_TAG=v2.8.2 curl ... | sh`：锁定具体版本，而不是 `latest`。
+- `MGIMIND_TAG=v2.9.0 curl ... | sh`：锁定具体版本，而不是 `latest`。
 - `SKIP_DOCTOR=1 curl ... | sh`：只放下程序；之后自己运行 `init` + `doctor --fix`。
 
 ### 手动安装（不用脚本）
@@ -526,7 +526,7 @@ mgimind 不安装驱动、不添加网卡，也不改动任何路由、DNS 或�
 
 ## 状态与审计
 
-当前版本：**2.8.2**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
+当前版本：**2.9.0**（自 v1.0.0 起 semver 稳定）。基于 0.10.x 的审计
 日志和临时 viewer、0.11.x 的隔离层 + best-effort retrieval 策略、
 0.12.x 的 viewer 波次、0.13.x 的 session liveness、以及 0.14.x 的
 procedural-memory 护城河（LongMemEval baseline + 来自 20 个公开仓库的
