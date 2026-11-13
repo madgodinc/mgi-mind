@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Answers the Agent Memory Atlas report re-pinned at v2.9.0.
+
+### Added
+
+- **Human review.** Facts can wait on a person. A write that lands
+  `contested` gets `review = pending` with a question; an agent can open one
+  with `mind_review action=ask`. While pending, the fact is labelled as
+  disputed in query output, `mind_recall_all` and the session briefing, no duel
+  unseats it, and `invalidate` refuses it. The agent surface has `list` and
+  `ask` only. A person answers with `mgimind review accept|reject <id>`,
+  which refuses without a terminal and asks for the short id to be typed
+  back, or in the viewer's review tab, which needs the review PIN
+  (`mgimind review pin`, terminal only, stored as an Argon2id hash). The
+  answer is final for agents: an accepted value holds against later
+  contradictions, a rejected triple is refused when written again, and
+  `review_ask` / `review_answer` audit events record who asked and which
+  human surface answered.
+- The session briefing names how many facts wait on the user.
+
+### Fixed
+
+- **The duel no longer counts the challenger's own row as a rival.** With
+  A, B, A inside the flip-back window, a fourth write of A named A's own
+  contested row the loser, upserted it active, retired it and reported
+  `won`, leaving only B. The rival set now excludes the challenger's row.
+
 ## 2.9.0 (2026-11-07)
 
 Answers the limits named in the Agent Memory Atlas report at v2.8.2.

@@ -91,6 +91,32 @@
     border:1px solid rgba(120,160,255,.3); border-radius:10px; padding:12px; font-size:14px; line-height:1.6; resize:vertical; outline:none; display:none; }
   #inside.edit-open textarea { display:block; }
   #inside.edit-open .body { display:none; }
+  #reviewbtn { background:rgba(255,176,32,.16); color:#ffe2b0; border:1px solid rgba(255,176,32,.4);
+    border-radius:8px; padding:7px 11px; font-size:12px; cursor:pointer; }
+  #reviewbtn.empty { background:rgba(60,110,220,.18); color:#dce8ff; border-color:rgba(120,160,255,.3); }
+  #review { position:fixed; inset:0; z-index:30; display:none; align-items:center; justify-content:center;
+    background:radial-gradient(circle at 50% 40%, rgba(40,30,10,.55), rgba(3,5,12,.92) 70%); backdrop-filter: blur(4px); }
+  #review.show { display:flex; }
+  #review .card { position:relative; width:min(680px,90vw); max-height:82vh; overflow:auto;
+    background:linear-gradient(180deg, rgba(14,22,40,.97), rgba(8,12,24,.97));
+    border:1px solid rgba(255,176,32,.3); border-radius:18px; padding:26px 28px; }
+  #review .c-kind { font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#ffb020; opacity:.85; }
+  #review h2 { margin:6px 0 10px; color:#eaf2ff; font-size:20px; }
+  #review .addr { font-size:12px; opacity:.6; margin-bottom:14px; line-height:1.6; }
+  #review .close { position:absolute; top:18px; right:22px; font-size:13px; opacity:.7; cursor:pointer; }
+  #review .q { margin:0 0 18px; padding:0 0 16px; border-bottom:1px solid rgba(120,160,255,.15); }
+  #review .q:last-child { border-bottom:none; }
+  #review .q-axis { font-size:12px; opacity:.6; font-family: ui-monospace, Menlo, monospace; }
+  #review .q-ask { font-size:13.5px; margin:6px 0 10px; color:#ffe2b0; }
+  #review .val { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:9px; background:rgba(0,0,0,.22); margin:5px 0; }
+  #review .val .o { flex:1; font-size:14px; color:#eaf2ff; word-break:break-word; }
+  #review .val .st { font-size:11px; opacity:.55; }
+  #review .b-acc { background:rgba(80,200,140,.2); border-color:rgba(80,220,150,.5); color:#cff5e0; }
+  #review .b-rej { background:rgba(255,70,70,.14); border-color:rgba(255,90,90,.4); color:#ffc7c7; }
+  #review .pinrow { display:flex; gap:10px; align-items:center; margin:4px 0 18px; font-size:12px; opacity:.85; }
+  #review .pinrow input { width:130px; background:rgba(0,0,0,.3); color:#eaf2ff; border:1px solid rgba(120,160,255,.3);
+    border-radius:8px; padding:6px 10px; font-size:13px; outline:none; }
+  #review .none { opacity:.6; font-size:13px; margin:4px 0; }
   #inside .card::-webkit-scrollbar { width:10px; }
   #inside .card::-webkit-scrollbar-thumb { background:rgba(120,160,255,.3); border-radius:6px; }
 </style>
@@ -113,6 +139,7 @@
   </select>
   <div id="projmenu"><button id="projbtn"></button><div id="projlist"></div></div>
   <button id="editmode"></button>
+  <button id="reviewbtn" class="empty"></button>
   <div id="langmenu"><button id="langbtn">🌐 EN</button><div id="langlist"></div></div>
 </div>
 
@@ -174,6 +201,17 @@
   </div>
 </div>
 
+<div id="review">
+  <div class="card">
+    <div class="close" data-i18n="close">esc / click outside to close</div>
+    <div class="c-kind" data-i18n="rvKind">human review</div>
+    <h2 data-i18n="rvTitle">Waiting on you</h2>
+    <div class="addr" data-i18n="rvHelp"></div>
+    <div class="pinrow"><span data-i18n="rvPin">review PIN:</span><input id="rvPin" type="password" autocomplete="off"></div>
+    <div id="rvList"></div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
 <script src="https://unpkg.com/force-graph@1.43.0/dist/force-graph.min.js"></script>
@@ -193,7 +231,10 @@ const I18N = {
     neurons:'neurons (links)', cores:'cores', edit:'✎ edit', save:'💾 save to memory', del:'🗑 delete core',
     clickToEnter:'click to dive inside', noMatch:'no match', deleted:'🗑 deleted', saved:'💾 saved', pinned:'📌 layout pinned, survives reload', layoutReset:'↺ manual layout cleared',
     confirmDel:'Delete this core permanently?', kindMemory:'memory core', kindEntity:'entity', kindRegion:'region',
-    mId:'id:', mRegion:'region:', mAuthor:'author:', mWritten:'written:', mLinks:'links:' },
+    mId:'id:', mRegion:'region:', mAuthor:'author:', mWritten:'written:', mLinks:'links:',
+    rvBtn:'review', rvKind:'human review', rvTitle:'Waiting on you', rvHelp:'Agents can ask, but only you can answer. Answers need the review PIN you set with mgimind review pin in a terminal.',
+    rvPin:'review PIN:', rvNone:'Nothing is waiting on you.', rvAccept:'this one is true', rvReject:'reject', rvNoPin:'No review PIN yet: run mgimind review pin in a terminal.',
+    rvNeedPin:'enter your review PIN first', rvDone:'answer recorded', rvAsked:'question:' },
   ru: { appName:'MGI-Mind: мозг', intro:'Прототип. Наведись (выжимка через ~1с), кликни на ядро, чтобы нырнуть внутрь.',
     searchPh:'🔍 поиск по ядрам…', filterAll:'все типы', kMemory:'память', kEntity:'сущности', kLibrary:'регионы',
     kEntitySing:'сущность', kRegion:'регион', regionsBtn:'регионы ▾', regionPrefix:'регион: ', allRegions:'★ все регионы', reset:'сброс',
@@ -207,7 +248,10 @@ const I18N = {
     neurons:'нейроны (связи)', cores:'ядер', edit:'✎ редактировать', save:'💾 сохранить в память', del:'🗑 удалить ядро',
     clickToEnter:'клик, чтобы нырнуть внутрь', noMatch:'нет совпадений', deleted:'🗑 удалено', saved:'💾 сохранено', pinned:'📌 положение закреплено, переживёт перезагрузку', layoutReset:'↺ ручная расстановка сброшена',
     confirmDel:'Удалить ядро навсегда?', kindMemory:'ядро памяти', kindEntity:'сущность', kindRegion:'регион',
-    mId:'id:', mRegion:'регион:', mAuthor:'автор:', mWritten:'записано:', mLinks:'связей:' },
+    mId:'id:', mRegion:'регион:', mAuthor:'автор:', mWritten:'записано:', mLinks:'связей:',
+    rvBtn:'проверка', rvKind:'проверка человеком', rvTitle:'Ждёт тебя', rvHelp:'Агенты могут спросить, но ответить можешь только ты. Для ответа нужен PIN, заданный командой mgimind review pin в терминале.',
+    rvPin:'PIN проверки:', rvNone:'Ничего не ждёт твоего ответа.', rvAccept:'это верно', rvReject:'отклонить', rvNoPin:'PIN ещё не задан: выполни mgimind review pin в терминале.',
+    rvNeedPin:'сначала введи PIN проверки', rvDone:'ответ записан', rvAsked:'вопрос:' },
   de: { appName:'MGI-Mind: das Gehirn', intro:'Prototyp. Bewege die Maus (Zusammenfassung nach ~1s), klicke einen Kern zum Eintauchen.',
     searchPh:'🔍 Kerne suchen…', filterAll:'alle Typen', kMemory:'Gedächtnis', kEntity:'Entitäten', kLibrary:'Regionen',
     kEntitySing:'Entität', kRegion:'Region', regionsBtn:'Regionen ▾', regionPrefix:'Region: ', allRegions:'★ alle Regionen', reset:'zurücksetzen',
@@ -221,7 +265,10 @@ const I18N = {
     neurons:'Neuronen (Verbindungen)', cores:'Kerne', edit:'✎ bearbeiten', save:'💾 in Gedächtnis speichern', del:'🗑 Kern löschen',
     clickToEnter:'klicken zum Eintauchen', noMatch:'kein Treffer', deleted:'🗑 gelöscht', saved:'💾 gespeichert', pinned:'📌 Layout fixiert, übersteht Neuladen', layoutReset:'↺ manuelles Layout gelöscht',
     confirmDel:'Diesen Kern endgültig löschen?', kindMemory:'Gedächtniskern', kindEntity:'Entität', kindRegion:'Region',
-    mId:'id:', mRegion:'Region:', mAuthor:'Autor:', mWritten:'geschrieben:', mLinks:'Verbindungen:' },
+    mId:'id:', mRegion:'Region:', mAuthor:'Autor:', mWritten:'geschrieben:', mLinks:'Verbindungen:',
+    rvBtn:'Prüfung', rvKind:'menschliche Prüfung', rvTitle:'Wartet auf dich', rvHelp:'Agenten können fragen, antworten kannst nur du. Antworten brauchen die Prüf-PIN, gesetzt mit mgimind review pin im Terminal.',
+    rvPin:'Prüf-PIN:', rvNone:'Nichts wartet auf dich.', rvAccept:'das stimmt', rvReject:'ablehnen', rvNoPin:'Noch keine Prüf-PIN: mgimind review pin im Terminal ausführen.',
+    rvNeedPin:'zuerst die Prüf-PIN eingeben', rvDone:'Antwort gespeichert', rvAsked:'Frage:' },
 };
 let lang = localStorage.getItem('mind-lang') || 'en';
 function t(k){ return (I18N[lang]&&I18N[lang][k]) || I18N.en[k] || k; }
@@ -235,6 +282,7 @@ function applyI18n(){
   document.getElementById('bEdit').textContent=t('edit');
   document.getElementById('bSave').textContent=t('save');
   document.getElementById('bDel').textContent=t('del');
+  renderReviewBtn();
 }
 
 // ===================== MOCK DATA (shaped like /api/graph + /api/node) =====================
@@ -522,6 +570,40 @@ document.getElementById('bDel').onclick=async()=>{ if(!curNode)return; if(!confi
   } else { toast('only memory cores are deletable'); }
   await reload(); };
 
+// ===================== human review =====================
+// Agents can only ask (mind_review). Answers go to /api/review/:id with the
+// person's review PIN; the server refuses the viewer token alone.
+const reviewEl=document.getElementById('review'), reviewBtn=document.getElementById('reviewbtn');
+let REVIEW={ pin_set:false, questions:[] };
+function renderReviewBtn(){ const n=REVIEW.questions.length;
+  reviewBtn.textContent='⚖ '+t('rvBtn')+(n?' ('+n+')':''); reviewBtn.classList.toggle('empty',!n); }
+async function loadReview(){ try{ REVIEW=await apiGet('/api/review'); }catch(e){ REVIEW={pin_set:false,questions:[]}; } renderReviewBtn(); }
+function mk(tag,cls,text){ const e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e; }
+function valueRow(f){
+  const row=mk('div','val'); row.appendChild(mk('span','o',f.object));
+  row.appendChild(mk('span','st',(f.status||'active')+(f.review?' · '+f.review:'')));
+  const acc=mk('button','b-acc',t('rvAccept')); acc.onclick=()=>answerReview(f.id,'accept'); row.appendChild(acc);
+  if(f.review==='pending'){ const rej=mk('button','b-rej',t('rvReject')); rej.onclick=()=>answerReview(f.id,'reject'); row.appendChild(rej); }
+  return row; }
+function renderReview(){ const list=document.getElementById('rvList'); list.innerHTML='';
+  if(!REVIEW.pin_set) list.appendChild(mk('div','none',t('rvNoPin')));
+  if(!REVIEW.questions.length){ list.appendChild(mk('div','none',t('rvNone'))); return; }
+  for(const q of REVIEW.questions){ const box=mk('div','q'); const f=q.fact;
+    box.appendChild(mk('div','q-axis',f.subject+' → '+f.predicate));
+    if(f.review_question) box.appendChild(mk('div','q-ask',t('rvAsked')+' '+f.review_question));
+    box.appendChild(valueRow(f)); for(const r of q.rivals) box.appendChild(valueRow(r));
+    list.appendChild(box); } }
+async function answerReview(id,answer){ const pin=document.getElementById('rvPin').value;
+  if(!pin){ toast(t('rvNeedPin')); return; }
+  try{ const r=await fetch('/api/review/'+encodeURIComponent(id)+'?token='+TOKEN,
+        { method:'POST', headers:{Authorization:'Bearer '+TOKEN,'Content-Type':'application/json'}, body:JSON.stringify({answer,pin}) });
+    if(!r.ok) throw new Error(await r.text()); toast(t('rvDone'));
+  }catch(e){ toast(e.message); }
+  await loadReview(); renderReview(); }
+reviewBtn.onclick=async()=>{ await loadReview(); renderReview(); reviewEl.classList.add('show'); };
+reviewEl.addEventListener('click',e=>{ if(e.target===reviewEl||e.target.classList.contains('close')) reviewEl.classList.remove('show'); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') reviewEl.classList.remove('show'); });
+
 // reload the graph from the server and rebuild
 async function reload(){ await loadGraph(); makeGraph(); }
 
@@ -549,7 +631,7 @@ function startPulseFeed(){
 
 // ===================== init =====================
 applyI18n();
-(async()=>{ await loadGraph(); makeGraph(); startPulseFeed(); })();
+(async()=>{ await loadGraph(); makeGraph(); startPulseFeed(); loadReview(); })();
 </script>
 </body>
 </html>

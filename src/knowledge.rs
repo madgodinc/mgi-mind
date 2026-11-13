@@ -273,6 +273,14 @@ pub struct Fact {
     /// True when the doubt window is enforcing and this fact has drifted out of
     /// context often enough to be discounted. Always false in shadow mode.
     pub in_doubt: bool,
+    /// Human review state (`crate::review`): `pending` while the fact waits on
+    /// a person, `accepted` / `rejected` once a person decided. `None` for a
+    /// fact nobody asked about. Only the human surfaces write the last two.
+    #[serde(default)]
+    pub review: Option<String>,
+    /// The question put to the person, when an agent asked one.
+    #[serde(default)]
+    pub review_question: Option<String>,
 }
 
 fn extract_string(
@@ -534,9 +542,36 @@ async fn add_fact_core(
             "valid_from",
             "status",
             "valid_until",
+            "review",
+            "review_question",
+            "reviewed_by",
+            "reviewed_at",
         ],
     )
     .await;
+    let existing_review = existing_fields[6].clone();
+    // An upsert replaces the whole payload, so a re-assertion carries the
+    // review fields forward instead of silently wiping a person's decision.
+    let carried_review: Vec<(&str, String)> =
+        ["review", "review_question", "reviewed_by", "reviewed_at"]
+            .iter()
+            .zip(existing_fields[6..10].iter())
+            .filter_map(|(k, v)| v.clone().map(|v| (*k, v)))
+            .collect();
+    // A person rejected this exact triple: that decision is final for agents.
+    // Nothing is written; only a person can reopen it.
+    if existing_review.as_deref() == Some(crate::review::REJECTED) {
+        crate::audit::record(
+            crate::audit::AuditEvent::new(
+                crate::audit::AuditOp::FactAdd,
+                "_facts".to_string(),
+                id.clone(),
+            )
+            .actor(author.unwrap_or("unknown"))
+            .note("rejected (refused: a person rejected this triple in review)"),
+        );
+        return Ok((id, crate::review::REJECTED));
+    }
     let existing_created_at = existing_fields[0].clone();
     let existing_valid = existing_fields[1].clone();
     let existing_confirmations: u32 = existing_fields[2]
@@ -638,68 +673,86 @@ async fn add_fact_core(
     // Run the duel scaffold only when there's an actual contradiction.
     // detect_conflict already filters re-assertions of the same object
     // and Multi predicates.
-    let (status, loser_to_retire) =
-        if cardinality.admits_conflict() && detect_conflict(&existing, object, cardinality) {
-            // §5a: `diverse_confirmations` is this triple's own confirmation
-            // count (see above) rather than a hardcoded 1 - a first-time
-            // write still gets exactly 1 (bit-for-bit the old "first mention"
-            // weight), but a value re-asserted several times, or re-proposed
-            // after losing an earlier duel, is judged on its real history.
-            //
-            // §5c: inheritance discount. `doubt::mark_inherited` is set by
-            // `build_context`'s KG section for every fact it surfaces to the
-            // agent at session start; a challenger that is merely being
-            // re-asserted from that inherited context (not independently
-            // observed live) counts at the discounted weight
-            // (`duel::INHERITANCE_DISCOUNT`), same as `from_live_session =
-            // false` always has. Nothing marks a fact inherited unless the
-            // briefing path ran, so this is a no-op for every caller that
-            // predates §5c.
-            let new_inputs = crate::duel::NewFactInputs {
-                from_live_session: !crate::doubt::is_inherited(&id),
-                diverse_confirmations: confirmations,
-                external_signals: 0,
-                // A brand-new fact has no typed signals yet — the v1.5
-                // Phase 7 score path activates only when mind_outcome
-                // calls land against an existing memory_id (in the duel
-                // path for an existing F_old, see Step 7.2 sketch).
-                external_signal_score: None,
-            };
-            let (outcome, loser) =
-                crate::duel::resolve_against_existing(config, &existing, new_inputs, cardinality)
-                    .await?;
-            match outcome {
-                // A Flip unseats the old value. HOW the loser is retired depends
-                // on cardinality:
-                //   * TemporalSingle — the old value was correct AT ITS TIME and
-                //     is part of a historical sequence, so it is SUPERSEDED
-                //     (kept as queryable history, hidden from default reads).
-                //   * Single — there is no temporal history; the old value is
-                //     simply stale (dampened). Same hidden-from-default effect.
-                // This is the write-path half of audit #13: a plain `fact_add`
-                // of a new TemporalSingle value now records the prior value as
-                // `superseded`, instead of leaving it `stale` with no history
-                // distinction.
-                // Flip-back damping: this very triple lost a duel within the
-                // last `flip_back_window_hours`. Re-asserting it would win again
-                // (its count just rose) and the two values would trade places
-                // on every write. Hold both visible as contested instead, and
-                // leave the current winner in place.
-                crate::duel::DuelOutcome::Flip if flip_back => (EntryStatus::Contested, None),
-                crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
-                crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
-                // Quarantine: the duel says the fresh fact is too weak to
-                // unseat the entrenched one. Post-critic (round 2): use the
-                // dedicated EntryStatus::QuarantineCandidate to distinguish
-                // "weak rejected, waiting promote-on-repeat" from "live
-                // contested both visible." Earlier interim collapsed both
-                // to Contested, which prevented STALE bench from measuring
-                // the difference.
-                crate::duel::DuelOutcome::Quarantine => (EntryStatus::QuarantineCandidate, None),
-            }
-        } else {
-            (EntryStatus::Active, None)
+    // A rival a person accepted, or one already waiting on a person, is not
+    // the duel's to unseat: the contradiction joins the question instead.
+    let human_holds_axis = existing
+        .iter()
+        .any(|f| f.id != id && crate::review::holds(f.review.as_deref()));
+    let own_review = existing_review.as_deref();
+    let (status, loser_to_retire) = if own_review == Some(crate::review::ACCEPTED) {
+        // A person accepted this exact triple; re-asserting it changes nothing.
+        (EntryStatus::Active, None)
+    } else if (human_holds_axis || own_review == Some(crate::review::PENDING))
+        && cardinality.admits_conflict()
+        && detect_conflict(&existing, object, cardinality)
+    {
+        (EntryStatus::Contested, None)
+    } else if cardinality.admits_conflict() && detect_conflict(&existing, object, cardinality) {
+        // §5a: `diverse_confirmations` is this triple's own confirmation
+        // count (see above) rather than a hardcoded 1 - a first-time
+        // write still gets exactly 1 (bit-for-bit the old "first mention"
+        // weight), but a value re-asserted several times, or re-proposed
+        // after losing an earlier duel, is judged on its real history.
+        //
+        // §5c: inheritance discount. `doubt::mark_inherited` is set by
+        // `build_context`'s KG section for every fact it surfaces to the
+        // agent at session start; a challenger that is merely being
+        // re-asserted from that inherited context (not independently
+        // observed live) counts at the discounted weight
+        // (`duel::INHERITANCE_DISCOUNT`), same as `from_live_session =
+        // false` always has. Nothing marks a fact inherited unless the
+        // briefing path ran, so this is a no-op for every caller that
+        // predates §5c.
+        let new_inputs = crate::duel::NewFactInputs {
+            from_live_session: !crate::doubt::is_inherited(&id),
+            diverse_confirmations: confirmations,
+            external_signals: 0,
+            // A brand-new fact has no typed signals yet — the v1.5
+            // Phase 7 score path activates only when mind_outcome
+            // calls land against an existing memory_id (in the duel
+            // path for an existing F_old, see Step 7.2 sketch).
+            external_signal_score: None,
         };
+        // The challenger's own row is not its rival. `existing` holds every
+        // visible row on the axis, a contested earlier write of this very
+        // triple among them; left in, it can be the most entrenched and be
+        // named the loser, so the write upserts itself active, retires
+        // itself and still reports "won" (atlas review at v2.9.0).
+        let rivals: Vec<Fact> = existing.iter().filter(|f| f.id != id).cloned().collect();
+        let (outcome, loser) =
+            crate::duel::resolve_against_existing(config, &rivals, new_inputs, cardinality).await?;
+        match outcome {
+            // A Flip unseats the old value. HOW the loser is retired depends
+            // on cardinality:
+            //   * TemporalSingle — the old value was correct AT ITS TIME and
+            //     is part of a historical sequence, so it is SUPERSEDED
+            //     (kept as queryable history, hidden from default reads).
+            //   * Single — there is no temporal history; the old value is
+            //     simply stale (dampened). Same hidden-from-default effect.
+            // This is the write-path half of audit #13: a plain `fact_add`
+            // of a new TemporalSingle value now records the prior value as
+            // `superseded`, instead of leaving it `stale` with no history
+            // distinction.
+            // Flip-back damping: this very triple lost a duel within the
+            // last `flip_back_window_hours`. Re-asserting it would win again
+            // (its count just rose) and the two values would trade places
+            // on every write. Hold both visible as contested instead, and
+            // leave the current winner in place.
+            crate::duel::DuelOutcome::Flip if flip_back => (EntryStatus::Contested, None),
+            crate::duel::DuelOutcome::Flip => (EntryStatus::Active, loser),
+            crate::duel::DuelOutcome::Contested => (EntryStatus::Contested, None),
+            // Quarantine: the duel says the fresh fact is too weak to
+            // unseat the entrenched one. Post-critic (round 2): use the
+            // dedicated EntryStatus::QuarantineCandidate to distinguish
+            // "weak rejected, waiting promote-on-repeat" from "live
+            // contested both visible." Earlier interim collapsed both
+            // to Contested, which prevented STALE bench from measuring
+            // the difference.
+            crate::duel::DuelOutcome::Quarantine => (EntryStatus::QuarantineCandidate, None),
+        }
+    } else {
+        (EntryStatus::Active, None)
+    };
 
     // §5c: a live, independently-confirmed write - this call landed the fact
     // as Active, whether by a plain re-assertion or by winning a duel - is
@@ -735,6 +788,24 @@ async fn add_fact_core(
     // single-agent path; legacy facts simply lack the key.
     if let Some(a) = author {
         payload.insert("author".into(), a.into());
+    }
+    for (k, v) in &carried_review {
+        payload.insert((*k).into(), v.clone().into());
+    }
+    // A contested write is a disagreement the store cannot settle on its own:
+    // it waits on a person (`crate::review`). Agents can see the question but
+    // hold no verb that answers it.
+    if status == EntryStatus::Contested && own_review.is_none() {
+        payload.insert("review".into(), crate::review::PENDING.into());
+        payload.insert(
+            "review_question".into(),
+            "Contradicts a value already on record: which one is true?".into(),
+        );
+        payload.insert("review_asked_by".into(), author.unwrap_or("duel").into());
+        payload.insert(
+            "review_asked_at".into(),
+            chrono::Utc::now().to_rfc3339().into(),
+        );
     }
     // What was being worked on when this fact was asserted. The doubt window
     // later compares this against the context a retrieval happens in. Only an
@@ -1032,6 +1103,10 @@ pub async fn list_contested(config: &MindConfig, limit: usize) -> Result<Vec<Fac
 /// Default `query_facts` still hides both. Optionally narrow to one predicate.
 /// Build a `Fact` from a scrolled point — one place, so the `valid_until` field
 /// (and the rest) can't drift between the several query paths.
+pub(crate) fn fact_from_point_pub(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
+    fact_from_point(point)
+}
+
 fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
     let p = &point.payload;
     Fact {
@@ -1051,6 +1126,8 @@ fn fact_from_point(point: &qdrant_client::qdrant::RetrievedPoint) -> Fact {
         valid: true,
         origin_context_id: extract_string(p, "origin_context_id"),
         in_doubt: false,
+        review: extract_string(p, "review"),
+        review_question: extract_string(p, "review_question"),
     }
 }
 
@@ -1279,12 +1356,21 @@ pub async fn invalidate_fact_authored(
         &client,
         storage::FACTS_COLLECTION,
         id,
-        &["subject", "predicate", "object"],
+        &["subject", "predicate", "object", "review"],
     )
     .await;
     let subject = triple_fields[0].clone();
     let predicate = triple_fields[1].clone();
     let object = triple_fields[2].clone();
+    // A fact waiting on a person, or one a person accepted, is not an agent's
+    // to retract: invalidating it would answer the review without the person.
+    if crate::review::holds(triple_fields[3].as_deref()) {
+        anyhow::bail!(
+            "fact {id} is under human review ({}); only a person can settle it \
+             (mgimind review, or the viewer's review tab)",
+            triple_fields[3].as_deref().unwrap_or("?")
+        );
+    }
 
     let point_id: qdrant_client::qdrant::PointId = id.to_string().into();
 
