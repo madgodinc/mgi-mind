@@ -3799,10 +3799,31 @@ fn flip_back_within_window_lands_contested() {
             "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
         serde_json::json!({"name":"mind_fact","arguments":{
             "action":"query","subject":subj}}),
+        // A fourth write of value_A while it is still contested.
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"query","subject":subj}}),
     ];
     let (stdout, stderr) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
     let results = parse_mcp_results(&stdout);
     let chain = format!("stdout parsed: {results:?}\n--- stderr ---\n{stderr}");
+
+    // The challenger's own contested row must never be its rival: before the
+    // fix the fourth write named value_A's own row the loser, upserted it
+    // active, retired it and reported "won", leaving only value_B.
+    let again = results.get(&7).cloned().unwrap_or_default().1;
+    let after = results.get(&8).cloned().unwrap_or_default().1;
+    assert!(
+        after.contains("value_A"),
+        "a re-asserted value must not retire its own row: {again}\n{after}\n{chain}"
+    );
+    if again.contains("won") {
+        assert!(
+            !after.contains("value_B"),
+            "a won verdict must retire the rival, not the challenger: {after}\n{chain}"
+        );
+    }
 
     let flip = results.get(&4).cloned().unwrap_or_default().1;
     assert!(
@@ -3997,8 +4018,8 @@ fn deprecated_aliases_hidden_by_default_but_still_dispatch() {
     );
     assert_eq!(
         tools.len(),
-        29,
-        "default listing must be the 29-tool surface (aliases hidden): {chain}"
+        30,
+        "default listing must be the 30-tool surface (aliases hidden): {chain}"
     );
 
     let call_resp = responses
@@ -4063,7 +4084,218 @@ fn deprecated_aliases_hidden_by_default_but_still_dispatch() {
     );
     assert_eq!(
         tools2.len(),
-        44,
-        "MGIMIND_LIST_DEPRECATED=1 must restore the full 44-tool surface: {chain2}"
+        45,
+        "MGIMIND_LIST_DEPRECATED=1 must restore the full 45-tool surface: {chain2}"
+    );
+}
+
+/// Raw HTTP/1.1 request against a local viewer; returns (status, body).
+fn http_req(port: u16, method: &str, path: &str, token: &str, body: Option<&str>) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect viewer");
+    let body = body.unwrap_or("");
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status = out
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    (status, body)
+}
+
+/// Human review: a contradiction the duel cannot settle waits on a person,
+/// and the agent that wrote it cannot answer it. The agent surfaces can list
+/// and ask; `mgimind review accept` refuses without a terminal; invalidate
+/// refuses a fact under review; the viewer refuses an answer without the
+/// person's PIN and accepts one with it. The answer is final: the rejected
+/// value is refused when an agent writes it again.
+#[test]
+fn contested_fact_waits_on_a_person() {
+    let Some(port) = qdrant_port() else {
+        eprintln!("SKIP: set MGIMIND_IT_QDRANT=<grpc port> to run integration tests");
+        return;
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let mind = home.path().join("mgimind");
+    std::fs::create_dir_all(&mind).unwrap();
+    write_e5_config(&mind, &port);
+    let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| String::from("/dev/null"));
+    let pid = std::process::id();
+    let pred = format!("review_pred_{pid}");
+    let subj = format!("review_subj_{pid}");
+
+    // A, B (B wins), A again inside the flip-back window: contested, so it
+    // waits on a person.
+    let calls = vec![
+        serde_json::json!({"name":"mind_predicate","arguments":{
+            "action":"register","predicate":pred,"cardinality":"Single"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_B"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_A"}}),
+        serde_json::json!({"name":"mind_review","arguments":{"action":"list"}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"query","subject":subj}}),
+    ];
+    let (stdout, stderr) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
+    let r = parse_mcp_results(&stdout);
+    let chain = format!("stdout parsed: {r:?}\n--- stderr ---\n{stderr}");
+    let back = r.get(&5).cloned().unwrap_or_default().1;
+    assert!(
+        back.contains("contested"),
+        "third write must contest: {chain}"
+    );
+    let a_id = back
+        .split("id: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no id in: {back}"));
+    let listed = r.get(&6).cloned().unwrap_or_default().1;
+    assert!(
+        listed.contains("value_A") && listed.contains("value_B") && listed.contains(&a_id),
+        "the queue must show the question with its rival: {chain}"
+    );
+    let q = r.get(&7).cloned().unwrap_or_default().1;
+    assert!(
+        q.contains("waiting on the user's review"),
+        "a disputed value must be labelled in query output: {chain}"
+    );
+
+    // The agent holds no answer verb: invalidating the held fact is refused.
+    let calls = vec![serde_json::json!({"name":"mind_fact","arguments":{
+        "action":"invalidate","id":a_id}})];
+    let (stdout, _) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
+    let inv = parse_mcp_results(&stdout)
+        .get(&2)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        inv.1.contains("human review"),
+        "invalidate must refuse a fact under review: {inv:?}"
+    );
+
+    // The terminal path refuses without a terminal (this test pipes stdio, the
+    // same way an agent's shell tool does).
+    let (ok, _o, e) = run_cli(&mind, &ort, &["review", "accept", &a_id]);
+    assert!(
+        !ok && e.contains("terminal"),
+        "review accept must need a TTY: {e}"
+    );
+    let (ok, _o, e) = run_cli(&mind, &ort, &["review", "pin"]);
+    assert!(
+        !ok && e.contains("terminal"),
+        "review pin must need a TTY: {e}"
+    );
+
+    // The person's PIN, as `mgimind review pin` would store it.
+    {
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = argon2::Argon2::default()
+            .hash_password(b"correct-pin", &salt)
+            .unwrap()
+            .to_string();
+        std::fs::write(mind.join("review_pin"), hash).unwrap();
+    }
+    let vport = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let token = format!("tok{pid}");
+    let mut viewer = Command::new(bin())
+        .args([
+            "viewer",
+            "--no-open",
+            "--port",
+            &vport.to_string(),
+            "--token",
+            &token,
+        ])
+        .env("MGIMIND_HOME", &mind)
+        .env("ORT_DYLIB_PATH", &ort)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn viewer");
+    let mut up = false;
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", vport)).is_ok() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(up, "viewer did not start");
+    let path = format!("/api/review/{a_id}");
+    let (st_token_only, _) = http_req(
+        vport,
+        "POST",
+        &path,
+        &token,
+        Some(r#"{"answer":"accept","pin":"wrong"}"#),
+    );
+    let (st_ok, ok_body) = http_req(
+        vport,
+        "POST",
+        &path,
+        &token,
+        Some(r#"{"answer":"accept","pin":"correct-pin"}"#),
+    );
+    let (_, queue) = http_req(vport, "GET", "/api/review", &token, None);
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+    assert_eq!(
+        st_token_only, 403,
+        "the viewer token alone must not answer a review"
+    );
+    assert_eq!(st_ok, 200, "the right PIN must answer: {ok_body}");
+    assert!(
+        ok_body.contains("accepted"),
+        "the answer must be recorded: {ok_body}"
+    );
+    // The Qdrant is shared with other tests, so check only this axis.
+    assert!(
+        !queue.contains(&subj),
+        "this question must leave the queue once answered: {queue}"
+    );
+
+    // The answer stands: A is confirmed, B is retired, and B written again by
+    // an agent is refused as rejected.
+    let calls = vec![
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"query","subject":subj}}),
+        serde_json::json!({"name":"mind_fact","arguments":{
+            "action":"add","subject":subj,"predicate":pred,"object":"value_B"}}),
+    ];
+    let (stdout, stderr) = run_mcp(&mind, &ort, &mcp_call_script(&calls));
+    let r = parse_mcp_results(&stdout);
+    let chain = format!("stdout parsed: {r:?}\n--- stderr ---\n{stderr}");
+    let q = r.get(&2).cloned().unwrap_or_default().1;
+    assert!(
+        q.contains("value_A") && q.contains("confirmed by the user") && !q.contains("value_B"),
+        "after the answer only the accepted value holds: {chain}"
+    );
+    let again = r.get(&3).cloned().unwrap_or_default().1;
+    assert!(
+        again.contains("rejected"),
+        "a rejected triple must be refused: {chain}"
+    );
+
+    // The audit log names the human surface.
+    let log = std::fs::read_to_string(mind.join("audit.log")).unwrap_or_default();
+    assert!(
+        log.contains("human:viewer-pin"),
+        "the answer must be audited with its surface"
     );
 }

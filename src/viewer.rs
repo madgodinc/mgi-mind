@@ -50,6 +50,8 @@ struct AppState {
     /// is confined: memory views are filtered to these libraries and endpoints
     /// that span all libraries or mutate are fail-closed (403).
     libraries: Arc<Vec<String>>,
+    /// Wrong review PINs in a row, and when the lockout they caused ends.
+    pin_fails: Arc<parking_lot::Mutex<(u32, Option<std::time::Instant>)>>,
 }
 
 impl AppState {
@@ -99,6 +101,7 @@ pub async fn run_on(
         config: Arc::new(config),
         token: Arc::new(token.clone()),
         libraries: Arc::new(libraries),
+        pin_fails: Arc::new(parking_lot::Mutex::new((0, None))),
     };
 
     let app = Router::new()
@@ -110,6 +113,8 @@ pub async fn run_on(
         .route("/api/memories/:id", delete(api_delete_memory))
         .route("/api/quarantine", get(api_quarantine_list))
         .route("/api/quarantine/:id/promote", post(api_quarantine_promote))
+        .route("/api/review", get(api_review_list))
+        .route("/api/review/:id", post(api_review_answer))
         .route("/api/consolidate", get(api_consolidate_dry_run))
         .route("/api/ingest/recent", get(api_ingest_recent))
         .route("/api/graph", get(api_graph))
@@ -451,6 +456,95 @@ async fn api_consolidate_dry_run(
     Ok(Json(report))
 }
 
+/// Open human-review questions, for the review tab. Read-only: the token is
+/// enough to see them.
+async fn api_review_list(
+    State(state): State<AppState>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?;
+    let qs = crate::review::list_pending(&state.config, 200)
+        .await
+        .map_err(internal)?;
+    Ok(Json(serde_json::json!({
+        "pin_set": crate::review::pin_is_set(&state.config),
+        "questions": qs,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ReviewBody {
+    answer: String,
+    pin: String,
+}
+
+const PIN_TRIES: u32 = 5;
+const PIN_LOCKOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A person answers a review from the viewer. The bearer token is NOT enough:
+/// an agent that opened this viewer (`mind_visualize`) holds the token too. The
+/// answer must carry the review PIN, which only a person sets at a terminal
+/// (`mgimind review pin`) and which is stored only as an Argon2id hash. Five
+/// wrong PINs lock answers for fifteen minutes.
+async fn api_review_answer(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    headers: HeaderMap,
+    Json(body): Json<ReviewBody>,
+) -> Result<Json<serde_json::Value>, Response> {
+    check_auth(&state, &headers, &q).map_err(|s| s.into_response())?;
+    state.allow_broad()?;
+    let answer = crate::review::Answer::parse(&body.answer).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "answer must be accept or reject").into_response()
+    })?;
+    if !crate::review::pin_is_set(&state.config) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "no review PIN is set: run `mgimind review pin` in a terminal first",
+        )
+            .into_response());
+    }
+    {
+        let mut f = state.pin_fails.lock();
+        if let Some(until) = f.1 {
+            if std::time::Instant::now() < until {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many wrong PINs; try later",
+                )
+                    .into_response());
+            }
+            *f = (0, None);
+        }
+    }
+    let cfg = state.config.clone();
+    let pin = body.pin.clone();
+    let ok = tokio::task::spawn_blocking(move || crate::review::verify_pin(&cfg, &pin))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        let mut f = state.pin_fails.lock();
+        f.0 += 1;
+        if f.0 >= PIN_TRIES {
+            f.1 = Some(std::time::Instant::now() + PIN_LOCKOUT);
+        }
+        audit::record(
+            audit::AuditEvent::new(audit::AuditOp::ReviewAnswer, "_facts", &id)
+                .actor("viewer")
+                .note("refused: wrong review PIN"),
+        );
+        return Err((StatusCode::FORBIDDEN, "wrong review PIN").into_response());
+    }
+    *state.pin_fails.lock() = (0, None);
+    let f = crate::review::answer(&state.config, &id, answer, "human:viewer-pin")
+        .await
+        .map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ok": true, "fact": f })))
+}
+
 async fn api_quarantine_promote(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -742,6 +836,7 @@ mod tests {
             config: Arc::new(MindConfig::default()),
             token: Arc::new("t".to_string()),
             libraries: Arc::new(libs.iter().map(|s| s.to_string()).collect()),
+            pin_fails: Arc::new(parking_lot::Mutex::new((0, None))),
         }
     }
 

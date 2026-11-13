@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **[Русский](README.ru.md)** | **[中文](README.zh.md)**
 
-**[Latest release: v2.9.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.9.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
+**[Latest release: v2.10.0](https://github.com/madgodinc/mgi-mind/releases/tag/v2.10.0)** · **[CHANGELOG](CHANGELOG.md)** · **[Discussions](https://github.com/madgodinc/mgi-mind/discussions)** · **[Issues](https://github.com/madgodinc/mgi-mind/issues)** · **[Contributing](CONTRIBUTING.md)**
 
 <p align="center">
   <a href="https://mcprush.com/madgodinc/mgi-mind-mcp"><img width="380" height="200" src="https://mcprush.com/badge/mgi-mind-mcp/card.svg" alt="MGI-Mind MCP server" loading="lazy" /></a>
@@ -332,7 +332,7 @@ a missing library is telling you about `<install dir>/`, not `~/mgimind/`.
 ### Installer flags
 
 - `INSTALL_DIR=/opt/mgimind curl ... | sh`: install somewhere other than `~/.local/bin`.
-- `MGIMIND_TAG=v2.9.0 curl ... | sh`: pin a specific release instead of `latest`.
+- `MGIMIND_TAG=v2.10.0 curl ... | sh`: pin a specific release instead of `latest`.
 - `SKIP_DOCTOR=1 curl ... | sh`: just drop the binary; run `init` + `doctor --fix` yourself later.
 
 ### Manual install (no installer)
@@ -547,6 +547,35 @@ never a corrupt one.
 | `mgimind fact invalidate <id>` | Soft-delete a fact (kept on disk, marked invalid, hidden from queries). |
 | `mgimind fact restore <id>` | Undo an invalidate - the only way back. |
 
+### Human review
+
+Some facts wait on a person. A write that contradicts a value on record and
+lands `contested` waits on its own; an agent can also put a fact to the user
+with `mind_review action=ask` when it matters and the agent is not sure. Until
+the user answers, the fact is labelled as disputed wherever it is read, no duel
+can unseat it, and an agent cannot invalidate it.
+
+The agent holds no verb that answers. `mind_review` has `list` and `ask` only.
+Answers come from two places, each gated on something an agent's process does
+not have:
+
+| Command | What it does |
+|---|---|
+| `mgimind review list` | The open questions, with the values each one contradicts. Works anywhere. |
+| `mgimind review accept <id>` / `reject <id>` | Answer a question. Refuses unless stdin and stdout are a terminal, then asks you to type the fact's short id back. |
+| `mgimind review pin` | Set the PIN the viewer asks for (terminal only, hidden input, stored as an Argon2id hash). |
+
+The viewer has a review tab that sends the PIN with each answer; its bearer
+token alone is refused, since an agent that opened the viewer holds the token.
+Five wrong PINs lock answers for fifteen minutes. An answer is final for
+agents: an accepted value stays, a rejected triple is refused when written
+again, and the audit log records `review_answer` with the surface
+(`human:terminal` or `human:viewer-pin`).
+
+The limit: an agent that can write files in `$MGIMIND_HOME` could replace the
+PIN hash, as it could replace the store itself. The gate keeps the agent's own
+tools from closing its own questions; it is not a sandbox.
+
 ### Skills
 
 A procedure answers "this broke, what fixed it last time". A skill answers "I am
@@ -715,7 +744,7 @@ trust.
 
 ## Status and audit
 
-Current version: **2.9.0** (semver-stable since v1.0.0). The 0.x line built
+Current version: **2.10.0** (semver-stable since v1.0.0). The 0.x line built
 the foundation: the audit log and ephemeral viewer (0.10), the quarantine
 layer and best-effort retrieval policy (0.11), the viewer wave (0.12),
 session liveness (0.13), and procedural memory (0.14, benchmarked on
@@ -724,9 +753,9 @@ LongMemEval-S plus a 227-pair error→fix dataset from 20 public repos). The
 background re-test, bi-temporal fact supersession, the confidence score, and
 typed outcome signals (`mind_outcome`), plus install-mode CPU/GPU profiles.
 
-The MCP surface is additive-only until a 2.0 bump: 29 live tools plus 15
+The MCP surface is additive-only until a 2.0 bump: 30 live tools plus 15
 deprecated aliases kept for compatibility. Nothing is renamed or removed inside
-2.x; new verbs (most recently `mind_skill`) may be added. The other 1.0 contracts
+2.x; new verbs (most recently `mind_review`) may be added. The other 1.0 contracts
 are the asymmetric "Qdrant now → md says" reconcile diff and the
 `MGIMIND_MODEL_VARIANT={cpu|gpu|auto}` switch.
 

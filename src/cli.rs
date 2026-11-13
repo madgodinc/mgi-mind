@@ -546,6 +546,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: QuarantineAction,
     },
+    /// Facts waiting on a person: contradictions the store could not settle,
+    /// and questions an agent asked. Listing works anywhere; answering only at
+    /// a real terminal, so an agent cannot answer its own question.
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Ingest a closed Claude Code transcript (`.jsonl` under
     /// `~/.claude/projects/<encoded-cwd>/`) into long-term memory. Pulls
     /// user/assistant text blocks (NOT tool_use / tool_result / thinking),
@@ -782,6 +789,24 @@ pub enum QuarantineAction {
     /// to reject it. Only ever touches quarantined points, never live memory,
     /// and the content + reason stay in the audit log so it's recoverable.
     Expire { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum ReviewAction {
+    /// List the open questions, oldest first, with the values they contradict.
+    List {
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+    /// Accept a fact (terminal only): it becomes the value, and on a
+    /// single-valued predicate every rival is retired.
+    Accept { id: String },
+    /// Reject a fact (terminal only): it is retired, and an agent writing it
+    /// again is refused.
+    Reject { id: String },
+    /// Set the PIN the viewer's review tab asks for (terminal only, hidden
+    /// input). Stored as an Argon2id hash.
+    Pin,
 }
 
 #[derive(Subcommand)]
@@ -1302,8 +1327,121 @@ pub async fn run(cli: Cli) -> Result<()> {
             QuarantineAction::Promote { id } => cmd_quarantine_promote(&id).await,
             QuarantineAction::Expire { id } => cmd_quarantine_expire(&id).await,
         },
+        Commands::Review { action } => match action {
+            ReviewAction::List { limit } => cmd_review_list(limit).await,
+            ReviewAction::Accept { id } => {
+                cmd_review_answer(&id, crate::review::Answer::Accept).await
+            }
+            ReviewAction::Reject { id } => {
+                cmd_review_answer(&id, crate::review::Answer::Reject).await
+            }
+            ReviewAction::Pin => cmd_review_pin(),
+        },
         Commands::IngestSession { path, library } => cmd_ingest_session(&path, &library).await,
     }
+}
+
+pub(crate) fn render_review_list(qs: &[crate::review::Question]) -> String {
+    if qs.is_empty() {
+        return "No facts are waiting on a person.
+"
+        .to_string();
+    }
+    let mut out = format!(
+        "{} fact(s) waiting on a person:
+",
+        qs.len()
+    );
+    for q in qs {
+        let f = &q.fact;
+        out.push_str(&format!(
+            "
+[{}] {} -> {} -> {}   ({})
+  question: {}
+",
+            crate::review::short_id(&f.id),
+            f.subject,
+            f.predicate,
+            f.object,
+            f.status.as_deref().unwrap_or("active"),
+            f.review_question.as_deref().unwrap_or("-"),
+        ));
+        for r in &q.rivals {
+            out.push_str(&format!(
+                "  vs [{}] {}   ({}{})
+",
+                crate::review::short_id(&r.id),
+                r.object,
+                r.status.as_deref().unwrap_or("active"),
+                r.review
+                    .as_deref()
+                    .map(|x| format!(", review {x}"))
+                    .unwrap_or_default(),
+            ));
+        }
+        out.push_str(&format!(
+            "  id: {}
+",
+            f.id
+        ));
+    }
+    out
+}
+
+async fn cmd_review_list(limit: usize) -> Result<()> {
+    let config = crate::config::load_cached()?;
+    let qs = crate::review::list_pending(&config, limit).await?;
+    print!("{}", render_review_list(&qs));
+    Ok(())
+}
+
+/// The terminal half of the human gate: refuses without a real terminal, then
+/// asks the person to type the fact's short id back before acting.
+async fn cmd_review_answer(id: &str, a: crate::review::Answer) -> Result<()> {
+    if !crate::review::at_terminal() {
+        anyhow::bail!(
+            "review answers need a person at a terminal: stdin and stdout must be a TTY.              An agent can list the queue and ask (mind_review), but not answer."
+        );
+    }
+    let config = crate::config::load_cached()?;
+    let verb = match a {
+        crate::review::Answer::Accept => "accept",
+        crate::review::Answer::Reject => "reject",
+    };
+    let want = crate::review::short_id(id);
+    print!("Type {want} to {verb} fact {id}: ");
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    if line.trim() != want {
+        anyhow::bail!("confirmation did not match; nothing changed");
+    }
+    let f = crate::review::answer(&config, id, a, "human:terminal").await?;
+    println!(
+        "{verb}ed: {} -> {} -> {}  (status {}, review {})",
+        f.subject,
+        f.predicate,
+        f.object,
+        f.status.as_deref().unwrap_or("?"),
+        f.review.as_deref().unwrap_or("?")
+    );
+    Ok(())
+}
+
+fn cmd_review_pin() -> Result<()> {
+    if !crate::review::at_terminal() {
+        anyhow::bail!("the review PIN can only be set by a person at a terminal");
+    }
+    let config = crate::config::load_cached()?;
+    let pin = rpassword::prompt_password("New review PIN (6+ characters): ")?;
+    let again = rpassword::prompt_password("Repeat it: ")?;
+    if pin != again {
+        anyhow::bail!("the two entries differ; PIN unchanged");
+    }
+    crate::review::set_pin(&config, &pin)?;
+    println!("Review PIN set. The viewer's review tab will ask for it.");
+    Ok(())
 }
 
 async fn cmd_ingest_session(path: &str, library: &str) -> Result<()> {
@@ -2373,6 +2511,15 @@ async fn cmd_migrate_v14_redo_duels(apply: bool, limit: Option<usize>) -> Result
             // applied winner matches the displayed one whenever the axis is
             // unchanged between display and apply.
             sort_facts_by_duel_winner(&mut fresh);
+            // An axis a person holds (a pending question or an accepted value)
+            // is theirs to settle, not this batch's.
+            if fresh
+                .iter()
+                .any(|f| crate::review::holds(f.review.as_deref()))
+            {
+                println!("    skipped: under human review (mgimind review)");
+                continue;
+            }
             // Nothing to do if the race already collapsed the axis to ≤1 live fact.
             for l in fresh.iter().skip(1) {
                 crate::duel::retire_loser(&config, *card, &l.id).await?;
@@ -3121,13 +3268,17 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
                 let pred = crate::storage::extract_string_pub(p, "predicate").unwrap_or_default();
                 let obj = crate::storage::extract_string_pub(p, "object").unwrap_or_default();
                 let valid_until = crate::storage::extract_string_pub(p, "valid_until");
+                let mark = crate::review::label(
+                    crate::storage::extract_string_pub(p, "status").as_deref(),
+                    crate::storage::extract_string_pub(p, "review").as_deref(),
+                );
                 // The Qdrant filter above already confines this scroll to
                 // valid + default-visible facts; `fact_valid_at` still adds the
                 // point-in-time check (`valid_until` can be in the past even on
                 // a point the status filter let through), so a superseded-but-
                 // not-yet-relabeled fact doesn't show as current.
                 if crate::knowledge::fact_valid_at(None, valid_until.as_deref(), &now) {
-                    let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}");
+                    let _ = writeln!(facts_summary, "  {subj} -> {pred} -> {obj}{mark}");
                     // §5c: every fact this briefing surfaces is inherited
                     // context, not a live observation - mark it so a duel
                     // challenger that merely re-asserts it (rather than being
@@ -3246,6 +3397,21 @@ pub(crate) async fn build_context(config: &crate::config::MindConfig) -> Result<
             "[Quarantine: {total} entries set aside ({by_reason}): \
              review with mind_quarantine(action=\"list\"), \
              keep with action=\"promote\", drop with action=\"expire\"]"
+        );
+    }
+
+    // Questions waiting on the user. The agent cannot answer them; it can
+    // remind the user, who answers at a terminal or in the viewer.
+    if let Ok(qs) = crate::review::list_pending(config, 200).await
+        && !qs.is_empty()
+    {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "[Human review: {} fact(s) wait on the user. Do not treat them as settled. \
+             Show them with mind_review(action=\"list\"); only the user can answer, with \
+             `mgimind review` in a terminal or the viewer's review tab]",
+            qs.len()
         );
     }
 
@@ -3464,7 +3630,14 @@ pub(crate) fn render_facts(subject: &str, facts: &[crate::knowledge::Fact]) -> S
     }
     let mut out = String::new();
     for f in facts {
-        let _ = writeln!(out, "  {} -> {} -> {}", f.subject, f.predicate, f.object);
+        let _ = writeln!(
+            out,
+            "  {} -> {} -> {}{}",
+            f.subject,
+            f.predicate,
+            f.object,
+            crate::review::label(f.status.as_deref(), f.review.as_deref())
+        );
         // Show the validity interval so `valid_until` is visible (a superseded
         // fact reads as [created .. valid_until), an active one as [created ..]).
         match (&f.created_at, &f.valid_until) {
@@ -3787,7 +3960,13 @@ fn render_profile(
     if !current.is_empty() {
         out.push_str(&format!("## Facts ({})\n", current.len()));
         for f in current.iter().take(40) {
-            out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+            out.push_str(&format!(
+                "- {} {} {}{}\n",
+                f.subject,
+                f.predicate,
+                f.object,
+                crate::review::label(f.status.as_deref(), f.review.as_deref())
+            ));
         }
         out.push('\n');
     }

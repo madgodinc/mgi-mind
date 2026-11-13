@@ -113,6 +113,12 @@ pub enum AuditOp {
     /// copied aside first and `note` names both the backup and that copy, so
     /// the rewind is itself on the record and nothing written before it is lost.
     BackupRestore,
+    /// An agent (or the duel, for a contested write) put a fact to a person.
+    /// `target` = fact id, `after` = the triple, `note` = the question.
+    ReviewAsk,
+    /// A person answered a review. `actor` names the human surface
+    /// (`human:terminal` or `human:viewer-pin`); `note` = the decision.
+    ReviewAnswer,
 }
 
 /// One audit record. Designed to be small enough that an unbounded log is fine
@@ -502,6 +508,8 @@ fn emit_pulse(event: &AuditEvent) {
         | AuditOp::SkillRemove
         | AuditOp::BlockRemove
         | AuditOp::BackupRestore
+        | AuditOp::ReviewAsk
+        | AuditOp::ReviewAnswer
         | AuditOp::SkipSecret => {
             let t = if !event.target.is_empty() {
                 format!("mem:{}", event.target)

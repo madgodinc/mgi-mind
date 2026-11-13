@@ -408,7 +408,13 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 if !current.is_empty() {
                     out.push_str("## Facts (current)\n");
                     for f in current {
-                        out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+                        out.push_str(&format!(
+                            "- {} {} {}{}\n",
+                            f.subject,
+                            f.predicate,
+                            f.object,
+                            crate::review::label(f.status.as_deref(), f.review.as_deref())
+                        ));
                     }
                     out.push('\n');
                 }
@@ -1052,6 +1058,37 @@ pub async fn dispatch(config: Option<&MindConfig>, name: &str, args: &Value) -> 
                 }
                 other => anyhow::bail!(
                     "mind_quarantine: unknown action '{other}' (expected list|show|promote|expire)"
+                ),
+            }
+        }
+        // Human review, agent side: list the open questions and ask new ones.
+        // There is deliberately no accept/reject action here: answers come
+        // only from a person (`mgimind review` at a terminal, or the viewer
+        // with the review PIN). See src/review.rs.
+        "mind_review" => {
+            let action = arg_str(args, "action")
+                .ok_or_else(|| anyhow::anyhow!("missing required 'action' (list|ask)"))?;
+            match action {
+                "list" => {
+                    let cfg = warm(true)?;
+                    let limit = arg_u64(args, "limit", 50) as usize;
+                    let qs = crate::review::list_pending(cfg, limit).await?;
+                    Ok(crate::cli::render_review_list(&qs))
+                }
+                "ask" => {
+                    let cfg = warm(true)?;
+                    let id = arg_str(args, "id")
+                        .ok_or_else(|| anyhow::anyhow!("action=ask requires 'id' (a fact id)"))?;
+                    let question = arg_str(args, "question")
+                        .ok_or_else(|| anyhow::anyhow!("action=ask requires 'question'"))?;
+                    let agent = arg_str(args, "agent").unwrap_or("mcp");
+                    crate::review::ask(cfg, id, question, agent).await?;
+                    Ok(format!(
+                        "Asked. Fact {id} now waits on a person; it cannot be invalidated or                          unseated by a duel until they answer. You cannot answer it yourself:                          tell the user to run `mgimind review list` / `mgimind review accept|reject <id>`                          in their terminal, or open the viewer's review tab."
+                    ))
+                }
+                other => anyhow::bail!(
+                    "mind_review: unknown action '{other}' (expected list|ask; answers are human-only)"
                 ),
             }
         }
@@ -1737,6 +1774,21 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "mind_review",
+            "description": "Ask the user about a fact, and see what waits on them. Use action=ask when a fact matters and you are not sure it is true, or two sources disagree: the fact is held (no duel, no invalidate) until the user answers. Contradicting writes the store cannot settle land here on their own. action=list shows open questions with the values they contradict. You cannot answer a question: only the user can, at their terminal (`mgimind review`) or in the viewer with their PIN.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "ask"], "description": "What to do" },
+                    "id": { "type": "string", "description": "Fact id, required for action=ask" },
+                    "question": { "type": "string", "description": "What to ask the user, required for action=ask" },
+                    "agent": { "type": "string", "description": "Who is asking (recorded in the audit log)" },
+                    "limit": { "type": "number", "default": 50, "description": "Max questions for action=list" }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
             "name": "mind_vault",
             "description": "Vault is terminal-only by design. This tool explains how the user runs the equivalent `mgimind vault` command: secret values never cross the MCP channel. Single tool with `action`: store (instructions for storing a secret), get (instructions for retrieving), list (instructions for listing keys). Replaces mind_vault_store / _get / _list.",
             "inputSchema": {
@@ -1982,8 +2034,8 @@ mod tests {
         let tools = tool_definitions();
         assert_eq!(
             tools.len(),
-            44,
-            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) + 1 (mind_block) + 1 (mind_skill) = 44"
+            45,
+            "tools/list = 30 legacy + 5 v1.1 consolidated + 1 v1.4 (mind_predicate) + 1 v1.5 (mind_outcome) + 1 (mind_recall_all) + 1 (mind_should_search) + 1 (mind_visualize) + 1 (mind_browse) + 1 (mind_restore) + 1 (mind_block) + 1 (mind_skill) + 1 (mind_review) = 45"
         );
         let deprecated = tools
             .iter()
@@ -1995,8 +2047,8 @@ mod tests {
         );
         let live_surface = tools.len() - deprecated;
         assert_eq!(
-            live_surface, 29,
-            "non-deprecated surface is 29 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore + mind_block + mind_skill)"
+            live_surface, 30,
+            "non-deprecated surface is 30 tools (20 v1.1 + mind_predicate + mind_outcome + mind_recall_all + mind_should_search + mind_visualize + mind_browse + mind_restore + mind_block + mind_skill + mind_review)"
         );
     }
 
@@ -2152,7 +2204,7 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            29,
+            30,
             "deprecated aliases must be hidden by default"
         );
         assert!(

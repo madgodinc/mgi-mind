@@ -870,6 +870,9 @@ async fn ensure_facts_indexes(client: &Qdrant) {
         // Which agent asserted the fact — keyword index so a multi-agent
         // deployment can scope "facts asserted by agent X".
         ("author", FieldType::Keyword),
+        // Human review state (`crate::review`): the open-questions queue
+        // filters on it.
+        ("review", FieldType::Keyword),
     ];
     for (field, ty) in fields {
         tracing::debug!(field, "ensure_facts_index: start");

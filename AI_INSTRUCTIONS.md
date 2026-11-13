@@ -526,7 +526,7 @@ The store exposes consolidated verbs with an `action` argument. Prefer them. The
 older single-purpose tools (`mind_fact_add`, `mind_quarantine_list`,
 `mind_session_start`, `mind_vault_get`, `mind_create`, and their siblings) still work
 but are deprecated and slated for removal in v2.0. Since v2.8.1 they are also hidden
-from `tools/list` by default (29 tools advertised instead of 44), so a client built
+from `tools/list` by default (30 tools advertised instead of 45), so a client built
 against this file should not expect to see them listed; calling one directly by name
 still dispatches. Set `MGIMIND_LIST_DEPRECATED=1` in the server's environment to list
 them again.
@@ -624,4 +624,4 @@ their AI client once; it starts Qdrant automatically.
    contents. Offer to save the useful parts with `mind_add`.
 
 ---
-MGI-Mind v2.9.0 | Apache-2.0 | Mad God Inc
+MGI-Mind v2.10.0 | Apache-2.0 | Mad God Inc
