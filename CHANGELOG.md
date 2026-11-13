@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.10.0 (2026-11-13)
 
 Answers the Agent Memory Atlas report re-pinned at v2.9.0.
 

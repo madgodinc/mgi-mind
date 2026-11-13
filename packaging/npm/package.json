@@ -1,6 +1,6 @@
 {
   "name": "mgi-mind",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Local memory server for AI agents over MCP: hybrid search, a fact graph with a duel rule, quarantine and a hash-chained audit log. Installs the prebuilt mgimind binary.",
   "mcpName": "io.github.madgodinc/mgi-mind",
   "license": "Apache-2.0",
